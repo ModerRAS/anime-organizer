@@ -32,10 +32,11 @@ use std::fs;
 use std::path::Path;
 
 /// 文件操作模式
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum OperationMode {
     /// 移动文件
     #[value(name = "move")]
+    #[default]
     Move,
     /// 复制文件
     #[value(name = "copy")]
@@ -52,12 +53,6 @@ impl std::fmt::Display for OperationMode {
             Self::Copy => write!(f, "copy"),
             Self::Link => write!(f, "link"),
         }
-    }
-}
-
-impl Default for OperationMode {
-    fn default() -> Self {
-        Self::Move
     }
 }
 
