@@ -182,13 +182,14 @@ fn run() -> Result<(), AppError> {
 
                 if cli.mode == OperationMode::Link {
                     if let Some(fallback_mode) = fallback_mode {
-                        if matches!(e, AppError::CrossDeviceLink | AppError::HardLinkNotSupported)
-                        {
+                        if matches!(
+                            e,
+                            AppError::CrossDeviceLink | AppError::HardLinkNotSupported
+                        ) {
                             if cli.verbose {
                                 eprintln!(
                                     "硬链接失败，回退为 {}: {}",
-                                    fallback_mode,
-                                    anime_file.original_path
+                                    fallback_mode, anime_file.original_path
                                 );
                             }
 
