@@ -36,13 +36,13 @@ use std::path::Path;
 pub enum OperationMode {
     /// 移动文件
     #[value(name = "move")]
-    #[default]
     Move,
     /// 复制文件
     #[value(name = "copy")]
     Copy,
     /// 创建硬链接
     #[value(name = "link")]
+    #[default]
     Link,
 }
 
@@ -308,6 +308,6 @@ mod tests {
 
     #[test]
     fn test_operation_mode_default() {
-        assert_eq!(OperationMode::default(), OperationMode::Move);
+        assert_eq!(OperationMode::default(), OperationMode::Link);
     }
 }

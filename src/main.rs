@@ -3,7 +3,7 @@
 //! 提供命令行界面，用于批量整理动漫视频文件。
 
 use anime_organizer::{error::AppError, FileOrganizer, FilenameParser, OperationMode};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use walkdir::WalkDir;
@@ -14,6 +14,23 @@ const DEFAULT_EXTENSIONS: &[&str] = &[".mp4", ".mkv", ".avi", ".mov", ".wmv", ".
 /// 跨平台动漫文件整理工具
 ///
 /// 自动识别并整理符合特定格式的动漫文件，支持移动、复制和硬链接模式。
+#[derive(Clone, Debug, ValueEnum)]
+enum FallbackMode {
+    /// 移动文件
+    Move,
+    /// 复制文件
+    Copy,
+}
+
+impl FallbackMode {
+    fn to_operation_mode(&self) -> OperationMode {
+        match self {
+            Self::Move => OperationMode::Move,
+            Self::Copy => OperationMode::Copy,
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "aniorg")]
 #[command(version = "1.0.0")]
@@ -23,11 +40,11 @@ const DEFAULT_EXTENSIONS: &[&str] = &[".mp4", ".mkv", ".avi", ".mov", ".wmv", ".
 用法: aniorg --source=<路径> [选项]
 
 硬链接说明：
-  使用 --mode=link 可创建硬链接，几乎不占用额外空间，但要求源和目标在同一文件系统。
+    使用 --mode=link 可创建硬链接，几乎不占用额外空间，但要求源和目标在同一文件系统。
 
 示例:
-  aniorg --source="D:\Downloads" --mode=link --target="E:\Anime"
-  aniorg --source="/media/下载" --dry-run --verbose"#)]
+    aniorg --source="D:\Downloads" --mode=link --target="E:\Anime"
+    aniorg --source="/media/下载" --dry-run --verbose"#)]
 struct Cli {
     /// 源目录路径（必填）
     #[arg(short, long, value_name = "PATH")]
@@ -38,8 +55,12 @@ struct Cli {
     target: Option<PathBuf>,
 
     /// 操作模式：move（移动）、copy（复制）、link（硬链接）
-    #[arg(short, long, value_enum, default_value = "move")]
+    #[arg(short, long, value_enum, default_value = "link")]
     mode: OperationMode,
+
+    /// 硬链接失败时的回退模式：move 或 copy（默认不回退）
+    #[arg(long, value_enum, value_name = "MODE")]
+    fallback_on_link_failure: Option<FallbackMode>,
 
     /// 仅预览不执行
     #[arg(long)]
@@ -65,6 +86,11 @@ fn main() {
 /// 主运行逻辑
 fn run() -> Result<(), AppError> {
     let cli = Cli::parse();
+
+    let fallback_mode = cli
+        .fallback_on_link_failure
+        .as_ref()
+        .map(FallbackMode::to_operation_mode);
 
     // 验证源目录
     if !cli.source.exists() {
@@ -152,8 +178,44 @@ fn run() -> Result<(), AppError> {
                 }
             }
             Err(e) => {
-                failed += 1;
-                eprintln!("处理文件失败 {}: {e}", anime_file.original_path);
+                let mut handled = false;
+
+                if cli.mode == OperationMode::Link {
+                    if let Some(fallback_mode) = fallback_mode {
+                        if matches!(e, AppError::CrossDeviceLink | AppError::HardLinkNotSupported)
+                        {
+                            if cli.verbose {
+                                eprintln!(
+                                    "硬链接失败，回退为 {}: {}",
+                                    fallback_mode,
+                                    anime_file.original_path
+                                );
+                            }
+
+                            match FileOrganizer::organize(
+                                &anime_file,
+                                &target,
+                                fallback_mode,
+                                cli.dry_run,
+                            ) {
+                                Ok(()) => {
+                                    succeeded += 1;
+                                    handled = true;
+                                }
+                                Err(e2) => {
+                                    failed += 1;
+                                    handled = true;
+                                    eprintln!("处理文件失败 {}: {e2}", anime_file.original_path);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !handled {
+                    failed += 1;
+                    eprintln!("处理文件失败 {}: {e}", anime_file.original_path);
+                }
             }
         }
     }

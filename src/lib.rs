@@ -13,11 +13,14 @@
 //! ## 快速开始
 //!
 //! ```bash
-//! # 移动模式（默认）
+//! # 硬链接模式（默认，零额外空间）
 //! aniorg --source="/path/to/downloads"
 //!
-//! # 硬链接模式（推荐，零额外空间）
+//! # 指定目标目录
 //! aniorg --source="/path/to/downloads" --mode=link --target="/path/to/anime"
+//!
+//! # 启用硬链接失败时的回退
+//! aniorg --source="/path/to/downloads" --fallback-on-link-failure=copy
 //!
 //! # 预览模式
 //! aniorg --source="/path/to/downloads" --dry-run --verbose

@@ -58,14 +58,14 @@ cargo build --release
 #### 基本用法
 
 ```bash
-# 移动模式（默认）
+# 硬链接模式（默认，零额外空间）
 aniorg --source="/path/to/downloads"
-
-# 硬链接模式（推荐，零额外空间）
-aniorg --source="/path/to/downloads" --mode=link --target="/path/to/anime"
 
 # 复制模式
 aniorg --source="/path/to/downloads" --mode=copy --target="/path/to/anime"
+
+# 启用硬链接失败回退为复制
+aniorg --source="/path/to/downloads" --fallback-on-link-failure=copy
 ```
 
 #### 预览模式
@@ -82,10 +82,11 @@ aniorg --source="/path/to/downloads" --dry-run --verbose
 |------|------|------|------|--------|------|
 | `--source` | `-s` | string | ✅ | - | 源目录路径 |
 | `--target` | `-t` | string | ❌ | source | 目标根目录 |
-| `--mode` | `-m` | enum | ❌ | move | 操作模式：move/copy/link |
+| `--mode` | `-m` | enum | ❌ | link | 操作模式：move/copy/link |
 | `--dry-run` | | bool | ❌ | false | 仅预览不执行 |
 | `--include-ext` | | string | ❌ | mp4,mkv,... | 处理的扩展名（逗号分隔） |
 | `--verbose` | `-v` | bool | ❌ | false | 显示详细日志 |
+| `--fallback-on-link-failure` | | enum | ❌ | - | 硬链接失败时回退模式：move 或 copy（默认不回退） |
 | `--help` | `-h` | bool | ❌ | false | 显示帮助 |
 | `--version` | `-V` | bool | ❌ | false | 显示版本 |
 
@@ -134,8 +135,8 @@ aniorg --source="/path/to/downloads" --dry-run --verbose
 
 此时可选择：
 - 将目标目录改为与源文件同一文件系统
-- 使用复制模式 (`--mode=copy`)
-- 使用移动模式 (`--mode=move`)
+- 使用复制模式 (`--mode=copy`)，或通过 `--fallback-on-link-failure=copy` 自动回退
+- 使用移动模式 (`--mode=move`)，或通过 `--fallback-on-link-failure=move` 自动回退
 
 ### 💡 使用示例
 
@@ -192,14 +193,14 @@ cargo build --release
 ### 🎯 Quick Start
 
 ```bash
-# Move mode (default)
+# Hard link mode (default, zero extra space)
 aniorg --source="/path/to/downloads"
-
-# Hard link mode (recommended, zero extra space)
-aniorg --source="/path/to/downloads" --mode=link --target="/path/to/anime"
 
 # Preview mode
 aniorg --source="/path/to/downloads" --dry-run --verbose
+
+# Enable automatic fallback to copy when hard link fails
+aniorg --source="/path/to/downloads" --fallback-on-link-failure=copy
 ```
 
 ### 📋 Arguments
@@ -208,10 +209,11 @@ aniorg --source="/path/to/downloads" --dry-run --verbose
 |----------|-------|------|----------|---------|-------------|
 | `--source` | `-s` | string | ✅ | - | Source directory path |
 | `--target` | `-t` | string | ❌ | source | Target root directory |
-| `--mode` | `-m` | enum | ❌ | move | Operation mode: move/copy/link |
+| `--mode` | `-m` | enum | ❌ | link | Operation mode: move/copy/link |
 | `--dry-run` | | bool | ❌ | false | Preview only, no actual changes |
 | `--include-ext` | | string | ❌ | mp4,mkv,... | File extensions to process |
 | `--verbose` | `-v` | bool | ❌ | false | Show detailed logs |
+| `--fallback-on-link-failure` | | enum | ❌ | - | Fallback when hard link fails: move or copy (disabled by default) |
 | `--help` | `-h` | bool | ❌ | false | Show help |
 | `--version` | `-V` | bool | ❌ | false | Show version |
 
@@ -222,6 +224,10 @@ Hard linking is the recommended mode:
 - **Zero Extra Space**: No additional disk space used
 - **Fast Operation**: Almost instant
 - **File Sync**: Source and target share the same content
+
+If hard linking fails due to cross-filesystem layouts or lack of support, you can opt in to automatic fallback via `--fallback-on-link-failure=copy` or `--fallback-on-link-failure=move`; otherwise, the failure is reported and the file is skipped.
+
+If hard linking fails due to cross-filesystem layouts or lack of support, the tool automatically falls back to copying to ensure the file is still organized.
 
 **Requirements:**
 1. Source and target must be on the same filesystem
