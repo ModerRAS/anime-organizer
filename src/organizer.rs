@@ -222,7 +222,8 @@ mod tests {
         let source_file = create_test_file(source_dir.path(), "test.mp4", "test content");
         let anime_info = create_test_anime_info(&source_file);
 
-        let result = FileOrganizer::organize(&anime_info, target_dir.path(), OperationMode::Move, false);
+        let result =
+            FileOrganizer::organize(&anime_info, target_dir.path(), OperationMode::Move, false);
 
         assert!(result.is_ok());
         let expected_path = target_dir.path().join("测试").join("01 [1080P].mp4");
@@ -239,7 +240,8 @@ mod tests {
         let source_file = create_test_file(source_dir.path(), "test.mp4", "test content");
         let anime_info = create_test_anime_info(&source_file);
 
-        let result = FileOrganizer::organize(&anime_info, target_dir.path(), OperationMode::Copy, false);
+        let result =
+            FileOrganizer::organize(&anime_info, target_dir.path(), OperationMode::Copy, false);
 
         assert!(result.is_ok());
         let expected_path = target_dir.path().join("测试").join("01 [1080P].mp4");
@@ -257,7 +259,8 @@ mod tests {
         let source_file = create_test_file(source_dir.path(), "test.mp4", "test content");
         let anime_info = create_test_anime_info(&source_file);
 
-        let result = FileOrganizer::organize(&anime_info, target_dir.path(), OperationMode::Move, true);
+        let result =
+            FileOrganizer::organize(&anime_info, target_dir.path(), OperationMode::Move, true);
 
         assert!(result.is_ok());
         assert!(source_file.exists());
@@ -273,7 +276,8 @@ mod tests {
         let source_file = create_test_file(source_dir.path(), "test.mp4", "test content");
         let anime_info = create_test_anime_info(&source_file);
 
-        let result = FileOrganizer::organize(&anime_info, &nested_target, OperationMode::Copy, false);
+        let result =
+            FileOrganizer::organize(&anime_info, &nested_target, OperationMode::Copy, false);
 
         assert!(result.is_ok());
         assert!(nested_target.join("测试").exists());
@@ -292,7 +296,8 @@ mod tests {
         fs::create_dir_all(&target_anime_dir).unwrap();
         create_test_file(&target_anime_dir, "01 [1080P].mp4", "old content");
 
-        let result = FileOrganizer::organize(&anime_info, target_dir.path(), OperationMode::Copy, false);
+        let result =
+            FileOrganizer::organize(&anime_info, target_dir.path(), OperationMode::Copy, false);
 
         assert!(result.is_ok());
         let expected_path = target_dir.path().join("测试").join("01 [1080P].mp4");

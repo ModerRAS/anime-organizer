@@ -25,9 +25,9 @@
 //!
 //! ## 模块结构
 //!
-//! - [`parser`]: 文件名解析模块
-//! - [`organizer`]: 文件整理模块
-//! - [`error`]: 错误处理模块
+//! - [`parser`] - 文件名解析模块
+//! - [`organizer`] - 文件整理模块
+//! - [`error`] - 错误处理模块
 
 pub mod error;
 pub mod organizer;

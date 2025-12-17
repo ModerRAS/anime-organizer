@@ -141,7 +141,9 @@ mod tests {
 
     #[test]
     fn test_parse_valid_filename_ani() {
-        let path = PathBuf::from("test/[ANi] 妖怪旅館營業中 貳 - 07 [1080P][Baha][WEB-DL][AAC AVC][CHT].mp4");
+        let path = PathBuf::from(
+            "test/[ANi] 妖怪旅館營業中 貳 - 07 [1080P][Baha][WEB-DL][AAC AVC][CHT].mp4",
+        );
         let result = FilenameParser::parse(&path).unwrap();
 
         assert_eq!(result.publisher, "ANi");
@@ -165,7 +167,9 @@ mod tests {
 
     #[test]
     fn test_parse_valid_filename_ember() {
-        let path = PathBuf::from("test/[EMBER] 进击的巨人 The Final Season - 01 [1080p][Multiple Subtitle].avi");
+        let path = PathBuf::from(
+            "test/[EMBER] 进击的巨人 The Final Season - 01 [1080p][Multiple Subtitle].avi",
+        );
         let result = FilenameParser::parse(&path).unwrap();
 
         assert_eq!(result.publisher, "EMBER");
