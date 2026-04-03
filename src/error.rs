@@ -42,6 +42,38 @@ pub enum AppError {
         /// 错误信息
         message: String,
     },
+
+    /// 元数据获取失败
+    #[error("元数据获取失败: {0}")]
+    MetadataFetchError(String),
+
+    /// NFO 生成失败
+    #[error("NFO 生成失败: {0}")]
+    NfoGenerationError(String),
+
+    /// 图片下载失败
+    #[error("图片下载失败: {0}")]
+    ImageDownloadError(String),
+
+    /// 别名库加载失败
+    #[error("别名库加载失败: {0}")]
+    AliasLoadError(String),
+
+    /// 无法匹配动画
+    #[error("无法匹配动画: {0}")]
+    AnimeNotFoundError(String),
+
+    /// Bangumi Dump 解析错误
+    #[error("Bangumi Dump 解析错误: {0}")]
+    BangumiParseError(String),
+
+    /// Wiki Infobox 解析错误
+    #[error("Wiki Infobox 解析错误: {0}")]
+    WikiParseError(String),
+
+    /// TMDB API 错误
+    #[error("TMDB API 错误: {0}")]
+    TmdbApiError(String),
 }
 
 /// 应用程序结果类型别名

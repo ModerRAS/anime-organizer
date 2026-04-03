@@ -9,6 +9,7 @@
 //! - **多种模式**: 支持移动、复制、硬链接三种操作模式
 //! - **跨平台**: 支持 Windows、Linux、macOS
 //! - **零依赖运行**: 单文件部署，无需外部配置
+//! - **元数据刮削**: 使用 Bangumi 和 TMDB 数据源生成 Kodi 兼容的 NFO 文件
 //!
 //! ## 快速开始
 //!
@@ -24,6 +25,9 @@
 //!
 //! # 预览模式
 //! aniorg --source="/path/to/downloads" --dry-run --verbose
+//!
+//! # 启用元数据刮削
+//! aniorg --source="/path/to/downloads" --scrape-metadata --tmdb-api-key=YOUR_KEY
 //! ```
 //!
 //! ## 模块结构
@@ -31,8 +35,12 @@
 //! - [`parser`] - 文件名解析模块
 //! - [`organizer`] - 文件整理模块
 //! - [`error`] - 错误处理模块
+//! - [`metadata`] - 元数据获取模块
+//! - [`nfo`] - NFO 文件生成模块
 
 pub mod error;
+pub mod metadata;
+pub mod nfo;
 pub mod organizer;
 pub mod parser;
 
