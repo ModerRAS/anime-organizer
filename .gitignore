@@ -21,3 +21,5 @@ target
 #.idea/
 # Ignore temporary working folder
 tmp/
+bangumi-archive
+.sisyphus

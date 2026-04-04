@@ -31,11 +31,19 @@
 //! - [`parser`] - 文件名解析模块
 //! - [`organizer`] - 文件整理模块
 //! - [`error`] - 错误处理模块
-
+/// - [`metadata`] - 元数据模块（Bangumi Archive / TMDB）
+/// - [`nfo`] - NFO 文件生成模块
+/// - [`scraper`] - 数据源刮削模块（需 `scraper` feature）
 pub mod error;
+pub mod metadata;
+pub mod nfo;
 pub mod organizer;
 pub mod parser;
+#[cfg(feature = "scraper")]
+pub mod scraper;
 
 pub use error::{AppError, Result};
+pub use metadata::AnimeMetadata;
+pub use nfo::{EpisodeNfo, NfoWriter, TvShowNfo};
 pub use organizer::{FileOrganizer, OperationMode};
 pub use parser::{AnimeFileInfo, FilenameParser};
