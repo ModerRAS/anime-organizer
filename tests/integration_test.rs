@@ -211,3 +211,105 @@ fn test_parser_to_organizer_path() {
         }
     }
 }
+
+/// 验证别名库数据质量：所有条目结构正确且数量 >= 500
+#[test]
+fn test_alias_library_data_quality() {
+    let lookup = AliasLookup::load(None).unwrap();
+    assert!(
+        lookup.len() >= 500,
+        "别名库条目应 >= 500，实际: {}",
+        lookup.len()
+    );
+
+    // 验证每个条目结构合法
+    for (key, entry) in lookup.entries() {
+        assert!(!key.is_empty(), "别名 key 不应为空");
+        assert!(entry.bangumi_id > 0, "bangumi_id 应为正数: {:?}", entry);
+        assert!(!entry.name.is_empty(), "name 不应为空: {:?}", entry);
+    }
+}
+
+/// 测试完整管道：文件名解析 → 别名查找 → 元数据构造 → NFO 生成 → 文件写入
+#[test]
+fn test_full_pipeline_parse_to_nfo_files() {
+    use anime_organizer::FilenameParser;
+
+    let lookup = AliasLookup::load(None).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+
+    let filename = "[ANi] Bocchi the Rock - 05 [1080P].mkv";
+    let path = std::path::PathBuf::from(filename);
+    let info = FilenameParser::parse(&path).expect("应能解析文件名");
+
+    // 用解析出的动画名查找别名
+    let entry = lookup
+        .find(&info.anime_name)
+        .or_else(|| lookup.find_fuzzy(&info.anime_name));
+
+    // 无论是否匹配到，都测试 NFO 生成管道
+    let meta = if let Some(e) = entry {
+        let mut m = AnimeMetadata::new(e.bangumi_id, e.name.clone());
+        m.title_cn = Some(info.anime_name.clone());
+        m.tmdb_id = e.tmdb_id;
+        m
+    } else {
+        AnimeMetadata::new(0, info.anime_name.clone())
+    };
+
+    // 生成 tvshow.nfo
+    let nfo = TvShowNfo::from(&meta);
+    let anime_dir = dir.path().join(&info.anime_name);
+    std::fs::create_dir_all(&anime_dir).unwrap();
+    NfoWriter::write_tvshow(&anime_dir, &nfo).unwrap();
+
+    let tvshow_nfo = anime_dir.join("tvshow.nfo");
+    assert!(tvshow_nfo.exists(), "tvshow.nfo 应已创建");
+    let content = std::fs::read_to_string(&tvshow_nfo).unwrap();
+    assert!(content.contains("<tvshow>"));
+    assert!(content.contains(&xml_escape(&info.anime_name)));
+
+    // 生成 episode.nfo
+    let ep = anime_organizer::nfo::EpisodeNfo {
+        title: format!("Episode {}", info.episode),
+        season: 1,
+        episode: info.episode.parse::<u32>().unwrap_or(1),
+        plot: None,
+        aired: None,
+        runtime: Some(24),
+        displayseason: None,
+        displayepisode: None,
+        uniqueid: Vec::new(),
+        credits: Vec::new(),
+        director: Vec::new(),
+        actor: Vec::new(),
+    };
+
+    let season_dir = anime_dir.join("Season 1");
+    std::fs::create_dir_all(&season_dir).unwrap();
+    let ep_nfo_path = season_dir.join(format!("{}.nfo", info.episode));
+    NfoWriter::write_episode(&ep_nfo_path, &ep).unwrap();
+    assert!(ep_nfo_path.exists(), "episode.nfo 应已创建");
+
+    let ep_content = std::fs::read_to_string(&ep_nfo_path).unwrap();
+    assert!(ep_content.contains("<episodedetails>"));
+    assert!(ep_content.contains(&format!("<episode>{}</episode>", ep.episode)));
+
+    // 写入模拟图片
+    let poster_path = anime_dir.join("poster.jpg");
+    NfoWriter::write_image(&poster_path, b"fake-poster-bytes").unwrap();
+    assert!(poster_path.exists());
+
+    let fanart_path = anime_dir.join("fanart.jpg");
+    NfoWriter::write_image(&fanart_path, b"fake-fanart-bytes").unwrap();
+    assert!(fanart_path.exists());
+}
+
+/// XML 转义辅助（与 nfo 模块中的逻辑一致）
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}

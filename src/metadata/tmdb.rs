@@ -409,3 +409,132 @@ fn normalize_title(value: &str) -> String {
         .flat_map(|ch| ch.to_lowercase())
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_show() -> TmdbTvShow {
+        TmdbTvShow {
+            id: 1429,
+            name: "Attack on Titan".to_string(),
+            original_name: Some("進撃の巨人".to_string()),
+            poster_path: Some("/hTP1DtLGFhgk4o1L0Tj0VkUmAIR.jpg".to_string()),
+            backdrop_path: Some("/rqbCbjB19amtOtFQbb3K2lgm2zv.jpg".to_string()),
+            overview: Some("Several hundred years ago...".to_string()),
+            first_air_date: Some("2013-04-07".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_poster_url() {
+        let client = TmdbClient::new("test-key".to_string());
+        let show = sample_show();
+        let url = client.poster_url(&show).unwrap();
+        assert_eq!(
+            url,
+            "https://image.tmdb.org/t/p/w500/hTP1DtLGFhgk4o1L0Tj0VkUmAIR.jpg"
+        );
+    }
+
+    #[test]
+    fn test_poster_url_none() {
+        let client = TmdbClient::new("test-key".to_string());
+        let mut show = sample_show();
+        show.poster_path = None;
+        assert!(client.poster_url(&show).is_none());
+    }
+
+    #[test]
+    fn test_backdrop_url() {
+        let client = TmdbClient::new("test-key".to_string());
+        let show = sample_show();
+        let url = client.backdrop_url(&show).unwrap();
+        assert_eq!(
+            url,
+            "https://image.tmdb.org/t/p/w1280/rqbCbjB19amtOtFQbb3K2lgm2zv.jpg"
+        );
+    }
+
+    #[test]
+    fn test_backdrop_url_none() {
+        let client = TmdbClient::new("test-key".to_string());
+        let mut show = sample_show();
+        show.backdrop_path = None;
+        assert!(client.backdrop_url(&show).is_none());
+    }
+
+    #[test]
+    fn test_image_url_sizes() {
+        let path = "/test.jpg";
+        assert_eq!(
+            TmdbClient::image_url(path, ImageSize::Original),
+            "https://image.tmdb.org/t/p/original/test.jpg"
+        );
+        assert_eq!(
+            TmdbClient::image_url(path, ImageSize::W500),
+            "https://image.tmdb.org/t/p/w500/test.jpg"
+        );
+        assert_eq!(
+            TmdbClient::image_url(path, ImageSize::W780),
+            "https://image.tmdb.org/t/p/w780/test.jpg"
+        );
+        assert_eq!(
+            TmdbClient::image_url(path, ImageSize::W1280),
+            "https://image.tmdb.org/t/p/w1280/test.jpg"
+        );
+    }
+
+    #[test]
+    fn test_anidb_image_url() {
+        let url = TmdbClient::anidb_image_url("12345.jpg");
+        assert_eq!(url, "https://cdn.anidb.net/images/main/12345.jpg");
+    }
+
+    #[test]
+    fn test_normalize_title() {
+        assert_eq!(normalize_title("Attack on Titan"), "attackontitan");
+        assert_eq!(normalize_title("進撃の巨人"), "進撃の巨人");
+        assert_eq!(normalize_title("  Spy x Family  "), "spyxfamily");
+    }
+
+    #[test]
+    fn test_tmdb_search_result_deserialization() {
+        let json = r#"{
+            "results": [
+                {
+                    "id": 1429,
+                    "name": "Attack on Titan",
+                    "original_name": "進撃の巨人",
+                    "poster_path": "/test.jpg",
+                    "backdrop_path": null,
+                    "overview": "A story",
+                    "first_air_date": "2013-04-07"
+                }
+            ]
+        }"#;
+
+        let result: TmdbSearchResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(result.results[0].id, 1429);
+        assert_eq!(result.results[0].name, "Attack on Titan");
+        assert!(result.results[0].backdrop_path.is_none());
+    }
+
+    #[test]
+    fn test_tmdb_images_deserialization() {
+        let json = r#"{
+            "id": 1429,
+            "posters": [
+                {"file_path": "/poster1.jpg", "width": 500, "height": 750, "vote_average": 5.5, "iso_639_1": "en"}
+            ],
+            "backdrops": []
+        }"#;
+
+        let images: TmdbImages = serde_json::from_str(json).unwrap();
+        assert_eq!(images.id, Some(1429));
+        assert_eq!(images.posters.len(), 1);
+        assert_eq!(images.posters[0].file_path, "/poster1.jpg");
+        assert!(images.backdrops.is_empty());
+    }
+}
