@@ -9,8 +9,10 @@
 //! 3. 跳过（不报错）
 
 use crate::error::{AppError, Result};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::LazyLock;
 
 /// TMDB API 基础 URL
 const TMDB_API_BASE: &str = "https://api.themoviedb.org/3";
@@ -20,6 +22,11 @@ const TMDB_IMAGE_BASE: &str = "https://image.tmdb.org/t/p";
 
 /// AniDB 图片 CDN
 const ANIDB_IMAGE_CDN: &str = "https://cdn.anidb.net/images/main";
+
+static ANIDB_IMAGE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"https://cdn\.anidb\.net/images/main/[^"']+"#)
+        .expect("AniDB 图片正则表达式编译失败")
+});
 
 /// TMDB 搜索结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +182,29 @@ impl TmdbClient {
         Ok(search_result.results)
     }
 
+    /// 按标题搜索并返回最佳匹配结果。
+    #[cfg(feature = "metadata")]
+    pub async fn find_by_title(
+        &self,
+        title: &str,
+        year: Option<i32>,
+    ) -> Result<Option<TmdbTvShow>> {
+        let results = self.search_tv(title, year).await?;
+        let normalized_title = normalize_title(title);
+
+        if let Some(exact) = results.iter().find(|show| {
+            normalize_title(&show.name) == normalized_title
+                || show
+                    .original_name
+                    .as_ref()
+                    .is_some_and(|original| normalize_title(original) == normalized_title)
+        }) {
+            return Ok(Some(exact.clone()));
+        }
+
+        Ok(results.into_iter().next())
+    }
+
     /// 按 TMDB ID 获取电视剧详情
     #[cfg(feature = "metadata")]
     pub async fn find_by_tmdb_id(&self, tmdb_id: u32) -> Result<TmdbTvShow> {
@@ -243,6 +273,34 @@ impl TmdbClient {
             .map(|path| format!("{}/{}{}", TMDB_IMAGE_BASE, ImageSize::W1280.as_str(), path))
     }
 
+    /// 为给定条目获取合适的海报 URL。
+    #[cfg(feature = "metadata")]
+    pub async fn best_poster_url(&self, show: &TmdbTvShow) -> Result<Option<String>> {
+        if let Some(url) = self.poster_url(show) {
+            return Ok(Some(url));
+        }
+
+        let images = self.get_images(show.id).await?;
+        Ok(images
+            .posters
+            .first()
+            .map(|image| Self::image_url(&image.file_path, ImageSize::W500)))
+    }
+
+    /// 为给定条目获取合适的背景图 URL。
+    #[cfg(feature = "metadata")]
+    pub async fn best_backdrop_url(&self, show: &TmdbTvShow) -> Result<Option<String>> {
+        if let Some(url) = self.backdrop_url(show) {
+            return Ok(Some(url));
+        }
+
+        let images = self.get_images(show.id).await?;
+        Ok(images
+            .backdrops
+            .first()
+            .map(|image| Self::image_url(&image.file_path, ImageSize::W1280)))
+    }
+
     /// 生成指定尺寸的图片 URL
     pub fn image_url(path: &str, size: ImageSize) -> String {
         format!("{}/{}{}", TMDB_IMAGE_BASE, size.as_str(), path)
@@ -251,6 +309,38 @@ impl TmdbClient {
     /// 生成 AniDB 图片 URL（回退用）
     pub fn anidb_image_url(filename: &str) -> String {
         format!("{ANIDB_IMAGE_CDN}/{filename}")
+    }
+
+    /// 根据 AniDB 条目页提取海报地址并下载。
+    #[cfg(feature = "metadata")]
+    pub async fn download_anidb_poster(&self, anidb_id: u32, save_path: &Path) -> Result<()> {
+        let page_url = format!("https://anidb.net/anime/{anidb_id}");
+        let resp = self
+            .http
+            .get(&page_url)
+            .send()
+            .await
+            .map_err(|e| AppError::ImageDownloadError(format!("AniDB 页面请求失败: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Err(AppError::ImageDownloadError(format!(
+                "AniDB 页面请求失败 (HTTP {})",
+                resp.status()
+            )));
+        }
+
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| AppError::ImageDownloadError(format!("读取 AniDB 页面失败: {e}")))?;
+
+        let Some(image_match) = ANIDB_IMAGE_REGEX.find(&body) else {
+            return Err(AppError::ImageDownloadError(format!(
+                "AniDB 页面中未找到图片地址: {anidb_id}"
+            )));
+        };
+
+        self.download_image(image_match.as_str(), save_path).await
     }
 
     /// 下载图片并保存到文件
@@ -310,4 +400,12 @@ impl TmdbClient {
 
         Ok(bytes.to_vec())
     }
+}
+
+fn normalize_title(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_alphanumeric() || ch.is_alphabetic())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
 }

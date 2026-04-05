@@ -3,10 +3,12 @@
 //! 提供动画名称别名到 Bangumi/TMDB/AniDB ID 的映射查找功能。
 //! 别名数据通过 `rust-embed` 嵌入到二进制文件中，也支持用户自定义别名文件覆盖。
 
+use regex::Regex;
 use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::LazyLock;
 
 use crate::error::{AppError, Result};
 
@@ -14,6 +16,23 @@ use crate::error::{AppError, Result};
 #[derive(Embed)]
 #[folder = "data/"]
 struct DataAssets;
+
+static RELEASE_TITLE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?P<title>.+?)\s+-\s+(?:ep?\s*)?\d{1,4}(?:[vV]\d+)?(?:\s.*)?$")
+        .expect("标题清洗正则表达式编译失败")
+});
+
+static FILE_EXTENSION_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\.[a-z0-9]{2,4}$").expect("扩展名清洗正则表达式编译失败"));
+
+static LEADING_GROUP_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:\[[^\]]+\]|【[^】]+】|\([^\)]+\))\s*").expect("发布组清洗正则表达式编译失败")
+});
+
+static TRAILING_TAG_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\s*(?:\[[^\]]*\]|【[^】]*】|\([^\)]*\)|（[^）]*）)+\s*$")
+        .expect("标签清洗正则表达式编译失败")
+});
 
 /// 别名条目
 ///
@@ -46,6 +65,7 @@ pub struct AliasEntry {
 /// ```
 pub struct AliasLookup {
     aliases: HashMap<String, AliasEntry>,
+    normalized_keys: HashMap<String, String>,
 }
 
 impl AliasLookup {
@@ -74,7 +94,14 @@ impl AliasLookup {
             aliases.extend(user_aliases);
         }
 
-        Ok(Self { aliases })
+        expand_generated_aliases(&mut aliases);
+
+        let normalized_keys = build_normalized_index(&aliases);
+
+        Ok(Self {
+            aliases,
+            normalized_keys,
+        })
     }
 
     /// 根据名称精确查找别名
@@ -84,11 +111,14 @@ impl AliasLookup {
 
     /// 根据名称模糊查找（大小写不敏感，去除空格）
     pub fn find_fuzzy(&self, name: &str) -> Option<&AliasEntry> {
-        let normalized = normalize_name(name);
-        self.aliases
-            .iter()
-            .find(|(k, _)| normalize_name(k) == normalized)
-            .map(|(_, v)| v)
+        extract_lookup_candidates(name)
+            .into_iter()
+            .find_map(|candidate| {
+                let normalized = normalize_name(&candidate);
+                self.normalized_keys
+                    .get(&normalized)
+                    .and_then(|key| self.aliases.get(key))
+            })
     }
 
     /// 根据 Bangumi ID 反向查找
@@ -108,11 +138,166 @@ impl AliasLookup {
     pub fn is_empty(&self) -> bool {
         self.aliases.is_empty()
     }
+
+    /// 返回底层别名表，供匹配/导出流程使用。
+    pub fn entries(&self) -> &HashMap<String, AliasEntry> {
+        &self.aliases
+    }
 }
 
-/// 规范化名称：转小写，去除空格和常见分隔符
+fn build_normalized_index(aliases: &HashMap<String, AliasEntry>) -> HashMap<String, String> {
+    let mut index = HashMap::new();
+
+    for (key, entry) in aliases {
+        index.insert(normalize_name(key), key.clone());
+        index
+            .entry(normalize_name(&entry.name))
+            .or_insert_with(|| key.clone());
+    }
+
+    index
+}
+
+fn expand_generated_aliases(aliases: &mut HashMap<String, AliasEntry>) {
+    let snapshot: Vec<(String, AliasEntry)> = aliases
+        .iter()
+        .map(|(key, entry)| (key.clone(), entry.clone()))
+        .collect();
+    let mut seen = aliases.keys().cloned().collect::<HashSet<_>>();
+
+    for (key, entry) in snapshot {
+        for variant in generate_alias_variants(&key, &entry.name) {
+            if variant.is_empty() || !seen.insert(variant.clone()) {
+                continue;
+            }
+
+            aliases.insert(variant, entry.clone());
+        }
+    }
+}
+
+fn generate_alias_variants(key: &str, canonical_name: &str) -> Vec<String> {
+    let mut variants = Vec::new();
+
+    for source in [key, canonical_name] {
+        push_variant(&mut variants, source.to_lowercase());
+        push_variant(&mut variants, normalize_spacing(source));
+        push_variant(&mut variants, normalize_punctuation(source));
+        push_variant(
+            &mut variants,
+            normalize_spacing(&normalize_punctuation(source)),
+        );
+        push_variant(&mut variants, remove_ascii_punctuation(source));
+        push_variant(&mut variants, source.replace('×', "x"));
+        push_variant(&mut variants, source.replace('×', "X"));
+        push_variant(&mut variants, source.replace('·', " "));
+        push_variant(&mut variants, source.replace('・', " "));
+        push_variant(&mut variants, source.replace('/', " "));
+        push_variant(&mut variants, source.replace('／', " "));
+        push_variant(&mut variants, source.replace(':', " "));
+        push_variant(&mut variants, source.replace(';', " "));
+        push_variant(&mut variants, source.replace('!', ""));
+        push_variant(&mut variants, source.replace('！', ""));
+        push_variant(&mut variants, source.replace('?', ""));
+        push_variant(&mut variants, source.replace('？', ""));
+        push_variant(&mut variants, source.replace('～', " "));
+        push_variant(&mut variants, source.replace('〜', " "));
+        push_variant(&mut variants, source.split_whitespace().collect::<String>());
+
+        if source.contains(':') {
+            let prefix = source.split(':').next().unwrap_or_default().trim();
+            push_variant(&mut variants, prefix.to_string());
+        }
+    }
+
+    variants
+}
+
+fn push_variant(variants: &mut Vec<String>, value: String) {
+    let trimmed = value.trim();
+    if trimmed.len() > 1 && !variants.iter().any(|item| item == trimmed) {
+        variants.push(trimmed.to_string());
+    }
+}
+
+fn normalize_spacing(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn normalize_punctuation(value: &str) -> String {
+    value
+        .replace(['·', '・'], " ")
+        .replace(['／', '/'], " ")
+        .replace(['：', ':'], " ")
+        .replace(['；', ';'], " ")
+        .replace(['～', '〜'], " ")
+        .replace('×', "x")
+}
+
+fn remove_ascii_punctuation(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_alphanumeric() || ch.is_alphabetic() || ch.is_whitespace())
+        .collect::<String>()
+}
+
+/// 规范化名称：去除发布组/标签/集数并压缩为可比对键。
 fn normalize_name(name: &str) -> String {
-    name.to_lowercase().replace([' ', '　', '・', '·'], "")
+    extract_lookup_candidates(name)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| compact_name(name))
+}
+
+fn extract_lookup_candidates(name: &str) -> Vec<String> {
+    let mut value = name.trim().to_string();
+
+    value = FILE_EXTENSION_REGEX.replace(&value, "").into_owned();
+
+    if RELEASE_TITLE_REGEX.is_match(&value) {
+        value = RELEASE_TITLE_REGEX
+            .replace(&value, "$title")
+            .trim()
+            .to_string();
+    }
+
+    loop {
+        let replaced = LEADING_GROUP_REGEX.replace(&value, "").to_string();
+        if replaced == value {
+            break;
+        }
+        value = replaced.trim().to_string();
+    }
+
+    value = TRAILING_TAG_REGEX.replace(&value, "").trim().to_string();
+
+    let mut candidates = Vec::new();
+    for part in value.split(['/', '／', '|']) {
+        let cleaned = part.trim();
+        if cleaned.is_empty() {
+            continue;
+        }
+        let compact = compact_name(cleaned);
+        if !compact.is_empty() && !candidates.contains(&compact) {
+            candidates.push(compact);
+        }
+    }
+
+    if candidates.is_empty() {
+        let compact = compact_name(&value);
+        if !compact.is_empty() {
+            candidates.push(compact);
+        }
+    }
+
+    candidates
+}
+
+fn compact_name(name: &str) -> String {
+    name.chars()
+        .filter(|ch| ch.is_alphanumeric() || ch.is_alphabetic())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
 }
 
 #[cfg(test)]
@@ -123,7 +308,7 @@ mod tests {
     fn test_load_bundled_aliases() {
         let lookup = AliasLookup::load(None).unwrap();
         assert!(!lookup.is_empty());
-        assert!(lookup.len() > 50);
+        assert!(lookup.len() > 500);
     }
 
     #[test]
@@ -182,5 +367,13 @@ mod tests {
     fn test_normalize_name() {
         assert_eq!(normalize_name("Hello World"), "helloworld");
         assert_eq!(normalize_name("ぼっち・ざ・ろっく"), "ぼっちざろっく");
+    }
+
+    #[test]
+    fn test_find_fuzzy_from_release_filename() {
+        let lookup = AliasLookup::load(None).unwrap();
+        let entry = lookup.find_fuzzy("[ANi] 进击的巨人 / Attack on Titan - 01 [1080P].mp4");
+        assert!(entry.is_some());
+        assert_eq!(entry.unwrap().name, "進撃の巨人");
     }
 }

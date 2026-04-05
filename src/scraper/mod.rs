@@ -18,5 +18,5 @@
 pub mod matcher;
 pub mod sources;
 
-pub use matcher::{MatchConfidence, MatchResult, Proposal};
+pub use matcher::{match_aliases, MatchConfidence, MatchResult, Proposal};
 pub use sources::{ScrapedAnime, ScrapedSource, Scraper};

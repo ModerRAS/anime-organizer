@@ -29,7 +29,7 @@
 use crate::error::{AppError, Result};
 use crate::parser::AnimeFileInfo;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// 文件操作模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -108,6 +108,17 @@ impl FileOrganizer {
         dry_run: bool,
     ) -> Result<()> {
         let target_dir = target_root.as_ref().join(&anime_file.anime_name);
+        Self::organize_to_dir(anime_file, target_dir, mode, dry_run).map(|_| ())
+    }
+
+    /// 将文件整理到指定目录，不额外附加动画名称目录。
+    pub fn organize_to_dir<P: AsRef<Path>>(
+        anime_file: &AnimeFileInfo,
+        target_dir: P,
+        mode: OperationMode,
+        dry_run: bool,
+    ) -> Result<PathBuf> {
+        let target_dir = target_dir.as_ref();
         let target_filename = anime_file.target_filename();
         let target_path = target_dir.join(&target_filename);
         let source_path = Path::new(&anime_file.original_path);
@@ -118,22 +129,18 @@ impl FileOrganizer {
                 anime_file.original_path,
                 target_path.display()
             );
-            return Ok(());
+            return Ok(target_path);
         }
 
-        // 创建目标目录
-        fs::create_dir_all(&target_dir)?;
+        fs::create_dir_all(target_dir)?;
 
-        // 如果目标文件已存在，先删除
         if target_path.exists() {
             fs::remove_file(&target_path)?;
         }
 
         match mode {
             OperationMode::Move => {
-                // 尝试重命名（同一文件系统）
                 if fs::rename(source_path, &target_path).is_err() {
-                    // 如果重命名失败（可能跨设备），则复制后删除
                     fs::copy(source_path, &target_path)?;
                     fs::remove_file(source_path)?;
                 }
@@ -146,7 +153,7 @@ impl FileOrganizer {
             }
         }
 
-        Ok(())
+        Ok(target_path)
     }
 
     /// 创建硬链接
@@ -309,5 +316,22 @@ mod tests {
     #[test]
     fn test_operation_mode_default() {
         assert_eq!(OperationMode::default(), OperationMode::Link);
+    }
+
+    #[test]
+    fn test_organize_to_dir_uses_exact_target_dir() {
+        let source_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let season_dir = target_dir.path().join("测试").join("Season 2");
+
+        let source_file = create_test_file(source_dir.path(), "test.mp4", "test content");
+        let anime_info = create_test_anime_info(&source_file);
+
+        let target_path =
+            FileOrganizer::organize_to_dir(&anime_info, &season_dir, OperationMode::Copy, false)
+                .unwrap();
+
+        assert_eq!(target_path, season_dir.join("01 [1080P].mp4"));
+        assert!(target_path.exists());
     }
 }

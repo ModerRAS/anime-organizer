@@ -1,15 +1,24 @@
 //! anime-organizer 命令行入口
 //!
-//! 提供命令行界面，用于批量整理动漫视频文件。
+//! 提供默认的文件整理模式，以及用于自动化工作流的 scraper 子命令。
 
-use anime_organizer::{error::AppError, FileOrganizer, FilenameParser, OperationMode};
+#[cfg(feature = "scraper")]
+use anime_organizer::scraper::{
+    matcher::{format_github_output, match_aliases},
+    ScrapedAnime, Scraper,
+};
+use anime_organizer::{
+    error::AppError, AnimeFileInfo, FileOrganizer, FilenameParser, OperationMode,
+};
 #[cfg(feature = "metadata")]
 use anime_organizer::{
-    metadata::{AliasLookup, BangumiClient, TmdbClient},
+    metadata::{tmdb::TmdbTvShow, AliasLookup, BangumiClient, TmdbClient},
     nfo::{EpisodeNfo, NfoWriter, TvShowNfo, UniqueId},
     AnimeMetadata,
 };
-use clap::{Parser, ValueEnum};
+#[cfg(feature = "scraper")]
+use clap::Subcommand;
+use clap::{Args, Parser, ValueEnum};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -18,43 +27,36 @@ use walkdir::WalkDir;
 const DEFAULT_EXTENSIONS: &[&str] = &[".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".rmvb"];
 
 /// 跨平台动漫文件整理工具
-///
-/// 自动识别并整理符合特定格式的动漫文件，支持移动、复制和硬链接模式。
-#[derive(Clone, Debug, ValueEnum)]
-enum FallbackMode {
-    /// 移动文件
-    Move,
-    /// 复制文件
-    Copy,
-}
-
-impl FallbackMode {
-    fn to_operation_mode(&self) -> OperationMode {
-        match self {
-            Self::Move => OperationMode::Move,
-            Self::Copy => OperationMode::Copy,
-        }
-    }
-}
-
 #[derive(Parser, Debug)]
 #[command(name = "aniorg")]
 #[command(version = "1.0.0")]
-#[command(about = "轻量级、跨平台命令行工具，专为动漫收藏者批量整理视频文件")]
+#[command(about = "轻量级、跨平台动漫文件整理工具")]
 #[command(long_about = r#"AnimeOrganizer v1.0.0 - 跨平台动漫文件整理工具
 
-用法: aniorg --source=<路径> [选项]
+默认模式用于批量整理动漫文件：
+    aniorg --source="D:\Downloads" --target="E:\Anime"
 
-硬链接说明：
-    使用 --mode=link 可创建硬链接，几乎不占用额外空间，但要求源和目标在同一文件系统。
+启用元数据刮削：
+    aniorg --source="D:\Downloads" --scrape-metadata --tmdb-api-key="..."
 
-示例:
-    aniorg --source="D:\Downloads" --mode=link --target="E:\Anime"
-    aniorg --source="/media/下载" --dry-run --verbose"#)]
+启用 scraper 子命令（需以 --features scraper 编译）：
+    aniorg scrape --days 7 --format json
+    aniorg match --input scraped.json --format github
+"#)]
 struct Cli {
-    /// 源目录路径（必填）
+    #[cfg(feature = "scraper")]
+    #[command(subcommand)]
+    command: Option<Commands>,
+
+    #[command(flatten)]
+    organize: OrganizeArgs,
+}
+
+#[derive(Args, Debug, Clone)]
+struct OrganizeArgs {
+    /// 源目录路径（整理模式必填）
     #[arg(short, long, value_name = "PATH")]
-    source: PathBuf,
+    source: Option<PathBuf>,
 
     /// 目标根目录（默认：与源目录相同）
     #[arg(short, long, value_name = "PATH")]
@@ -81,7 +83,7 @@ struct Cli {
     verbose: bool,
 
     /// 启用元数据刮削（生成 NFO 文件和下载封面图片）
-    #[arg(long)]
+    #[arg(long = "scrape-metadata", visible_alias = "刮削")]
     scrape_metadata: bool,
 
     /// TMDB API Key（用于下载封面图片）
@@ -100,70 +102,161 @@ struct Cli {
     #[arg(long)]
     force_overwrite: bool,
 
-    /// Bangumi dump 缓存目录
+    /// Bangumi 缓存目录
     #[arg(long, value_name = "PATH")]
     bangumi_cache: Option<PathBuf>,
+
+    /// Bangumi 元数据源路径（subject.jsonlines 或包含该文件的目录）
+    #[arg(long, value_name = "PATH")]
+    metadata_source: Option<PathBuf>,
 }
 
-/// 程序入口
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum FallbackMode {
+    /// 移动文件
+    Move,
+    /// 复制文件
+    Copy,
+}
+
+impl FallbackMode {
+    fn to_operation_mode(self) -> OperationMode {
+        match self {
+            Self::Move => OperationMode::Move,
+            Self::Copy => OperationMode::Copy,
+        }
+    }
+}
+
+#[cfg(feature = "scraper")]
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// 刮削最近的动画数据
+    Scrape(ScrapeArgs),
+    /// 根据刮削结果生成别名提案
+    Match(MatchArgs),
+}
+
+#[cfg(feature = "scraper")]
+#[derive(Args, Debug, Clone)]
+struct ScrapeArgs {
+    /// 向前回溯的天数
+    #[arg(long, default_value_t = 7)]
+    days: u32,
+
+    /// 输出格式
+    #[arg(long, value_enum, default_value = "json")]
+    format: ScrapeOutputFormat,
+
+    /// TMDB API Key；未传时尝试读取环境变量 TMDB_API_KEY
+    #[arg(long, value_name = "KEY")]
+    tmdb_api_key: Option<String>,
+}
+
+#[cfg(feature = "scraper")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ScrapeOutputFormat {
+    Json,
+    Pretty,
+}
+
+#[cfg(feature = "scraper")]
+#[derive(Args, Debug, Clone)]
+struct MatchArgs {
+    /// scrape 子命令生成的 JSON 文件
+    #[arg(long, value_name = "PATH")]
+    input: PathBuf,
+
+    /// 别名库 JSON 路径，未传时使用内置别名库
+    #[arg(long, value_name = "PATH")]
+    aliases: Option<PathBuf>,
+
+    /// 输出格式
+    #[arg(long, value_enum, default_value = "github")]
+    format: MatchOutputFormat,
+}
+
+#[cfg(feature = "scraper")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum MatchOutputFormat {
+    Json,
+    Github,
+}
+
 fn main() {
-    if let Err(e) = run() {
-        eprintln!("错误: {e}");
+    if let Err(error) = run() {
+        eprintln!("错误: {error}");
         std::process::exit(1);
     }
 }
 
-/// 主运行逻辑
-#[cfg(feature = "metadata")]
+#[cfg(feature = "scraper")]
 fn run() -> Result<(), AppError> {
     let cli = Cli::parse();
-    if cli.scrape_metadata {
-        let rt = tokio::runtime::Runtime::new()
+
+    if let Some(command) = cli.command {
+        return run_command(command);
+    }
+
+    run_organize_entry(cli.organize)
+}
+
+#[cfg(not(feature = "scraper"))]
+fn run() -> Result<(), AppError> {
+    let cli = Cli::parse();
+    run_organize_entry(cli.organize)
+}
+
+#[cfg(feature = "metadata")]
+fn run_organize_entry(args: OrganizeArgs) -> Result<(), AppError> {
+    if args.scrape_metadata {
+        let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| AppError::MetadataFetchError(format!("创建异步运行时失败: {e}")))?;
-        rt.block_on(run_with_metadata(cli))
+        runtime.block_on(run_with_metadata(args))
     } else {
-        run_organize(cli)
+        run_organize(args)
     }
 }
 
 #[cfg(not(feature = "metadata"))]
-fn run() -> Result<(), AppError> {
-    let cli = Cli::parse();
-    if cli.scrape_metadata {
+fn run_organize_entry(args: OrganizeArgs) -> Result<(), AppError> {
+    if args.scrape_metadata {
         return Err(AppError::MetadataFetchError(
             "元数据功能未启用，请使用 --features metadata 编译".to_string(),
         ));
     }
-    run_organize(cli)
+
+    run_organize(args)
+}
+
+#[cfg(feature = "scraper")]
+fn run_command(command: Commands) -> Result<(), AppError> {
+    match command {
+        Commands::Scrape(args) => {
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|e| AppError::MetadataFetchError(format!("创建异步运行时失败: {e}")))?;
+            runtime.block_on(run_scrape(args))
+        }
+        Commands::Match(args) => run_match(args),
+    }
 }
 
 /// 仅文件整理流程（无元数据）
-fn run_organize(cli: Cli) -> Result<(), AppError> {
-    let fallback_mode = cli
+fn run_organize(args: OrganizeArgs) -> Result<(), AppError> {
+    let (source, target) = resolve_source_and_target(&args)?;
+    let fallback_mode = args
         .fallback_on_link_failure
-        .as_ref()
         .map(FallbackMode::to_operation_mode);
+    let extensions = build_extensions(&args.include_ext);
 
-    // 验证源目录
-    if !cli.source.exists() {
-        return Err(AppError::SourceNotFound(cli.source));
-    }
-
-    // 确定目标目录
-    let target = cli.target.unwrap_or_else(|| cli.source.clone());
-    if !target.exists() {
-        return Err(AppError::TargetNotFound(target));
-    }
-
-    let extensions = build_extensions(&cli.include_ext);
     let mut processed = 0;
     let mut succeeded = 0;
     let mut failed = 0;
 
-    for entry in WalkDir::new(&cli.source)
+    for entry in WalkDir::new(&source)
         .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
+        .filter_map(|item| item.ok())
+        .filter(|item| item.file_type().is_file())
     {
         let path = entry.path();
         if !has_valid_extension(path, &extensions) {
@@ -173,7 +266,7 @@ fn run_organize(cli: Cli) -> Result<(), AppError> {
         let anime_file = match FilenameParser::parse(path) {
             Some(info) => info,
             None => {
-                if cli.verbose {
+                if args.verbose {
                     eprintln!(
                         "跳过：无法解析文件名 {}",
                         path.file_name().unwrap_or_default().to_string_lossy()
@@ -187,10 +280,10 @@ fn run_organize(cli: Cli) -> Result<(), AppError> {
         match organize_file(
             &anime_file,
             &target,
-            cli.mode,
-            cli.dry_run,
+            args.mode,
+            args.dry_run,
             fallback_mode,
-            cli.verbose,
+            args.verbose,
         ) {
             Ok(()) => succeeded += 1,
             Err(_) => failed += 1,
@@ -203,155 +296,128 @@ fn run_organize(cli: Cli) -> Result<(), AppError> {
 
 /// 带元数据刮削的流程
 #[cfg(feature = "metadata")]
-async fn run_with_metadata(cli: Cli) -> Result<(), AppError> {
-    let fallback_mode = cli
+async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
+    let (source, target) = resolve_source_and_target(&args)?;
+    let fallback_mode = args
         .fallback_on_link_failure
-        .as_ref()
         .map(FallbackMode::to_operation_mode);
+    let extensions = build_extensions(&args.include_ext);
 
-    if !cli.source.exists() {
-        return Err(AppError::SourceNotFound(cli.source));
-    }
-
-    let target = cli.target.unwrap_or_else(|| cli.source.clone());
-    if !target.exists() {
-        return Err(AppError::TargetNotFound(target));
-    }
-
-    let extensions = build_extensions(&cli.include_ext);
-
-    // 加载别名库
-    let alias_lookup = AliasLookup::load(cli.alias_file.as_deref())?;
-    if cli.verbose {
+    let alias_lookup = AliasLookup::load(args.alias_file.as_deref())?;
+    if args.verbose {
         eprintln!("已加载 {} 条别名", alias_lookup.len());
     }
 
-    // 初始化 Bangumi 客户端
-    let bangumi = BangumiClient::new(cli.bangumi_cache);
-
-    // 初始化 TMDB 客户端（可选）
-    let tmdb = cli
-        .tmdb_api_key
-        .as_ref()
-        .map(|key| TmdbClient::new(key.clone()));
-
-    // 收集同名动画文件，按动画名分组
-    let mut anime_groups: HashMap<String, Vec<anime_organizer::AnimeFileInfo>> = HashMap::new();
-    for entry in WalkDir::new(&cli.source)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-    {
-        let path = entry.path();
-        if !has_valid_extension(path, &extensions) {
-            continue;
+    let bangumi =
+        BangumiClient::with_source(args.bangumi_cache.clone(), args.metadata_source.clone());
+    match bangumi.prepare_index().await {
+        Ok(count) => {
+            if args.verbose {
+                eprintln!("Bangumi 索引已就绪，共 {} 条动画条目", count);
+            }
         }
-        if let Some(info) = FilenameParser::parse(path) {
-            anime_groups
-                .entry(info.anime_name.clone())
-                .or_default()
-                .push(info);
-        } else if cli.verbose {
-            eprintln!(
-                "跳过：无法解析文件名 {}",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            );
+        Err(error) => {
+            if args.verbose {
+                eprintln!("Bangumi 本地索引准备失败，将回退到在线查询: {error}");
+            }
         }
     }
 
+    let tmdb = args.tmdb_api_key.clone().map(TmdbClient::new);
+    if args.scrape_metadata && !args.no_images && tmdb.is_none() && args.verbose {
+        eprintln!("未提供 TMDB API Key，将跳过 TMDB 图片下载，仅保留 NFO 生成");
+    }
+
+    let anime_groups = collect_anime_groups(&source, &extensions, args.verbose);
     let mut processed = 0;
     let mut succeeded = 0;
     let mut failed = 0;
-    // 元数据缓存（避免重复查询同一动画）
     let mut metadata_cache: HashMap<String, Option<AnimeMetadata>> = HashMap::new();
 
-    for (anime_name, files) in &anime_groups {
-        // 查找别名 → 获取元数据
-        if !metadata_cache.contains_key(anime_name) {
-            let meta = fetch_anime_metadata(
-                anime_name,
+    for (anime_name, files) in anime_groups {
+        let Some(first_file) = files.first() else {
+            continue;
+        };
+
+        let series_name = first_file.series_name();
+        let season_number = first_file.season_number().unwrap_or(1);
+        let anime_root = target.join(&series_name);
+
+        let metadata = if let Some(cached) = metadata_cache.get(&anime_name) {
+            cached.clone()
+        } else {
+            let fetched = fetch_anime_metadata(
+                &anime_name,
+                &series_name,
                 &alias_lookup,
                 &bangumi,
                 tmdb.as_ref(),
-                cli.verbose,
+                args.verbose,
             )
             .await;
-            metadata_cache.insert(anime_name.clone(), meta);
-        }
+            metadata_cache.insert(anime_name.clone(), fetched.clone());
+            fetched
+        };
 
-        let meta = metadata_cache.get(anime_name).and_then(|m| m.as_ref());
-
-        // 生成 tvshow.nfo（每个动画只生成一次）
-        if let Some(meta) = meta {
-            let anime_dir = target.join(anime_name);
-            let tvshow_nfo_path = anime_dir.join("tvshow.nfo");
-
-            if cli.force_overwrite || !tvshow_nfo_path.exists() {
+        if let Some(ref meta) = metadata {
+            let tvshow_nfo_path = anime_root.join("tvshow.nfo");
+            if args.force_overwrite || !tvshow_nfo_path.exists() {
                 let nfo = TvShowNfo::from(meta);
-                if cli.dry_run {
-                    if cli.verbose {
+                if args.dry_run {
+                    if args.verbose {
                         eprintln!("[dry-run] 生成 tvshow.nfo: {}", tvshow_nfo_path.display());
                     }
                 } else {
-                    match NfoWriter::write_tvshow(&anime_dir, &nfo) {
-                        Ok(()) => {
-                            if cli.verbose {
-                                eprintln!("已生成 tvshow.nfo: {}", tvshow_nfo_path.display());
-                            }
-                        }
-                        Err(e) => eprintln!("生成 tvshow.nfo 失败: {e}"),
+                    NfoWriter::write_tvshow(&anime_root, &nfo)?;
+                    if args.verbose {
+                        eprintln!("已生成 tvshow.nfo: {}", tvshow_nfo_path.display());
                     }
                 }
             }
 
-            // 下载图片
-            if !cli.no_images && !cli.dry_run {
+            if !args.no_images && !args.dry_run {
                 download_images(
                     meta,
-                    &anime_dir,
+                    &anime_root,
+                    season_number,
                     tmdb.as_ref(),
-                    cli.force_overwrite,
-                    cli.verbose,
+                    args.force_overwrite,
+                    args.verbose,
                 )
                 .await;
             }
         }
 
-        // 整理每个文件并生成 episode.nfo
         for file in files {
+            let season_dir = target.join(file.series_name()).join(file.season_dir_name());
             processed += 1;
 
-            match organize_file(
-                file,
-                &target,
-                cli.mode,
-                cli.dry_run,
+            match organize_file_to_dir(
+                &file,
+                &season_dir,
+                args.mode,
+                args.dry_run,
                 fallback_mode,
-                cli.verbose,
+                args.verbose,
             ) {
-                Ok(()) => {
+                Ok(target_path) => {
                     succeeded += 1;
 
-                    // 生成 episode.nfo
-                    if let Some(m) = meta {
-                        let episode_nfo_path = target
-                            .join(anime_name)
-                            .join(file.target_filename())
-                            .with_extension("nfo");
-
-                        if cli.force_overwrite || !episode_nfo_path.exists() {
-                            let ep_nfo = create_episode_nfo(file, m);
-                            if cli.dry_run {
-                                if cli.verbose {
+                    if let Some(ref meta) = metadata {
+                        let episode_nfo_path = target_path.with_extension("nfo");
+                        if args.force_overwrite || !episode_nfo_path.exists() {
+                            let episode_nfo = create_episode_nfo(&file, meta);
+                            if args.dry_run {
+                                if args.verbose {
                                     eprintln!(
                                         "[dry-run] 生成 episode.nfo: {}",
                                         episode_nfo_path.display()
                                     );
                                 }
-                            } else if let Err(e) =
-                                NfoWriter::write_episode(&episode_nfo_path, &ep_nfo)
+                            } else if let Err(error) =
+                                NfoWriter::write_episode(&episode_nfo_path, &episode_nfo)
                             {
-                                eprintln!("生成 episode.nfo 失败: {e}");
+                                eprintln!("生成 episode.nfo 失败: {error}");
                             }
                         }
                     }
@@ -363,126 +429,267 @@ async fn run_with_metadata(cli: Cli) -> Result<(), AppError> {
 
     println!("处理完成：总计{processed}个文件，成功{succeeded}个，失败{failed}个");
     if !metadata_cache.is_empty() {
-        let matched = metadata_cache.values().filter(|v| v.is_some()).count();
+        let matched = metadata_cache
+            .values()
+            .filter(|item| item.is_some())
+            .count();
         println!("元数据匹配：{matched}/{} 部动画", metadata_cache.len());
     }
 
     Ok(())
 }
 
-/// 获取动画元数据
 #[cfg(feature = "metadata")]
 async fn fetch_anime_metadata(
     anime_name: &str,
+    series_name: &str,
     alias_lookup: &AliasLookup,
     bangumi: &BangumiClient,
     tmdb: Option<&TmdbClient>,
     verbose: bool,
 ) -> Option<AnimeMetadata> {
-    // 1. 精确查找别名
-    let alias = alias_lookup
-        .find(anime_name)
-        .or_else(|| alias_lookup.find_fuzzy(anime_name));
+    let mut metadata = None;
+    let mut anidb_id = None;
+
+    let alias = [anime_name, series_name].into_iter().find_map(|query| {
+        alias_lookup
+            .find(query)
+            .or_else(|| alias_lookup.find_fuzzy(query))
+    });
 
     if let Some(entry) = alias {
         if verbose {
             eprintln!(
-                "别名匹配: {} → {} (bangumi_id={})",
+                "别名匹配: {} -> {} (bangumi_id={})",
                 anime_name, entry.name, entry.bangumi_id
             );
         }
 
-        // 2. 从 Bangumi Archive 获取元数据
         match bangumi.fetch_metadata(entry.bangumi_id).await {
             Ok(mut meta) => {
                 meta.tmdb_id = entry.tmdb_id;
                 meta.anidb_id = entry.anidb_id;
-
-                // 3. 如果有 TMDB ID 且有 TMDB 客户端，尝试获取额外信息
-                if let (Some(tmdb_id), Some(tmdb_client)) = (entry.tmdb_id, tmdb) {
-                    if let Ok(show) = tmdb_client.find_by_tmdb_id(tmdb_id).await {
-                        if verbose {
-                            eprintln!("TMDB 匹配: {} (tmdb_id={})", show.name, tmdb_id);
-                        }
-                    }
-                }
-
-                return Some(meta);
+                metadata = Some(meta);
+                anidb_id = entry.anidb_id;
             }
-            Err(e) => {
+            Err(error) => {
                 if verbose {
-                    eprintln!("Bangumi 获取失败 {}: {e}", entry.bangumi_id);
+                    eprintln!("Bangumi 获取失败 {}: {error}", entry.bangumi_id);
                 }
             }
         }
-    } else if verbose {
-        eprintln!("未找到别名: {anime_name}");
+    }
+
+    if metadata.is_none() {
+        let subject = bangumi
+            .find_by_name(anime_name)
+            .ok()
+            .flatten()
+            .or_else(|| bangumi.find_by_name(series_name).ok().flatten())
+            .or_else(|| {
+                bangumi
+                    .search(series_name)
+                    .ok()
+                    .and_then(|mut matches| matches.drain(..).next())
+            });
+
+        if let Some(subject) = subject {
+            if verbose {
+                eprintln!("Bangumi 名称匹配: {} -> {}", anime_name, subject.name);
+            }
+            if let Ok(meta) = bangumi.fetch_metadata(subject.id).await {
+                metadata = Some(meta);
+            }
+        }
+    }
+
+    let mut metadata = metadata?;
+    if metadata.anidb_id.is_none() {
+        metadata.anidb_id = anidb_id;
+    }
+
+    if metadata.tmdb_id.is_none() {
+        if let Some(tmdb_client) = tmdb {
+            let year = metadata.air_date.as_deref().and_then(parse_year);
+            for candidate in unique_titles(
+                &metadata.title,
+                metadata.title_cn.as_deref(),
+                Some(&metadata.original_title),
+            ) {
+                match tmdb_client.find_by_title(&candidate, year).await {
+                    Ok(Some(show)) => {
+                        metadata.tmdb_id = Some(show.id);
+                        if verbose {
+                            eprintln!(
+                                "TMDB 搜索匹配: {} -> {} (tmdb_id={})",
+                                candidate, show.name, show.id
+                            );
+                        }
+                        break;
+                    }
+                    Ok(None) => continue,
+                    Err(error) => {
+                        if verbose {
+                            eprintln!("TMDB 搜索失败 {}: {error}", candidate);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Some(metadata)
+}
+
+#[cfg(feature = "metadata")]
+async fn download_images(
+    meta: &AnimeMetadata,
+    anime_root: &Path,
+    season_number: u32,
+    tmdb: Option<&TmdbClient>,
+    force: bool,
+    verbose: bool,
+) {
+    let root_poster_path = anime_root.join("poster.jpg");
+    let season_poster_path = anime_root.join(format!("season{season_number:02}-poster.jpg"));
+    let fanart_path = anime_root.join("fanart.jpg");
+    let mut poster_written = false;
+
+    if let Some(tmdb_client) = tmdb {
+        if let Some(show) = resolve_tmdb_show(meta, tmdb_client, verbose).await {
+            if let Ok(Some(url)) = tmdb_client.best_poster_url(&show).await {
+                let needs_root = force || !root_poster_path.exists();
+                let needs_season = force || !season_poster_path.exists();
+                if needs_root || needs_season {
+                    match tmdb_client.download_image_bytes(&url).await {
+                        Ok(bytes) => {
+                            if needs_root {
+                                if let Err(error) =
+                                    NfoWriter::write_image(&root_poster_path, &bytes)
+                                {
+                                    eprintln!("海报写入失败: {error}");
+                                } else if verbose {
+                                    eprintln!("已下载海报: {}", root_poster_path.display());
+                                }
+                            }
+
+                            if needs_season {
+                                if let Err(error) =
+                                    NfoWriter::write_image(&season_poster_path, &bytes)
+                                {
+                                    eprintln!("季海报写入失败: {error}");
+                                } else if verbose {
+                                    eprintln!("已下载季海报: {}", season_poster_path.display());
+                                }
+                            }
+
+                            poster_written = true;
+                        }
+                        Err(error) => eprintln!("海报下载失败: {error}"),
+                    }
+                } else {
+                    poster_written = true;
+                }
+            }
+
+            if force || !fanart_path.exists() {
+                match tmdb_client.best_backdrop_url(&show).await {
+                    Ok(Some(url)) => match tmdb_client.download_image_bytes(&url).await {
+                        Ok(bytes) => {
+                            if let Err(error) = NfoWriter::write_image(&fanart_path, &bytes) {
+                                eprintln!("背景图写入失败: {error}");
+                            } else if verbose {
+                                eprintln!("已下载背景图: {}", fanart_path.display());
+                            }
+                        }
+                        Err(error) => eprintln!("背景图下载失败: {error}"),
+                    },
+                    Ok(None) => {}
+                    Err(error) => eprintln!("背景图获取失败: {error}"),
+                }
+            }
+        }
+    }
+
+    if !poster_written && (force || !root_poster_path.exists()) {
+        if let (Some(tmdb_client), Some(anidb_id)) = (tmdb, meta.anidb_id) {
+            match tmdb_client
+                .download_anidb_poster(anidb_id, &root_poster_path)
+                .await
+            {
+                Ok(()) => {
+                    if verbose {
+                        eprintln!("已从 AniDB 下载海报: {}", root_poster_path.display());
+                    }
+
+                    if force || !season_poster_path.exists() {
+                        match std::fs::read(&root_poster_path) {
+                            Ok(bytes) => {
+                                if let Err(error) =
+                                    NfoWriter::write_image(&season_poster_path, &bytes)
+                                {
+                                    eprintln!("季海报写入失败: {error}");
+                                }
+                            }
+                            Err(error) => eprintln!("读取 AniDB 海报失败: {error}"),
+                        }
+                    }
+                }
+                Err(error) => {
+                    if verbose {
+                        eprintln!("AniDB 回退失败 (aid={anidb_id}): {error}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "metadata")]
+async fn resolve_tmdb_show(
+    meta: &AnimeMetadata,
+    tmdb_client: &TmdbClient,
+    verbose: bool,
+) -> Option<TmdbTvShow> {
+    if let Some(tmdb_id) = meta.tmdb_id {
+        match tmdb_client.find_by_tmdb_id(tmdb_id).await {
+            Ok(show) => return Some(show),
+            Err(error) => {
+                if verbose {
+                    eprintln!("TMDB 详情获取失败 (tmdb_id={tmdb_id}): {error}");
+                }
+            }
+        }
+    }
+
+    let year = meta.air_date.as_deref().and_then(parse_year);
+    for title in unique_titles(
+        &meta.title,
+        meta.title_cn.as_deref(),
+        Some(&meta.original_title),
+    ) {
+        match tmdb_client.find_by_title(&title, year).await {
+            Ok(Some(show)) => return Some(show),
+            Ok(None) => continue,
+            Err(error) => {
+                if verbose {
+                    eprintln!("TMDB 搜索失败 {}: {error}", title);
+                }
+            }
+        }
     }
 
     None
 }
 
-/// 下载封面图片
 #[cfg(feature = "metadata")]
-async fn download_images(
-    meta: &AnimeMetadata,
-    anime_dir: &Path,
-    tmdb: Option<&TmdbClient>,
-    force: bool,
-    verbose: bool,
-) {
-    let Some(tmdb_client) = tmdb else { return };
-    let Some(tmdb_id) = meta.tmdb_id else { return };
-
-    // 尝试获取 TMDB 详情和图片
-    match tmdb_client.find_by_tmdb_id(tmdb_id).await {
-        Ok(show) => {
-            // 下载海报
-            let poster_path = anime_dir.join("poster.jpg");
-            if force || !poster_path.exists() {
-                if let Some(url) = tmdb_client.poster_url(&show) {
-                    match tmdb_client.download_image(&url, &poster_path).await {
-                        Ok(()) => {
-                            if verbose {
-                                eprintln!("已下载海报: {}", poster_path.display());
-                            }
-                        }
-                        Err(e) => eprintln!("海报下载失败: {e}"),
-                    }
-                }
-            }
-
-            // 下载背景图
-            let fanart_path = anime_dir.join("fanart.jpg");
-            if force || !fanart_path.exists() {
-                if let Some(url) = tmdb_client.backdrop_url(&show) {
-                    match tmdb_client.download_image(&url, &fanart_path).await {
-                        Ok(()) => {
-                            if verbose {
-                                eprintln!("已下载背景图: {}", fanart_path.display());
-                            }
-                        }
-                        Err(e) => eprintln!("背景图下载失败: {e}"),
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            if verbose {
-                eprintln!("TMDB 获取失败 (tmdb_id={tmdb_id}): {e}");
-            }
-        }
-    }
-}
-
-/// 创建单集 NFO
-fn create_episode_nfo(file: &anime_organizer::AnimeFileInfo, meta: &AnimeMetadata) -> EpisodeNfo {
-    let episode_num: u32 = file.episode.trim().parse().unwrap_or(0);
+fn create_episode_nfo(file: &AnimeFileInfo, meta: &AnimeMetadata) -> EpisodeNfo {
+    let episode_number = file.episode.trim().parse().unwrap_or(0);
 
     EpisodeNfo {
         title: format!("Episode {}", file.episode.trim()),
-        season: 1,
-        episode: episode_num,
+        season: file.season_number().unwrap_or(1),
+        episode: episode_number,
         plot: None,
         aired: meta.air_date.clone(),
         runtime: None,
@@ -499,55 +706,129 @@ fn create_episode_nfo(file: &anime_organizer::AnimeFileInfo, meta: &AnimeMetadat
     }
 }
 
-/// 整理单个文件（含回退逻辑）
 fn organize_file(
-    anime_file: &anime_organizer::AnimeFileInfo,
+    anime_file: &AnimeFileInfo,
     target: &Path,
     mode: OperationMode,
     dry_run: bool,
     fallback_mode: Option<OperationMode>,
     verbose: bool,
 ) -> Result<(), AppError> {
-    match FileOrganizer::organize(anime_file, target, mode, dry_run) {
-        Ok(()) => {
+    let target_dir = target.join(&anime_file.anime_name);
+    organize_file_to_dir(
+        anime_file,
+        &target_dir,
+        mode,
+        dry_run,
+        fallback_mode,
+        verbose,
+    )
+    .map(|_| ())
+}
+
+fn organize_file_to_dir(
+    anime_file: &AnimeFileInfo,
+    target_dir: &Path,
+    mode: OperationMode,
+    dry_run: bool,
+    fallback_mode: Option<OperationMode>,
+    verbose: bool,
+) -> Result<PathBuf, AppError> {
+    match FileOrganizer::organize_to_dir(anime_file, target_dir, mode, dry_run) {
+        Ok(target_path) => {
             if verbose && !dry_run {
                 println!(
-                    "成功: {} -> {}/{}",
+                    "成功: {} -> {}",
                     anime_file.original_path,
-                    anime_file.anime_name,
-                    anime_file.target_filename()
+                    target_path.display()
                 );
             }
-            Ok(())
+            Ok(target_path)
         }
-        Err(e) => {
+        Err(error) => {
             if mode == OperationMode::Link {
-                if let Some(fb_mode) = fallback_mode {
+                if let Some(fallback) = fallback_mode {
                     if matches!(
-                        e,
+                        error,
                         AppError::CrossDeviceLink | AppError::HardLinkNotSupported
                     ) {
                         if verbose {
                             eprintln!(
                                 "硬链接失败，回退为 {}: {}",
-                                fb_mode, anime_file.original_path
+                                fallback, anime_file.original_path
                             );
                         }
-                        return FileOrganizer::organize(anime_file, target, fb_mode, dry_run)
-                            .map_err(|e2| {
-                                eprintln!("处理文件失败 {}: {e2}", anime_file.original_path);
-                                e2
-                            });
+
+                        return FileOrganizer::organize_to_dir(
+                            anime_file, target_dir, fallback, dry_run,
+                        )
+                        .map_err(|fallback_error| {
+                            eprintln!(
+                                "处理文件失败 {}: {fallback_error}",
+                                anime_file.original_path
+                            );
+                            fallback_error
+                        });
                     }
                 }
             }
-            eprintln!("处理文件失败 {}: {e}", anime_file.original_path);
-            Err(e)
+
+            eprintln!("处理文件失败 {}: {error}", anime_file.original_path);
+            Err(error)
         }
     }
 }
 
-/// 构建扩展名集合
+fn collect_anime_groups(
+    source: &Path,
+    extensions: &HashSet<String>,
+    verbose: bool,
+) -> HashMap<String, Vec<AnimeFileInfo>> {
+    let mut groups: HashMap<String, Vec<AnimeFileInfo>> = HashMap::new();
+
+    for entry in WalkDir::new(source)
+        .into_iter()
+        .filter_map(|item| item.ok())
+        .filter(|item| item.file_type().is_file())
+    {
+        let path = entry.path();
+        if !has_valid_extension(path, extensions) {
+            continue;
+        }
+
+        if let Some(info) = FilenameParser::parse(path) {
+            groups
+                .entry(info.anime_name.clone())
+                .or_default()
+                .push(info);
+        } else if verbose {
+            eprintln!(
+                "跳过：无法解析文件名 {}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+    }
+
+    groups
+}
+
+fn resolve_source_and_target(args: &OrganizeArgs) -> Result<(PathBuf, PathBuf), AppError> {
+    let source = args.source.clone().ok_or_else(|| {
+        AppError::ParseError("整理模式下必须提供 --source；若要使用工作流子命令，请执行 aniorg scrape 或 aniorg match".to_string())
+    })?;
+
+    if !source.exists() {
+        return Err(AppError::SourceNotFound(source));
+    }
+
+    let target = args.target.clone().unwrap_or_else(|| source.clone());
+    if !target.exists() {
+        return Err(AppError::TargetNotFound(target));
+    }
+
+    Ok((source, target))
+}
+
 fn build_extensions(include_ext: &Option<Vec<String>>) -> HashSet<String> {
     match include_ext {
         Some(exts) => exts
@@ -562,15 +843,94 @@ fn build_extensions(include_ext: &Option<Vec<String>>) -> HashSet<String> {
             .collect(),
         None => DEFAULT_EXTENSIONS
             .iter()
-            .map(|s| (*s).to_string())
+            .map(|ext| (*ext).to_string())
             .collect(),
     }
 }
 
-/// 检查文件是否有有效扩展名
 fn has_valid_extension(path: &Path, extensions: &HashSet<String>) -> bool {
     path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| extensions.contains(&format!(".{}", e.to_lowercase())))
+        .and_then(|ext| ext.to_str())
+        .map(|ext| extensions.contains(&format!(".{}", ext.to_lowercase())))
         .unwrap_or(false)
+}
+
+fn parse_year(value: &str) -> Option<i32> {
+    value.get(0..4)?.parse().ok()
+}
+
+fn unique_titles(primary: &str, secondary: Option<&str>, tertiary: Option<&str>) -> Vec<String> {
+    let mut titles = Vec::new();
+
+    for value in [Some(primary), secondary, tertiary].into_iter().flatten() {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() && !titles.iter().any(|item| item == trimmed) {
+            titles.push(trimmed.to_string());
+        }
+    }
+
+    titles
+}
+
+#[cfg(feature = "scraper")]
+async fn run_scrape(args: ScrapeArgs) -> Result<(), AppError> {
+    let scraper = Scraper::new();
+    let tmdb_api_key = args
+        .tmdb_api_key
+        .clone()
+        .or_else(|| std::env::var("TMDB_API_KEY").ok());
+    let scraped = scraper
+        .scrape_all(args.days, tmdb_api_key.as_deref())
+        .await?;
+
+    match args.format {
+        ScrapeOutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&scraped).map_err(
+                    |e| AppError::MetadataFetchError(format!("序列化刮削结果失败: {e}"))
+                )?
+            );
+        }
+        ScrapeOutputFormat::Pretty => {
+            for anime in scraped {
+                println!(
+                    "{} | {} | {} | {}",
+                    anime.source,
+                    anime.date.unwrap_or_else(|| "N/A".to_string()),
+                    anime.title,
+                    anime.title_cn.unwrap_or_else(|| "-".to_string())
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "scraper")]
+fn run_match(args: MatchArgs) -> Result<(), AppError> {
+    let input = std::fs::read_to_string(&args.input)
+        .map_err(|e| AppError::MetadataFetchError(format!("读取刮削输入失败: {e}")))?;
+    let scraped: Vec<ScrapedAnime> = serde_json::from_str(&input)
+        .map_err(|e| AppError::MetadataFetchError(format!("解析刮削输入失败: {e}")))?;
+
+    let aliases = AliasLookup::load(args.aliases.as_deref())?;
+    let result = match_aliases(&scraped, aliases.entries());
+
+    match args.format {
+        MatchOutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result).map_err(|e| AppError::MetadataFetchError(
+                    format!("序列化匹配结果失败: {e}")
+                ))?
+            );
+        }
+        MatchOutputFormat::Github => {
+            println!("{}", format_github_output(&result));
+        }
+    }
+
+    Ok(())
 }

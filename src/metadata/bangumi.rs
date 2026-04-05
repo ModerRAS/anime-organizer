@@ -11,6 +11,8 @@
 use crate::error::{AppError, Result};
 use crate::metadata::wiki::WikiParser;
 use crate::metadata::AnimeMetadata;
+#[cfg(feature = "metadata")]
+use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -21,6 +23,9 @@ const BANGUMI_ARCHIVE_BASE: &str = "https://raw.githubusercontent.com/bangumi/ar
 
 /// Bangumi Archive Release URL
 const BANGUMI_ARCHIVE_RELEASE: &str = "https://github.com/bangumi/archive/releases/latest/download";
+
+/// 默认本地 dump 文件名
+const SUBJECT_DUMP_FILENAME: &str = "subject.jsonlines";
 
 /// Bangumi Subject 基本信息（从 Archive 获取）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +79,8 @@ pub struct BangumiClient {
     http: reqwest::Client,
     /// 本地缓存目录
     cache_dir: PathBuf,
+    /// 显式指定的数据源（subject.jsonlines）
+    source_path: Option<PathBuf>,
     /// 内存中的 Subject 索引（从 dump 加载后缓存）
     index: std::sync::Mutex<Option<HashMap<u32, BangumiSubject>>>,
 }
@@ -85,6 +92,11 @@ impl BangumiClient {
     ///
     /// - `cache_dir` - 本地缓存目录，默认使用系统临时目录下的 `bangumi-cache`
     pub fn new(cache_dir: Option<PathBuf>) -> Self {
+        Self::with_source(cache_dir, None)
+    }
+
+    /// 创建新的 Bangumi 客户端，并允许显式指定 dump 路径。
+    pub fn with_source(cache_dir: Option<PathBuf>, source_path: Option<PathBuf>) -> Self {
         let cache_dir = cache_dir.unwrap_or_else(|| std::env::temp_dir().join("bangumi-cache"));
         Self {
             #[cfg(feature = "metadata")]
@@ -93,6 +105,7 @@ impl BangumiClient {
                 .build()
                 .expect("创建 HTTP 客户端失败"),
             cache_dir,
+            source_path,
             index: std::sync::Mutex::new(None),
         }
     }
@@ -126,6 +139,12 @@ impl BangumiClient {
     /// 从 Archive 获取 Subject 信息并解析 Wiki Infobox。
     #[cfg(feature = "metadata")]
     pub async fn fetch_metadata(&self, bangumi_id: u32) -> Result<AnimeMetadata> {
+        self.prepare_index().await?;
+
+        if let Some(subject) = self.find_by_id(bangumi_id)? {
+            return Ok(self.subject_to_metadata(&subject));
+        }
+
         let subject = self.fetch_subject(bangumi_id).await?;
         Ok(self.subject_to_metadata(&subject))
     }
@@ -210,17 +229,73 @@ impl BangumiClient {
         Ok(count)
     }
 
+    /// 准备本地索引：优先加载现有 dump；若不存在则尝试下载。
+    #[cfg(feature = "metadata")]
+    pub async fn prepare_index(&self) -> Result<usize> {
+        if let Some(len) = self.index_len()? {
+            return Ok(len);
+        }
+
+        if let Some(path) = self.resolve_existing_dump_path() {
+            return self.load_dump(&path);
+        }
+
+        let dump_path = self.download_dump().await?;
+        self.load_dump(&dump_path)
+    }
+
+    fn index_len(&self) -> Result<Option<usize>> {
+        let index = self
+            .index
+            .lock()
+            .map_err(|e| AppError::BangumiParseError(format!("锁定索引失败: {e}")))?;
+        Ok(index.as_ref().map(HashMap::len))
+    }
+
+    fn resolve_existing_dump_path(&self) -> Option<PathBuf> {
+        let candidates = [
+            self.source_path.clone(),
+            Some(self.cache_dir.join(SUBJECT_DUMP_FILENAME)),
+        ];
+
+        for candidate in candidates.into_iter().flatten() {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+
+            let nested = candidate.join(SUBJECT_DUMP_FILENAME);
+            if nested.is_file() {
+                return Some(nested);
+            }
+        }
+
+        None
+    }
+
     /// 下载最新的 Bangumi Archive dump
     #[cfg(feature = "metadata")]
     pub async fn download_dump(&self) -> Result<PathBuf> {
         std::fs::create_dir_all(&self.cache_dir)
             .map_err(|e| AppError::MetadataFetchError(format!("创建缓存目录失败: {e}")))?;
 
-        let dump_path = self.cache_dir.join("subject.jsonlines");
+        let dump_path = self.cache_dir.join(SUBJECT_DUMP_FILENAME);
 
-        let url = format!("{BANGUMI_ARCHIVE_RELEASE}/subject.jsonlines");
+        let plain_url = format!("{BANGUMI_ARCHIVE_RELEASE}/{SUBJECT_DUMP_FILENAME}");
+        if let Ok(resp) = self.http.get(&plain_url).send().await {
+            if resp.status().is_success() {
+                let bytes = resp.bytes().await.map_err(|e| {
+                    AppError::MetadataFetchError(format!("读取 dump 数据失败: {e}"))
+                })?;
+                std::fs::write(&dump_path, &bytes).map_err(|e| {
+                    AppError::MetadataFetchError(format!("写入 dump 文件失败: {e}"))
+                })?;
+                return Ok(dump_path);
+            }
+        }
+
+        let gz_url = format!("{BANGUMI_ARCHIVE_RELEASE}/{SUBJECT_DUMP_FILENAME}.gz");
         let resp =
-            self.http.get(&url).send().await.map_err(|e| {
+            self.http.get(&gz_url).send().await.map_err(|e| {
                 AppError::MetadataFetchError(format!("下载 Bangumi dump 失败: {e}"))
             })?;
 
@@ -236,7 +311,12 @@ impl BangumiClient {
             .await
             .map_err(|e| AppError::MetadataFetchError(format!("读取 dump 数据失败: {e}")))?;
 
-        std::fs::write(&dump_path, &bytes)
+        let mut decoder = GzDecoder::new(bytes.as_ref());
+        let mut content = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut content)
+            .map_err(|e| AppError::MetadataFetchError(format!("解压 dump 失败: {e}")))?;
+
+        std::fs::write(&dump_path, &content)
             .map_err(|e| AppError::MetadataFetchError(format!("写入 dump 文件失败: {e}")))?;
 
         Ok(dump_path)
@@ -249,7 +329,7 @@ impl BangumiClient {
 
     /// 检查本地 dump 是否存在
     pub fn has_local_dump(&self) -> bool {
-        self.cache_dir.join("subject.jsonlines").exists()
+        self.resolve_existing_dump_path().is_some()
     }
 
     /// 将 BangumiSubject 转为 AnimeMetadata

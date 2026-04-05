@@ -17,6 +17,8 @@
 - **智能解析**: 自动识别 `[发布组] 动漫名 - 集数 [标签].ext` 格式
 - **灵活整理**: 重构为 `动漫名/集数 [标签].ext` 结构
 - **多种模式**: 支持移动、复制、硬链接三种操作模式
+- **元数据刮削**: 基于 Bangumi 生成 Kodi 兼容的 NFO 文件
+- **封面下载**: 通过 TMDB 下载海报和背景图，失败时回退 AniDB 海报
 - **跨平台**: 支持 Windows、Linux、macOS
 - **零依赖运行**: 单文件部署，无需外部配置
 - **高性能**: Rust 原生实现，极速处理
@@ -66,6 +68,9 @@ aniorg --source="/path/to/downloads" --mode=copy --target="/path/to/anime"
 
 # 启用硬链接失败回退为复制
 aniorg --source="/path/to/downloads" --fallback-on-link-failure=copy
+
+# 生成 NFO 和海报
+aniorg --source="/path/to/downloads" --scrape-metadata --tmdb-api-key="YOUR_TMDB_KEY"
 ```
 
 #### 预览模式
@@ -87,8 +92,31 @@ aniorg --source="/path/to/downloads" --dry-run --verbose
 | `--include-ext` | | string | ❌ | mp4,mkv,... | 处理的扩展名（逗号分隔） |
 | `--verbose` | `-v` | bool | ❌ | false | 显示详细日志 |
 | `--fallback-on-link-failure` | | enum | ❌ | - | 硬链接失败时回退模式：move 或 copy（默认不回退） |
+| `--scrape-metadata` / `--刮削` | | bool | ❌ | false | 启用 Bangumi/TMDB 元数据刮削 |
+| `--tmdb-api-key` | | string | ❌ | - | TMDB API Key，用于下载海报和背景图 |
+| `--alias-file` | | string | ❌ | - | 自定义别名文件，覆盖内置别名库 |
+| `--no-images` | | bool | ❌ | false | 只生成 NFO，不下载图片 |
+| `--force-overwrite` | | bool | ❌ | false | 覆盖已有的 NFO 和图片 |
+| `--bangumi-cache` | | string | ❌ | 系统临时目录 | Bangumi 缓存目录 |
+| `--metadata-source` | | string | ❌ | - | 指定本地 `subject.jsonlines` 或其所在目录 |
 | `--help` | `-h` | bool | ❌ | false | 显示帮助 |
 | `--version` | `-V` | bool | ❌ | false | 显示版本 |
+
+### 🧾 元数据刮削
+
+启用 `--scrape-metadata` 后，程序会：
+
+- 使用内置别名库匹配 Bangumi 条目，并在必要时尝试本地/缓存 dump 查询
+- 在动画根目录生成 `tvshow.nfo`
+- 在 `Season N/` 目录下生成与视频同名的 `*.nfo`
+- 如果提供了 TMDB API Key，则下载 `poster.jpg`、`fanart.jpg` 和 `seasonXX-poster.jpg`
+
+也可以通过 scraper 子命令为 GitHub Actions 提供数据：
+
+```bash
+cargo run --features scraper -- scrape --days 7 --format json
+cargo run --features scraper -- match --input scraped.json --format github
+```
 
 ### 🎨 文件命名格式
 
@@ -166,6 +194,8 @@ aniorg -s "/path/to/downloads" --include-ext="mp4,mkv"
 - **Smart Parsing**: Auto-recognize `[Publisher] AnimeName - Episode [Tags].ext` format
 - **Flexible Organization**: Restructure to `AnimeName/Episode [Tags].ext`
 - **Multiple Modes**: Support move, copy, and hard link operations
+- **Metadata Scraping**: Generate Kodi-compatible NFO files from Bangumi metadata
+- **Artwork Download**: Download posters and fanart from TMDB with AniDB poster fallback
 - **Cross-Platform**: Support Windows, Linux, macOS
 - **Zero Runtime Dependencies**: Single binary deployment
 - **High Performance**: Native Rust implementation
@@ -201,6 +231,9 @@ aniorg --source="/path/to/downloads" --dry-run --verbose
 
 # Enable automatic fallback to copy when hard link fails
 aniorg --source="/path/to/downloads" --fallback-on-link-failure=copy
+
+# Generate NFO files and artwork
+aniorg --source="/path/to/downloads" --scrape-metadata --tmdb-api-key="YOUR_TMDB_KEY"
 ```
 
 ### 📋 Arguments
@@ -214,6 +247,13 @@ aniorg --source="/path/to/downloads" --fallback-on-link-failure=copy
 | `--include-ext` | | string | ❌ | mp4,mkv,... | File extensions to process |
 | `--verbose` | `-v` | bool | ❌ | false | Show detailed logs |
 | `--fallback-on-link-failure` | | enum | ❌ | - | Fallback when hard link fails: move or copy (disabled by default) |
+| `--scrape-metadata` / `--刮削` | | bool | ❌ | false | Enable Bangumi/TMDB metadata scraping |
+| `--tmdb-api-key` | | string | ❌ | - | TMDB API key for artwork download |
+| `--alias-file` | | string | ❌ | - | Custom alias file overriding the bundled library |
+| `--no-images` | | bool | ❌ | false | Generate NFO only, skip artwork download |
+| `--force-overwrite` | | bool | ❌ | false | Overwrite existing NFO and image files |
+| `--bangumi-cache` | | string | ❌ | system temp dir | Bangumi cache directory |
+| `--metadata-source` | | string | ❌ | - | Local `subject.jsonlines` file or containing directory |
 | `--help` | `-h` | bool | ❌ | false | Show help |
 | `--version` | `-V` | bool | ❌ | false | Show version |
 
@@ -226,8 +266,6 @@ Hard linking is the recommended mode:
 - **File Sync**: Source and target share the same content
 
 If hard linking fails due to cross-filesystem layouts or lack of support, you can opt in to automatic fallback via `--fallback-on-link-failure=copy` or `--fallback-on-link-failure=move`; otherwise, the failure is reported and the file is skipped.
-
-If hard linking fails due to cross-filesystem layouts or lack of support, the tool automatically falls back to copying to ensure the file is still organized.
 
 **Requirements:**
 1. Source and target must be on the same filesystem

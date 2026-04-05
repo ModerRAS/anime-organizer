@@ -11,6 +11,7 @@
 //! 4. 解析 LLM 返回的 JSON，分为确信匹配和待审核匹配
 
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 use super::sources::ScrapedAnime;
 use crate::error::{AppError, Result};
@@ -74,6 +75,69 @@ impl MatchResult {
     pub fn is_empty(&self) -> bool {
         self.confident.is_empty() && self.uncertain.is_empty()
     }
+}
+
+/// 基于现有别名库和刮削结果生成新的别名提案。
+pub fn match_aliases(
+    scraped: &[ScrapedAnime],
+    existing_aliases: &HashMap<String, AliasEntry>,
+) -> MatchResult {
+    let mut result = MatchResult::empty();
+    let mut normalized_aliases = HashMap::new();
+    let mut aliases_by_bangumi_id = HashMap::new();
+    let mut seen = HashSet::new();
+
+    for (key, entry) in existing_aliases {
+        normalized_aliases.insert(normalize_key(key), entry.clone());
+        normalized_aliases.insert(normalize_key(&entry.name), entry.clone());
+        aliases_by_bangumi_id
+            .entry(entry.bangumi_id)
+            .or_insert_with(|| entry.clone());
+    }
+
+    for anime in scraped {
+        let candidates = scraped_candidates(anime);
+        let Some((canonical_entry, confidence, reasoning)) = resolve_entry(
+            anime,
+            &candidates,
+            &normalized_aliases,
+            &aliases_by_bangumi_id,
+        ) else {
+            continue;
+        };
+
+        for candidate in candidates {
+            let normalized = normalize_key(&candidate);
+            if normalized.is_empty() {
+                continue;
+            }
+
+            if normalized_aliases.contains_key(&normalized)
+                || normalize_key(&canonical_entry.name) == normalized
+            {
+                continue;
+            }
+
+            if !seen.insert((canonical_entry.bangumi_id, normalized.clone())) {
+                continue;
+            }
+
+            let proposal = Proposal {
+                fan_translation: candidate,
+                alias_entry: canonical_entry.clone(),
+                confidence: confidence.clone(),
+                reasoning: reasoning.clone(),
+                source: anime.source.to_string(),
+            };
+
+            match confidence {
+                MatchConfidence::High => result.confident.push(proposal),
+                _ => result.uncertain.push(proposal),
+            }
+        }
+    }
+
+    result
 }
 
 /// 构建 LLM prompt
@@ -218,6 +282,72 @@ fn extract_json_array(text: &str) -> Option<String> {
     }
 }
 
+fn resolve_entry(
+    anime: &ScrapedAnime,
+    candidates: &[String],
+    normalized_aliases: &HashMap<String, AliasEntry>,
+    aliases_by_bangumi_id: &HashMap<u32, AliasEntry>,
+) -> Option<(AliasEntry, MatchConfidence, String)> {
+    if let Some(bangumi_id) = anime.bangumi_id {
+        let entry = aliases_by_bangumi_id
+            .get(&bangumi_id)
+            .cloned()
+            .unwrap_or_else(|| AliasEntry {
+                bangumi_id,
+                name: anime.title.clone(),
+                tmdb_id: anime.tmdb_id,
+                anidb_id: None,
+            });
+
+        return Some((
+            entry,
+            MatchConfidence::High,
+            "直接使用刮削结果中的 Bangumi ID 生成提案".to_string(),
+        ));
+    }
+
+    for candidate in candidates {
+        let normalized = normalize_key(candidate);
+        if let Some(entry) = normalized_aliases.get(&normalized) {
+            return Some((
+                entry.clone(),
+                MatchConfidence::Medium,
+                format!("通过现有别名库匹配到标准名称: {}", entry.name),
+            ));
+        }
+    }
+
+    None
+}
+
+fn scraped_candidates(anime: &ScrapedAnime) -> Vec<String> {
+    let mut candidates = Vec::new();
+
+    for value in [&anime.title, anime.title_cn.as_deref().unwrap_or("")] {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        for part in trimmed.split(['/', '／', '|']) {
+            let candidate = part.trim();
+            if !candidate.is_empty() && !candidates.iter().any(|item| item == candidate) {
+                candidates.push(candidate.to_string());
+            }
+        }
+    }
+
+    candidates
+}
+
+fn normalize_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_alphanumeric() || ch.is_alphabetic())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
 /// 将匹配结果格式化为 GitHub 格式输出
 ///
 /// 用于 GitHub Actions 中设置 output 变量。
@@ -228,12 +358,12 @@ pub fn format_github_output(result: &MatchResult) -> String {
     output.push_str(&format!("uncertain_count={}\n", result.uncertain.len()));
 
     if !result.confident.is_empty() {
-        let json = serde_json::to_string_pretty(&result.confident).unwrap_or_default();
+        let json = serde_json::to_string(&result.confident).unwrap_or_default();
         output.push_str(&format!("confident_proposals={json}\n"));
     }
 
     if !result.uncertain.is_empty() {
-        let json = serde_json::to_string_pretty(&result.uncertain).unwrap_or_default();
+        let json = serde_json::to_string(&result.uncertain).unwrap_or_default();
         output.push_str(&format!("uncertain_proposals={json}\n"));
     }
 
@@ -353,5 +483,33 @@ mod tests {
         assert_eq!(MatchConfidence::High.to_string(), "high");
         assert_eq!(MatchConfidence::Medium.to_string(), "medium");
         assert_eq!(MatchConfidence::Low.to_string(), "low");
+    }
+
+    #[test]
+    fn test_match_aliases_uses_existing_aliases() {
+        let scraped = vec![ScrapedAnime {
+            title: "ぼっち・ざ・ろっく！".to_string(),
+            title_cn: Some("孤独摇滚".to_string()),
+            date: Some("2022-10-08".to_string()),
+            source: super::super::sources::ScrapedSource::Bangumi,
+            source_url: None,
+            bangumi_id: Some(328609),
+            tmdb_id: Some(203028),
+        }];
+
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            "Bocchi the Rock".to_string(),
+            AliasEntry {
+                bangumi_id: 328609,
+                name: "ぼっち・ざ・ろっく！".to_string(),
+                tmdb_id: Some(203028),
+                anidb_id: Some(16876),
+            },
+        );
+
+        let result = match_aliases(&scraped, &aliases);
+        assert_eq!(result.confident.len(), 1);
+        assert_eq!(result.confident[0].fan_translation, "孤独摇滚");
     }
 }
