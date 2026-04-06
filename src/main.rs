@@ -703,6 +703,9 @@ fn create_episode_nfo(file: &AnimeFileInfo, meta: &AnimeMetadata) -> EpisodeNfo 
         credits: Vec::new(),
         director: meta.director.iter().cloned().collect(),
         actor: Vec::new(),
+        tagline: None,
+        playcount: None,
+        lastplayed: None,
     }
 }
 

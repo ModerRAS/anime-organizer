@@ -159,6 +159,9 @@ fn test_episode_nfo_generation() {
         credits: vec!["吉田恵里香".to_string()],
         director: vec!["斎藤圭一郎".to_string()],
         actor: Vec::new(),
+        tagline: None,
+        playcount: None,
+        lastplayed: None,
     };
 
     let xml = ep.to_xml().unwrap();
@@ -283,6 +286,9 @@ fn test_full_pipeline_parse_to_nfo_files() {
         credits: Vec::new(),
         director: Vec::new(),
         actor: Vec::new(),
+        tagline: None,
+        playcount: None,
+        lastplayed: None,
     };
 
     let season_dir = anime_dir.join("Season 1");

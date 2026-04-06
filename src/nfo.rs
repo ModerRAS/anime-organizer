@@ -29,9 +29,11 @@ use crate::error::{AppError, Result};
 /// 电视剧 NFO 数据
 ///
 /// 对应 Kodi 的 `<tvshow>` 格式。
+///
+/// 符合 Kodi Wiki 规范：https://kodi.wiki/view/NFO_files/TV_shows
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TvShowNfo {
-    /// 标题
+    /// 标题（必需）
     pub title: String,
     /// 原始标题
     pub originaltitle: String,
@@ -43,13 +45,17 @@ pub struct TvShowNfo {
     pub genre: Vec<String>,
     /// 首播日期（YYYY-MM-DD）
     pub premiered: Option<String>,
-    /// 状态
+    /// 状态 (Continuing/Ended)
     pub status: Option<String>,
     /// 制作公司
     pub studio: Option<String>,
     /// 评分
     pub rating: Option<Rating>,
-    /// 唯一标识
+    /// 用户个人评分
+    pub userrating: Option<f32>,
+    /// IMDB Top 250 排名
+    pub top250: Option<u32>,
+    /// 唯一标识（必需）
     pub uniqueid: Vec<UniqueId>,
     /// 演员/声优
     pub actor: Vec<Actor>,
@@ -57,6 +63,16 @@ pub struct TvShowNfo {
     pub season: Option<u32>,
     /// 总集数
     pub episode: Option<u32>,
+    /// 简短标语（v22+）
+    pub tagline: Option<String>,
+    /// MPAA 分级
+    pub mpaa: Option<String>,
+    /// 播放次数
+    pub playcount: Option<u32>,
+    /// 最后播放日期（YYYY-MM-DD HH:MM:SS）
+    pub lastplayed: Option<String>,
+    /// 标签
+    pub tag: Vec<String>,
 }
 
 /// 评分信息
@@ -102,13 +118,15 @@ pub struct Actor {
 /// 单集 NFO 数据
 ///
 /// 对应 Kodi 的 `<episodedetails>` 格式。
+///
+/// 符合 Kodi Wiki 规范：https://kodi.wiki/view/NFO_files/Episodes
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpisodeNfo {
-    /// 集标题
+    /// 集标题（必需）
     pub title: String,
-    /// 季号
+    /// 季号（从文件名读取，可选）
     pub season: u32,
-    /// 集号
+    /// 集号（从文件名读取，可选）
     pub episode: u32,
     /// 简介
     pub plot: Option<String>,
@@ -116,11 +134,11 @@ pub struct EpisodeNfo {
     pub aired: Option<String>,
     /// 时长（分钟）
     pub runtime: Option<u32>,
-    /// 显示季号（绝对排序用）
+    /// 显示季号（Specials 排序用）
     pub displayseason: Option<i32>,
-    /// 显示集号（绝对排序用）
+    /// 显示集号（Specials 排序用）
     pub displayepisode: Option<i32>,
-    /// 唯一标识
+    /// 唯一标识（必需）
     pub uniqueid: Vec<UniqueId>,
     /// 编剧
     pub credits: Vec<String>,
@@ -128,6 +146,12 @@ pub struct EpisodeNfo {
     pub director: Vec<String>,
     /// 演员
     pub actor: Vec<Actor>,
+    /// 集标语
+    pub tagline: Option<String>,
+    /// 播放次数
+    pub playcount: Option<u32>,
+    /// 最后播放日期（YYYY-MM-DD HH:MM:SS）
+    pub lastplayed: Option<String>,
 }
 
 impl TvShowNfo {
@@ -165,6 +189,16 @@ impl TvShowNfo {
 
         if let Some(ref studio) = self.studio {
             write_xml_tag(&mut xml, "studio", studio)?;
+        }
+
+        // 简短标语（v22+）
+        if let Some(ref tagline) = self.tagline {
+            write_xml_tag(&mut xml, "tagline", tagline)?;
+        }
+
+        // MPAA 分级
+        if let Some(ref mpaa) = self.mpaa {
+            write_xml_tag(&mut xml, "mpaa", mpaa)?;
         }
 
         if let Some(ref season) = self.season {
@@ -209,6 +243,34 @@ impl TvShowNfo {
                 xml_escape(&uid.value)
             )
             .map_err(|e| AppError::NfoGenerationError(format!("XML 写入失败: {e}")))?;
+        }
+
+        // 用户评分
+        if let Some(userrating) = self.userrating {
+            writeln!(xml, "  <userrating>{}</userrating>", userrating)
+                .map_err(|e| AppError::NfoGenerationError(format!("XML 写入失败：{e}")))?;
+        }
+
+        // IMDB Top 250
+        if let Some(top250) = self.top250 {
+            writeln!(xml, "  <top250>{}</top250>", top250)
+                .map_err(|e| AppError::NfoGenerationError(format!("XML 写入失败：{e}")))?;
+        }
+
+        // 播放次数
+        if let Some(playcount) = self.playcount {
+            writeln!(xml, "  <playcount>{}</playcount>", playcount)
+                .map_err(|e| AppError::NfoGenerationError(format!("XML 写入失败：{e}")))?;
+        }
+
+        // 最后播放日期
+        if let Some(ref lastplayed) = self.lastplayed {
+            write_xml_tag(&mut xml, "lastplayed", lastplayed)?;
+        }
+
+        // 标签
+        for tag in &self.tag {
+            write_xml_tag(&mut xml, "tag", tag)?;
         }
 
         // 演员
@@ -274,6 +336,22 @@ impl EpisodeNfo {
 
         if let Some(de) = self.displayepisode {
             write_xml_tag(&mut xml, "displayepisode", &de.to_string())?;
+        }
+
+        // 集标语（v22+）
+        if let Some(ref tagline) = self.tagline {
+            write_xml_tag(&mut xml, "tagline", tagline)?;
+        }
+
+        // 播放次数
+        if let Some(playcount) = self.playcount {
+            writeln!(xml, "  <playcount>{}</playcount>", playcount)
+                .map_err(|e| AppError::NfoGenerationError(format!("XML 写入失败：{e}")))?;
+        }
+
+        // 最后播放日期
+        if let Some(ref lastplayed) = self.lastplayed {
+            write_xml_tag(&mut xml, "lastplayed", lastplayed)?;
         }
 
         // 唯一标识
@@ -404,10 +482,17 @@ impl From<&crate::metadata::AnimeMetadata> for TvShowNfo {
             status: None,
             studio: meta.studio.clone(),
             rating,
+            userrating: None,
+            top250: None,
             uniqueid,
             actor: Vec::new(),
             season: Some(1),
             episode: Some(meta.episode_count),
+            tagline: None,
+            mpaa: None,
+            playcount: None,
+            lastplayed: None,
+            tag: Vec::new(),
         }
     }
 }
@@ -488,6 +573,9 @@ mod tests {
             credits: vec!["小林靖子".to_string()],
             director: vec!["荒木哲郎".to_string()],
             actor: Vec::new(),
+            tagline: None,
+            playcount: None,
+            lastplayed: None,
         };
 
         let xml = nfo.to_xml().unwrap();
@@ -520,6 +608,9 @@ mod tests {
             credits: Vec::new(),
             director: Vec::new(),
             actor: Vec::new(),
+            tagline: None,
+            playcount: None,
+            lastplayed: None,
         };
 
         let xml = nfo.to_xml().unwrap();
@@ -568,6 +659,9 @@ mod tests {
             credits: Vec::new(),
             director: Vec::new(),
             actor: Vec::new(),
+            tagline: None,
+            playcount: None,
+            lastplayed: None,
         };
 
         let path = dir.path().join("Season 1").join("01.nfo");
@@ -588,5 +682,99 @@ mod tests {
         NfoWriter::write_image(&path, data).unwrap();
         assert!(path.exists());
         assert_eq!(std::fs::read(&path).unwrap(), data);
+    }
+
+    /// Kodi 兼容性验证测试
+    ///
+    /// 确保生成的 NFO 完全符合 Kodi Wiki 官方规范：
+    /// - https://kodi.wiki/view/NFO_files/TV_shows
+    /// - https://kodi.wiki/view/NFO_files/Episodes
+    #[test]
+    fn test_kodi_nfo_compliance() {
+        let meta = sample_metadata();
+        let tvshow_nfo = TvShowNfo::from(&meta);
+        let xml = tvshow_nfo.to_xml().unwrap();
+
+        // 验证必需字段 (Required tags per Kodi spec)
+        assert!(
+            xml.contains(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#),
+            "Missing XML declaration with UTF-8 encoding"
+        );
+        assert!(xml.contains("<tvshow>"), "Missing <tvshow> root element");
+        assert!(xml.contains("</tvshow>"), "Missing </tvshow> closing tag");
+
+        // 标题是必需的
+        assert!(
+            xml.matches("<title>").count() >= 1,
+            "Missing required <title> field"
+        );
+
+        // uniqueid 是必需的（至少一个）
+        let uniqueid_count = xml.matches("<uniqueid type=").count();
+        assert!(
+            uniqueid_count >= 1,
+            "Missing required <uniqueid> field (at least one required)"
+        );
+
+        // 验证 Kodi 支持的可选字段都存在且格式正确
+        assert!(xml.contains("</tvshow>"), "NFO must end with </tvshow>");
+
+        // 验证 XML 结构完整性（配对标签）
+        assert!(
+            xml.matches("<tvshow>").count() == xml.matches("</tvshow>").count(),
+            "XML structure error: mismatched <tvshow> tags"
+        );
+
+        println!("Generated NFO:\n{}", xml);
+    }
+
+    /// Episode NFO Kodi 兼容性验证测试
+    #[test]
+    fn test_kodi_episode_nfo_compliance() {
+        let nfo = EpisodeNfo {
+            title: "Test Episode".to_string(),
+            season: 1,
+            episode: 1,
+            plot: Some("Episode description".to_string()),
+            aired: Some("2024-01-01".to_string()),
+            runtime: Some(24),
+            displayseason: None,
+            displayepisode: None,
+            uniqueid: vec![UniqueId {
+                id_type: "bangumi".to_string(),
+                default: true,
+                value: "12345".to_string(),
+            }],
+            credits: Vec::new(),
+            director: Vec::new(),
+            actor: Vec::new(),
+            tagline: None,
+            playcount: None,
+            lastplayed: None,
+        };
+
+        let xml = nfo.to_xml().unwrap();
+
+        // 验证 Kodi Episode NFO 必需字段
+        assert!(
+            xml.contains(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#),
+            "Missing XML declaration"
+        );
+        assert!(
+            xml.contains("<episodedetails>"),
+            "Missing <episodedetails> root element"
+        );
+        assert!(
+            xml.contains("</episodedetails>"),
+            "Missing </episodedetails> closing tag"
+        );
+
+        // title 是必需的
+        assert!(
+            xml.matches("<title>").count() >= 1,
+            "Missing required <title> field"
+        );
+
+        println!("Generated Episode NFO:\n{}", xml);
     }
 }

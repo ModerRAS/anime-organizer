@@ -77,11 +77,18 @@ impl MatchResult {
     }
 }
 
-/// 基于现有别名库和刮削结果生成新的别名提案。
+/// 基于现有别名库和刮削结果生成新的别名提案。使用 LLM API 分析匹配关系。
 pub fn match_aliases(
     scraped: &[ScrapedAnime],
     existing_aliases: &HashMap<String, AliasEntry>,
 ) -> MatchResult {
+    if !scraped.is_empty() && !existing_aliases.is_empty() {
+        match call_llm_api(scraped, existing_aliases) {
+            Ok(llm_result) => return llm_result,
+            Err(_) => tracing::warn!("LLM API 调用失败，使用规则匹配回退"),
+        }
+    }
+
     let mut result = MatchResult::empty();
     let mut normalized_aliases = HashMap::new();
     let mut aliases_by_bangumi_id = HashMap::new();
@@ -127,7 +134,7 @@ pub fn match_aliases(
                 alias_entry: canonical_entry.clone(),
                 confidence: confidence.clone(),
                 reasoning: reasoning.clone(),
-                source: anime.source.to_string(),
+                source: "Rule-Based".to_string(),
             };
 
             match confidence {
@@ -138,6 +145,62 @@ pub fn match_aliases(
     }
 
     result
+}
+
+/// 调用 LLM API (OpenCode/MiniMax) 进行别名匹配分析
+fn call_llm_api(
+    scraped: &[ScrapedAnime],
+    existing_aliases: &HashMap<String, AliasEntry>,
+) -> Result<MatchResult> {
+    let prompt = build_prompt(scraped, existing_aliases);
+
+    #[cfg(feature = "llm-api")]
+    {
+        use reqwest::Client;
+        use tokio::runtime::Runtime;
+
+        let client = Client::new();
+
+        let api_key = std::env::var("LLM_API_KEY")
+            .ok()
+            .unwrap_or_else(|| "fallback".to_string());
+
+        let rt = Runtime::new()
+            .map_err(|e| AppError::MetadataFetchError(format!("创建 tokio runtime 失败：{}", e)))?;
+
+        let response_result = rt.block_on(
+            client
+                .post("https://api.opencode.ai/v1/chat/completions")
+                .header("Authorization", format!("Bearer {}", api_key))
+                .header("Content-Type", "application/json")
+                .json(&serde_json::json!({
+                    "model": "llama-3.2-3b-preview",
+                    "messages": [{
+                        "role": "user",
+                        "content": prompt
+                    }],
+                    "temperature": 0.7,
+                    "max_tokens": 1024
+                }))
+                .send(),
+        );
+
+        let response = response_result
+            .map_err(|e| AppError::MetadataFetchError(format!("LLM API 请求失败：{}", e)))?;
+
+        let text_result = rt.block_on(response.text());
+        let text = text_result
+            .map_err(|e| AppError::MetadataFetchError(format!("LLM API 响应解析失败：{}", e)))?;
+
+        parse_llm_response(&text)
+    }
+
+    #[cfg(not(feature = "llm-api"))]
+    {
+        Err(AppError::MetadataFetchError(
+            "未启用 LLM API 功能 (--features llm-api)".to_string(),
+        ))
+    }
 }
 
 /// 构建 LLM prompt
