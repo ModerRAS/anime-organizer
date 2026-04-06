@@ -69,7 +69,7 @@ pub async fn build_bangumi_db(output_path: &Path) -> Result<BuildDbStats> {
     let (subjects_count, episodes_count) = extract_and_parse(&zip_path, output_path)?;
 
     let db_size = std::fs::metadata(output_path)
-        .map_err(|e| AppError::Io(e))?
+        .map_err(AppError::Io)?
         .len();
 
     Ok(BuildDbStats {
@@ -132,13 +132,13 @@ async fn download_zip(url: &str, temp_dir: &Path) -> Result<PathBuf> {
         .map_err(|e| AppError::MetadataFetchError(format!("读取 ZIP 数据失败: {e}")))?;
 
     let zip_path = temp_dir.join("bangumi_dump.zip");
-    std::fs::write(&zip_path, &bytes).map_err(|e| AppError::Io(e))?;
+    std::fs::write(&zip_path, &bytes).map_err(AppError::Io)?;
 
     Ok(zip_path)
 }
 
 fn extract_and_parse(zip_path: &Path, db_path: &Path) -> Result<(usize, usize)> {
-    let zip_file = std::fs::File::open(zip_path).map_err(|e| AppError::Io(e))?;
+    let zip_file = std::fs::File::open(zip_path).map_err(AppError::Io)?;
     let mut zip_archive = zip::ZipArchive::new(zip_file)
         .map_err(|e| AppError::MetadataFetchError(format!("解析 ZIP 文件失败: {e}")))?;
 
