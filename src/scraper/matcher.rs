@@ -551,6 +551,22 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_anthropic_response() {
+        // Anthropic API returns: {"content": [{"text": "..."}]}
+        // where text is a JSON string of the proposals array
+        let response = r#"{"content": [{"text": "[{\"fan_translation\": \"test\", \"bangumi_id\": 1, \"name\": \"Test\", \"confidence\": \"high\", \"reasoning\": \"test\"}]"}]}"#;
+        let result = parse_anthropic_response(response).unwrap();
+        assert_eq!(result.confident.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_anthropic_response_empty() {
+        let response = r#"{"content": [{"text": "[]"}]}"#;
+        let result = parse_anthropic_response(response).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
     fn test_match_result_empty() {
         let result = MatchResult::empty();
         assert!(result.is_empty());
