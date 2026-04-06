@@ -15,8 +15,10 @@
 //! anime-organizer = { features = ["scraper"] }
 //! ```
 
+pub mod db_builder;
 pub mod matcher;
 pub mod sources;
 
+pub use db_builder::{build_bangumi_db, BuildDbStats};
 pub use matcher::{match_aliases, MatchConfidence, MatchResult, Proposal};
 pub use sources::{ScrapedAnime, ScrapedSource, Scraper};

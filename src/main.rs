@@ -4,6 +4,7 @@
 
 #[cfg(feature = "scraper")]
 use anime_organizer::scraper::{
+    db_builder::build_bangumi_db,
     matcher::{format_github_output, match_aliases},
     ScrapedAnime, Scraper,
 };
@@ -135,6 +136,8 @@ enum Commands {
     Scrape(ScrapeArgs),
     /// 根据刮削结果生成别名提案
     Match(MatchArgs),
+    /// 从 Bangumi Archive 构建 SQLite 数据库
+    BuildDb(BuildDbArgs),
 }
 
 #[cfg(feature = "scraper")]
@@ -181,6 +184,14 @@ struct MatchArgs {
 enum MatchOutputFormat {
     Json,
     Github,
+}
+
+#[cfg(feature = "scraper")]
+#[derive(Args, Debug, Clone)]
+struct BuildDbArgs {
+    /// SQLite 数据库输出路径
+    #[arg(long, value_name = "PATH")]
+    output: PathBuf,
 }
 
 fn main() {
@@ -238,6 +249,7 @@ fn run_command(command: Commands) -> Result<(), AppError> {
             runtime.block_on(run_scrape(args))
         }
         Commands::Match(args) => run_match(args),
+        Commands::BuildDb(args) => run_build_db(args),
     }
 }
 
@@ -934,6 +946,20 @@ fn run_match(args: MatchArgs) -> Result<(), AppError> {
             println!("{}", format_github_output(&result));
         }
     }
+
+    Ok(())
+}
+
+#[cfg(feature = "scraper")]
+fn run_build_db(args: BuildDbArgs) -> Result<(), AppError> {
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| AppError::MetadataFetchError(format!("创建异步运行时失败: {e}")))?;
+    let stats = runtime.block_on(build_bangumi_db(&args.output))?;
+
+    println!("数据库构建完成！");
+    println!("Subjects: {}", stats.subjects_count);
+    println!("Episodes: {}", stats.episodes_count);
+    println!("Database size: {} bytes", stats.db_size);
 
     Ok(())
 }
