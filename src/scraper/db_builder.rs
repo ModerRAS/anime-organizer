@@ -178,20 +178,18 @@ fn parse_subjects_from_zip(
         }
 
         if let Ok(subject) = serde_json::from_str::<SubjectRecord>(line) {
-            if subject.subject_type == 2 {
-                stmt.execute(params![
-                    subject.id,
-                    subject.name,
-                    subject.name_cn,
-                    subject.summary,
-                    subject.date,
-                    subject.score,
-                    subject.platform,
-                    subject.infobox,
-                ])
-                .map_err(|e| AppError::BangumiParseError(format!("插入数据失败: {e}")))?;
-                count += 1;
-            }
+            stmt.execute(params![
+                subject.id,
+                subject.name,
+                subject.name_cn,
+                subject.summary,
+                subject.date,
+                subject.score,
+                subject.platform,
+                subject.infobox,
+            ])
+            .map_err(|e| AppError::BangumiParseError(format!("插入数据失败: {e}")))?;
+            count += 1;
         }
     }
 
