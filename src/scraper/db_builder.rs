@@ -147,12 +147,12 @@ fn extract_and_parse(zip_path: &Path, db_path: &Path) -> Result<(usize, usize)> 
 
     // Use single connection for both parsing to ensure FK constraints work
     let conn = get_or_create_db(db_path)?;
-    
+
     let subject_file = "subject.jsonlines";
     let episode_file = "episode.jsonlines";
 
     let subjects_count = parse_subjects_from_zip(&mut zip_archive, subject_file, &conn)?;
-    
+
     // Collect all subject IDs to check against when inserting episodes
     let subject_ids: std::collections::HashSet<u32> = {
         let mut stmt = conn
@@ -165,8 +165,9 @@ fn extract_and_parse(zip_path: &Path, db_path: &Path) -> Result<(usize, usize)> 
             .map_err(|e| AppError::BangumiParseError(format!("查询subjects失败: {e}")))?;
         ids.into_iter().collect()
     };
-    
-    let episodes_count = parse_episodes_from_zip(&mut zip_archive, episode_file, &conn, subject_ids)?;
+
+    let episodes_count =
+        parse_episodes_from_zip(&mut zip_archive, episode_file, &conn, subject_ids)?;
 
     Ok((subjects_count, episodes_count))
 }
@@ -316,7 +317,10 @@ fn validate_database(db_path: &Path) -> Result<()> {
         .query_row("SELECT COUNT(*) FROM episodes", [], |row| row.get(0))
         .map_err(|e| AppError::BangumiParseError(format!("查询episodes失败: {e}")))?;
 
-    eprintln!("数据库验证通过: {} 个条目, {} 个章节", subject_count, episode_count);
+    eprintln!(
+        "数据库验证通过: {} 个条目, {} 个章节",
+        subject_count, episode_count
+    );
 
     Ok(())
 }
