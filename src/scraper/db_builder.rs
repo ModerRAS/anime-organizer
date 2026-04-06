@@ -249,6 +249,8 @@ fn get_or_create_db(db_path: &Path) -> Result<Connection> {
 
     conn.execute_batch(
         r#"
+        PRAGMA foreign_keys = ON;
+
         CREATE TABLE IF NOT EXISTS subjects (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
