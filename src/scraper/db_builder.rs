@@ -68,9 +68,7 @@ pub async fn build_bangumi_db(output_path: &Path) -> Result<BuildDbStats> {
     eprintln!("解压并解析 dump 文件...");
     let (subjects_count, episodes_count) = extract_and_parse(&zip_path, output_path)?;
 
-    let db_size = std::fs::metadata(output_path)
-        .map_err(AppError::Io)?
-        .len();
+    let db_size = std::fs::metadata(output_path).map_err(AppError::Io)?.len();
 
     Ok(BuildDbStats {
         subjects_count,
