@@ -40,6 +40,8 @@ struct EpisodeRecord {
     sort: u32,
     #[serde(default)]
     name: Option<String>,
+    #[serde(rename = "name_cn", default)]
+    name_cn: Option<String>,
     #[serde(rename = "airdate", default)]
     air_date: Option<String>,
     #[serde(rename = "type", default)]
@@ -69,6 +71,9 @@ pub async fn build_bangumi_db(output_path: &Path) -> Result<BuildDbStats> {
     let (subjects_count, episodes_count) = extract_and_parse(&zip_path, output_path)?;
 
     let db_size = std::fs::metadata(output_path).map_err(AppError::Io)?.len();
+
+    eprintln!("验证数据库完整性...");
+    validate_database(output_path)?;
 
     Ok(BuildDbStats {
         subjects_count,
@@ -193,6 +198,9 @@ fn parse_subjects_from_zip(
         }
 
         if let Ok(subject) = serde_json::from_str::<SubjectRecord>(line) {
+            if subject.subject_type != 2 {
+                continue;
+            }
             stmt.execute(params![
                 subject.id,
                 subject.name,
@@ -225,8 +233,8 @@ fn parse_episodes_from_zip(
 
     let mut stmt = conn
         .prepare_cached(
-            "INSERT OR REPLACE INTO episodes (id, subject_id, episode_number, title, air_date) 
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR REPLACE INTO episodes (id, subject_id, episode_number, title, title_cn, air_date) 
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )
         .map_err(|e| AppError::BangumiParseError(format!("预处理 SQL 失败: {e}")))?;
 
@@ -246,6 +254,7 @@ fn parse_episodes_from_zip(
                     episode.subject_id,
                     episode.sort,
                     episode.name,
+                    episode.name_cn,
                     episode.air_date,
                 ])
                 .map_err(|e| AppError::BangumiParseError(format!("插入数据失败: {e}")))?;
@@ -281,6 +290,7 @@ fn get_or_create_db(db_path: &Path) -> Result<Connection> {
             subject_id INTEGER REFERENCES subjects(id),
             episode_number INTEGER,
             title TEXT,
+            title_cn TEXT,
             air_date TEXT
         );
 
@@ -292,4 +302,21 @@ fn get_or_create_db(db_path: &Path) -> Result<Connection> {
     .map_err(|e| AppError::BangumiParseError(format!("创建表失败: {e}")))?;
 
     Ok(conn)
+}
+
+fn validate_database(db_path: &Path) -> Result<()> {
+    let conn = Connection::open(db_path)
+        .map_err(|e| AppError::BangumiParseError(format!("打开数据库失败: {e}")))?;
+
+    let subject_count: u32 = conn
+        .query_row("SELECT COUNT(*) FROM subjects", [], |row| row.get(0))
+        .map_err(|e| AppError::BangumiParseError(format!("查询subjects失败: {e}")))?;
+
+    let episode_count: u32 = conn
+        .query_row("SELECT COUNT(*) FROM episodes", [], |row| row.get(0))
+        .map_err(|e| AppError::BangumiParseError(format!("查询episodes失败: {e}")))?;
+
+    eprintln!("数据库验证通过: {} 个条目, {} 个章节", subject_count, episode_count);
+
+    Ok(())
 }
