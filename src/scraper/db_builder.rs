@@ -1,5 +1,4 @@
 use crate::error::{AppError, Result};
-use flate2::read::GzDecoder;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
@@ -161,8 +160,7 @@ fn parse_subjects_from_zip(
         .by_name(filename)
         .map_err(|e| AppError::MetadataFetchError(format!("在 ZIP 中找不到 {}: {e}", filename)))?;
 
-    let gz_reader = GzDecoder::new(BufReader::new(subject_file));
-    let reader = BufReader::new(gz_reader);
+    let reader = BufReader::new(subject_file);
 
     let mut stmt = conn
         .prepare_cached(
@@ -209,8 +207,7 @@ fn parse_episodes_from_zip(
         .by_name(filename)
         .map_err(|e| AppError::MetadataFetchError(format!("在 ZIP 中找不到 {}: {e}", filename)))?;
 
-    let gz_reader = GzDecoder::new(BufReader::new(episode_file));
-    let reader = BufReader::new(gz_reader);
+    let reader = BufReader::new(episode_file);
 
     let conn = get_or_create_db(db_path)?;
     let mut stmt = conn
