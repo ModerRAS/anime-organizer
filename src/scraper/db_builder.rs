@@ -212,7 +212,7 @@ fn parse_episodes_from_zip(
     let conn = get_or_create_db(db_path)?;
     let mut stmt = conn
         .prepare_cached(
-            "INSERT OR REPLACE INTO episodes (id, subject_id, episode_number, title, air_date) 
+            "INSERT OR IGNORE INTO episodes (id, subject_id, episode_number, title, air_date) 
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )
         .map_err(|e| AppError::BangumiParseError(format!("预处理 SQL 失败: {e}")))?;
@@ -226,7 +226,7 @@ fn parse_episodes_from_zip(
         }
 
         if let Ok(episode) = serde_json::from_str::<EpisodeRecord>(line) {
-            stmt.execute(params![
+            let affected = stmt.execute(params![
                 episode.id,
                 episode.subject_id,
                 episode.sort,
@@ -234,7 +234,9 @@ fn parse_episodes_from_zip(
                 episode.air_date,
             ])
             .map_err(|e| AppError::BangumiParseError(format!("插入数据失败: {e}")))?;
-            count += 1;
+            if affected > 0 {
+                count += 1;
+            }
         }
     }
 
