@@ -42,8 +42,8 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-scraper-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build with scraper feature
-        run: cargo build --release --features scraper
+      - name: Build with scraper and llm-api features
+        run: cargo build --release --features "scraper,llm-api"
 
       - name: Download Bangumi DB from release
         continue-on-error: true
@@ -60,7 +60,7 @@ jobs:
           DAYS="${{ github.event.inputs.days || '7' }}"
           echo "Scraping anime from last ${DAYS} days..."
           # Output scraped data as JSON for the matcher
-          cargo run --release --features scraper -- scrape \
+          cargo run --release --features "scraper,llm-api" -- scrape \
             --days "${DAYS}" \
             --format json > /tmp/scraped.json 2>/dev/null || echo "[]" > /tmp/scraped.json
           echo "scraped_file=/tmp/scraped.json" >> "$GITHUB_OUTPUT"
@@ -72,7 +72,7 @@ jobs:
         continue-on-error: true
         run: |
           # Use the scraper's match command which uses LLM to find new aliases
-          cargo run --release --features scraper -- match \
+          cargo run --release --features "scraper,llm-api" -- match \
             --input /tmp/scraped.json \
             --aliases data/aliases.json \
             --format github > /tmp/match_result.txt 2>/dev/null || true
