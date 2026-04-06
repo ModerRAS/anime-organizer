@@ -30,7 +30,7 @@ use crate::error::{AppError, Result};
 ///
 /// 对应 Kodi 的 `<tvshow>` 格式。
 ///
-/// 符合 Kodi Wiki 规范：https://kodi.wiki/view/NFO_files/TV_shows
+/// 符合 Kodi Wiki 规范：<https://kodi.wiki/view/NFO_files/TV_shows>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TvShowNfo {
     /// 标题（必需）
@@ -119,7 +119,7 @@ pub struct Actor {
 ///
 /// 对应 Kodi 的 `<episodedetails>` 格式。
 ///
-/// 符合 Kodi Wiki 规范：https://kodi.wiki/view/NFO_files/Episodes
+/// 符合 Kodi Wiki 规范：<https://kodi.wiki/view/NFO_files/Episodes>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpisodeNfo {
     /// 集标题（必需）

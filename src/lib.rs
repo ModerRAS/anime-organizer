@@ -33,7 +33,7 @@
 //! - [`error`] - 错误处理模块
 /// - [`metadata`] - 元数据模块（Bangumi Archive / TMDB）
 /// - [`nfo`] - NFO 文件生成模块
-/// - [`scraper`] - 数据源刮削模块（需 `scraper` feature）
+/// - `scraper` - 数据源刮削模块（需 `scraper` feature，参考 `cargo doc --features scraper`）
 pub mod error;
 pub mod metadata;
 pub mod nfo;

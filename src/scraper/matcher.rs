@@ -147,7 +147,7 @@ pub fn match_aliases(
     result
 }
 
-/// 调用 LLM API (OpenCode/MiniMax) 进行别名匹配分析
+/// 调用 LLM API (OpenCode/MiniMax/Anthropic) 进行别名匹配分析
 fn call_llm_api(
     scraped: &[ScrapedAnime],
     existing_aliases: &HashMap<String, AliasEntry>,
@@ -165,25 +165,58 @@ fn call_llm_api(
             .ok()
             .unwrap_or_else(|| "fallback".to_string());
 
+        let base_url = std::env::var("LLM_BASE_URL")
+            .ok()
+            .unwrap_or_else(|| "https://api.opencode.ai".to_string());
+
+        let model = std::env::var("LLM_MODEL")
+            .ok()
+            .unwrap_or_else(|| "llama-3.2-3b-preview".to_string());
+
+        // Detect API type based on model name: Claude models use Anthropic API
+        let is_anthropic = model.starts_with("claude");
+
         let rt = Runtime::new()
             .map_err(|e| AppError::MetadataFetchError(format!("创建 tokio runtime 失败：{}", e)))?;
 
-        let response_result = rt.block_on(
-            client
-                .post("https://api.opencode.ai/v1/chat/completions")
-                .header("Authorization", format!("Bearer {}", api_key))
-                .header("Content-Type", "application/json")
-                .json(&serde_json::json!({
-                    "model": "llama-3.2-3b-preview",
-                    "messages": [{
-                        "role": "user",
-                        "content": prompt
-                    }],
-                    "temperature": 0.7,
-                    "max_tokens": 1024
-                }))
-                .send(),
-        );
+        let response_result = if is_anthropic {
+            rt.block_on(
+                client
+                    .post(format!("{}/v1/messages", base_url.trim_end_matches('/')))
+                    .header("x-api-key", &api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .header("Content-Type", "application/json")
+                    .json(&serde_json::json!({
+                        "model": model,
+                        "messages": [{
+                            "role": "user",
+                            "content": prompt
+                        }],
+                        "max_tokens": 1024
+                    }))
+                    .send(),
+            )
+        } else {
+            rt.block_on(
+                client
+                    .post(format!(
+                        "{}/v1/chat/completions",
+                        base_url.trim_end_matches('/')
+                    ))
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .header("Content-Type", "application/json")
+                    .json(&serde_json::json!({
+                        "model": model,
+                        "messages": [{
+                            "role": "user",
+                            "content": prompt
+                        }],
+                        "temperature": 0.7,
+                        "max_tokens": 1024
+                    }))
+                    .send(),
+            )
+        };
 
         let response = response_result
             .map_err(|e| AppError::MetadataFetchError(format!("LLM API 请求失败：{}", e)))?;
@@ -192,7 +225,11 @@ fn call_llm_api(
         let text = text_result
             .map_err(|e| AppError::MetadataFetchError(format!("LLM API 响应解析失败：{}", e)))?;
 
-        parse_llm_response(&text)
+        if is_anthropic {
+            parse_anthropic_response(&text)
+        } else {
+            parse_llm_response(&text)
+        }
     }
 
     #[cfg(not(feature = "llm-api"))]
@@ -316,6 +353,30 @@ pub fn parse_llm_response(response: &str) -> Result<MatchResult> {
     }
 
     Ok(result)
+}
+
+/// 解析 Anthropic API 返回的响应
+fn parse_anthropic_response(response: &str) -> Result<MatchResult> {
+    #[derive(Deserialize)]
+    struct AnthropicResponse {
+        content: Vec<AnthropicContent>,
+    }
+
+    #[derive(Deserialize)]
+    struct AnthropicContent {
+        text: String,
+    }
+
+    let resp: AnthropicResponse = serde_json::from_str(response)
+        .map_err(|e| AppError::BangumiParseError(format!("Anthropic JSON 解析失败: {e}")))?;
+
+    let text = resp
+        .content
+        .first()
+        .map(|c| c.text.as_str())
+        .unwrap_or_default();
+
+    parse_llm_response(text)
 }
 
 /// 从文本中提取 JSON 数组
