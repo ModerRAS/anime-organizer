@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 struct LatestVersion {
     #[allow(dead_code)]
     name: String,
-    url: String,
+    #[serde(rename = "browser_download_url")]
+    download_url: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -102,7 +103,7 @@ async fn fetch_latest_version_url() -> Result<String> {
         .await
         .map_err(|e| AppError::MetadataFetchError(format!("解析版本信息失败: {e}")))?;
 
-    Ok(version.url)
+    Ok(version.download_url)
 }
 
 async fn download_zip(url: &str, temp_dir: &Path) -> Result<PathBuf> {
