@@ -140,11 +140,28 @@ fn extract_and_parse(zip_path: &Path, db_path: &Path) -> Result<(usize, usize)> 
     let mut zip_archive = zip::ZipArchive::new(zip_file)
         .map_err(|e| AppError::MetadataFetchError(format!("解析 ZIP 文件失败: {e}")))?;
 
+    // Use single connection for both parsing to ensure FK constraints work
+    let conn = get_or_create_db(db_path)?;
+    
     let subject_file = "subject.jsonlines";
     let episode_file = "episode.jsonlines";
 
-    let subjects_count = parse_subjects_from_zip(&mut zip_archive, subject_file, db_path)?;
-    let episodes_count = parse_episodes_from_zip(&mut zip_archive, episode_file, db_path)?;
+    let subjects_count = parse_subjects_from_zip(&mut zip_archive, subject_file, &conn)?;
+    
+    // Collect all subject IDs to check against when inserting episodes
+    let subject_ids: std::collections::HashSet<u32> = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM subjects")
+            .map_err(|e| AppError::BangumiParseError(format!("查询subjects失败: {e}")))?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, u32>(0))
+            .map_err(|e| AppError::BangumiParseError(format!("查询subjects失败: {e}")))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| AppError::BangumiParseError(format!("查询subjects失败: {e}")))?;
+        ids.into_iter().collect()
+    };
+    
+    let episodes_count = parse_episodes_from_zip(&mut zip_archive, episode_file, &conn, subject_ids)?;
 
     Ok((subjects_count, episodes_count))
 }
@@ -152,10 +169,8 @@ fn extract_and_parse(zip_path: &Path, db_path: &Path) -> Result<(usize, usize)> 
 fn parse_subjects_from_zip(
     zip_archive: &mut zip::ZipArchive<std::fs::File>,
     filename: &str,
-    db_path: &Path,
+    conn: &Connection,
 ) -> Result<usize> {
-    let conn = get_or_create_db(db_path)?;
-
     let subject_file = zip_archive
         .by_name(filename)
         .map_err(|e| AppError::MetadataFetchError(format!("在 ZIP 中找不到 {}: {e}", filename)))?;
@@ -199,7 +214,8 @@ fn parse_subjects_from_zip(
 fn parse_episodes_from_zip(
     zip_archive: &mut zip::ZipArchive<std::fs::File>,
     filename: &str,
-    db_path: &Path,
+    conn: &Connection,
+    subject_ids: std::collections::HashSet<u32>,
 ) -> Result<usize> {
     let episode_file = zip_archive
         .by_name(filename)
@@ -207,10 +223,9 @@ fn parse_episodes_from_zip(
 
     let reader = BufReader::new(episode_file);
 
-    let conn = get_or_create_db(db_path)?;
     let mut stmt = conn
         .prepare_cached(
-            "INSERT OR IGNORE INTO episodes (id, subject_id, episode_number, title, air_date) 
+            "INSERT OR REPLACE INTO episodes (id, subject_id, episode_number, title, air_date) 
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )
         .map_err(|e| AppError::BangumiParseError(format!("预处理 SQL 失败: {e}")))?;
@@ -224,15 +239,16 @@ fn parse_episodes_from_zip(
         }
 
         if let Ok(episode) = serde_json::from_str::<EpisodeRecord>(line) {
-            let affected = stmt.execute(params![
-                episode.id,
-                episode.subject_id,
-                episode.sort,
-                episode.name,
-                episode.air_date,
-            ])
-            .map_err(|e| AppError::BangumiParseError(format!("插入数据失败: {e}")))?;
-            if affected > 0 {
+            // Only insert if subject_id exists (FK safety check)
+            if subject_ids.contains(&episode.subject_id) {
+                stmt.execute(params![
+                    episode.id,
+                    episode.subject_id,
+                    episode.sort,
+                    episode.name,
+                    episode.air_date,
+                ])
+                .map_err(|e| AppError::BangumiParseError(format!("插入数据失败: {e}")))?;
                 count += 1;
             }
         }
