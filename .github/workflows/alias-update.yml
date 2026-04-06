@@ -86,7 +86,7 @@ jobs:
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
-          LLM_MODEL: claude-sonnet-4-20250514
+          LLM_MODEL: MiniMax-M2.7
 
       - name: Update aliases.json with confident matches
         if: steps.match.outputs.confident_count != '0'
