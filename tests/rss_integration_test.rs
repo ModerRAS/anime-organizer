@@ -18,6 +18,7 @@ use anime_organizer::rss::proxy::ProxyConfig;
 use anime_organizer::rss::scheduler::RssScheduler;
 
 #[derive(Debug, Clone)]
+#[allow(clippy::type_complexity)]
 struct MockCloudDriveClient {
     login_called: Arc<Mutex<Vec<(String, String)>>>,
     add_offline_called: Arc<Mutex<Vec<(Vec<String>, String)>>>,

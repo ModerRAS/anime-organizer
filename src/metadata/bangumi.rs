@@ -276,6 +276,7 @@ impl BangumiClient {
     }
 
     #[cfg(feature = "scraper")]
+    #[allow(dead_code)]
     fn resolve_existing_db_path(&self) -> Option<PathBuf> {
         let db_path = self.cache_dir.join(BANGUMI_DATABASE_FILENAME);
         if db_path.is_file() {

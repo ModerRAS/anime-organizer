@@ -82,6 +82,9 @@ impl AliasLookup {
         let json_str = std::str::from_utf8(data.data.as_ref())
             .map_err(|e| AppError::AliasLoadError(format!("UTF-8 解码失败: {e}")))?;
 
+        // 去除 BOM 等前导字符
+        let json_str = json_str.trim_start_matches('\u{FEFF}').trim_start();
+
         let mut aliases: HashMap<String, AliasEntry> = serde_json::from_str(json_str)
             .map_err(|e| AppError::AliasLoadError(format!("JSON 解析失败: {e}")))?;
 

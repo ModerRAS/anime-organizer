@@ -49,7 +49,6 @@ mod tests {
     #[tokio::test]
     async fn test_http_client_get() {
         let client = reqwest::Client::builder().build().unwrap();
-        let http = HttpClient::new(client);
-        assert!(true);
+        let _http = HttpClient::new(client);
     }
 }
