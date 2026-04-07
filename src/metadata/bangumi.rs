@@ -18,6 +18,9 @@ use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "scraper")]
+use rusqlite::Connection;
+
 /// Bangumi Archive 基础 URL
 const BANGUMI_ARCHIVE_BASE: &str = "https://raw.githubusercontent.com/bangumi/archive/master/data";
 
@@ -26,6 +29,10 @@ const BANGUMI_ARCHIVE_RELEASE: &str = "https://github.com/bangumi/archive/releas
 
 /// 默认本地 dump 文件名
 const SUBJECT_DUMP_FILENAME: &str = "subject.jsonlines";
+
+/// 默认本地数据库文件名
+#[cfg(feature = "scraper")]
+const BANGUMI_DATABASE_FILENAME: &str = "bangumi.db";
 
 /// Bangumi Subject 基本信息（从 Archive 获取）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +90,9 @@ pub struct BangumiClient {
     source_path: Option<PathBuf>,
     /// 内存中的 Subject 索引（从 dump 加载后缓存）
     index: std::sync::Mutex<Option<HashMap<u32, BangumiSubject>>>,
+    #[cfg(feature = "scraper")]
+    /// 内存中的别名索引（从数据库加载后缓存）：alias -> (subject_id, canonical_name)
+    aliases_index: std::sync::Mutex<Option<HashMap<String, (u32, String)>>>,
 }
 
 impl BangumiClient {
@@ -107,6 +117,8 @@ impl BangumiClient {
             cache_dir,
             source_path,
             index: std::sync::Mutex::new(None),
+            #[cfg(feature = "scraper")]
+            aliases_index: std::sync::Mutex::new(None),
         }
     }
 
@@ -164,11 +176,113 @@ impl BangumiClient {
             .index
             .lock()
             .map_err(|e| AppError::BangumiParseError(format!("锁定索引失败: {e}")))?;
-        Ok(index.as_ref().and_then(|idx| {
+        if let Some(subject) = index.as_ref().and_then(|idx| {
             idx.values()
                 .find(|s| s.name == name || s.name_cn.as_deref() == Some(name))
                 .cloned()
-        }))
+        }) {
+            return Ok(Some(subject));
+        }
+        #[cfg(feature = "scraper")]
+        {
+            drop(index);
+            if let Ok(Some((bangumi_id, _))) = self.find_by_alias(name) {
+                return self.find_by_id(bangumi_id);
+            }
+        }
+        Ok(None)
+    }
+
+    #[cfg(feature = "scraper")]
+    pub fn find_by_alias(&self, alias: &str) -> Result<Option<(u32, String)>> {
+        self.prepare_aliases_index()?;
+        let aliases_index = self
+            .aliases_index
+            .lock()
+            .map_err(|e| AppError::BangumiParseError(format!("锁定别名索引失败: {e}")))?;
+        Ok(aliases_index
+            .as_ref()
+            .and_then(|idx| idx.get(alias).cloned()))
+    }
+
+    #[cfg(feature = "scraper")]
+    pub fn get_aliases(&self, bangumi_id: u32) -> Result<Vec<String>> {
+        self.prepare_aliases_index()?;
+        let db_path = self.cache_dir.join(BANGUMI_DATABASE_FILENAME);
+        if !db_path.is_file() {
+            return Ok(Vec::new());
+        }
+        let conn = Connection::open(&db_path)
+            .map_err(|e| AppError::BangumiParseError(format!("打开数据库失败: {e}")))?;
+        let mut stmt = conn
+            .prepare("SELECT alias FROM aliases WHERE subject_id = ?1")
+            .map_err(|e| AppError::BangumiParseError(format!("预处理 SQL 失败: {e}")))?;
+        let aliases = stmt
+            .query_map([bangumi_id], |row| row.get::<_, String>(0))
+            .map_err(|e| AppError::BangumiParseError(format!("查询别名失败: {e}")))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| AppError::BangumiParseError(format!("读取别名失败: {e}")))?;
+        Ok(aliases)
+    }
+
+    #[cfg(feature = "scraper")]
+    fn prepare_aliases_index(&self) -> Result<()> {
+        {
+            let aliases_index = self
+                .aliases_index
+                .lock()
+                .map_err(|e| AppError::BangumiParseError(format!("锁定别名索引失败: {e}")))?;
+            if aliases_index.is_some() {
+                return Ok(());
+            }
+        }
+        let db_path = self.cache_dir.join(BANGUMI_DATABASE_FILENAME);
+        if !db_path.is_file() {
+            let mut aliases_index = self
+                .aliases_index
+                .lock()
+                .map_err(|e| AppError::BangumiParseError(format!("锁定别名索引失败: {e}")))?;
+            *aliases_index = Some(HashMap::new());
+            return Ok(());
+        }
+        let conn = Connection::open(&db_path)
+            .map_err(|e| AppError::BangumiParseError(format!("打开数据库失败: {e}")))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT a.alias, a.subject_id, s.name FROM aliases a JOIN subjects s ON a.subject_id = s.id",
+            )
+            .map_err(|e| AppError::BangumiParseError(format!("预处理 SQL 失败: {e}")))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| AppError::BangumiParseError(format!("查询别名失败: {e}")))?;
+        let mut aliases: HashMap<String, (u32, String)> = HashMap::new();
+        for row in rows {
+            let (alias, subject_id, name) =
+                row.map_err(|e| AppError::BangumiParseError(format!("读取别名失败: {e}")))?;
+            aliases.insert(alias, (subject_id, name));
+        }
+        let mut aliases_index = self
+            .aliases_index
+            .lock()
+            .map_err(|e| AppError::BangumiParseError(format!("锁定别名索引失败: {e}")))?;
+        *aliases_index = Some(aliases);
+        Ok(())
+    }
+
+    #[cfg(feature = "scraper")]
+    fn resolve_existing_db_path(&self) -> Option<PathBuf> {
+        let db_path = self.cache_dir.join(BANGUMI_DATABASE_FILENAME);
+        if db_path.is_file() {
+            Some(db_path)
+        } else {
+            None
+        }
     }
 
     /// 从本地 dump 文件中模糊搜索

@@ -1,5 +1,6 @@
 use crate::error::{AppError, Result};
-use rusqlite::{params, Connection};
+use crate::metadata::wiki::WikiParser;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -30,6 +31,16 @@ struct SubjectRecord {
     platform: Option<u32>,
     #[serde(default)]
     infobox: Option<String>,
+    #[serde(default)]
+    nsfw: Option<u32>,
+    #[serde(default)]
+    series: Option<u32>,
+    #[serde(default)]
+    eps: Option<u32>,
+    #[serde(default)]
+    studio: Option<String>,
+    #[serde(default)]
+    director: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,38 +58,87 @@ struct EpisodeRecord {
     #[serde(rename = "type", default)]
     #[allow(dead_code)]
     ep_type: u32,
+    #[serde(default)]
+    disc: Option<u32>,
+    #[serde(default)]
+    duration: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct BuildDbStats {
     pub subjects_count: usize,
     pub episodes_count: usize,
+    pub aliases_count: usize,
+    pub relations_count: usize,
     pub db_size: u64,
+    pub processing_time_ms: u128,
 }
 
-pub async fn build_bangumi_db(output_path: &Path) -> Result<BuildDbStats> {
+const BATCH_SIZE: usize = 1000;
+
+pub async fn build_bangumi_db(
+    output_path: &Path,
+    include_relations: bool,
+    verbose: bool,
+) -> Result<BuildDbStats> {
+    let start_time = std::time::Instant::now();
+
+    if verbose {
+        eprintln!("开始构建 Bangumi 数据库...");
+    }
+
     let temp_dir = tempfile::tempdir()
         .map_err(|e| AppError::MetadataFetchError(format!("创建临时目录失败: {e}")))?;
     let temp_path = temp_dir.path().to_path_buf();
 
-    eprintln!("获取 Bangumi Archive 最新版本信息...");
+    if verbose {
+        eprintln!("获取 Bangumi Archive 最新版本信息...");
+    }
     let latest_url = fetch_latest_version_url().await?;
 
-    eprintln!("下载 Bangumi Archive: {}", latest_url);
+    if verbose {
+        eprintln!("下载 Bangumi Archive: {}", latest_url);
+    }
     let zip_path = download_zip(&latest_url, &temp_path).await?;
 
-    eprintln!("解压并解析 dump 文件...");
-    let (subjects_count, episodes_count) = extract_and_parse(&zip_path, output_path)?;
+    let download_size = std::fs::metadata(&zip_path).map_err(AppError::Io)?.len();
+    if verbose {
+        eprintln!("下载完成，大小: {} MB", download_size / (1024 * 1024));
+    }
+
+    if verbose {
+        eprintln!("开始解压...");
+    }
+    let (subjects_count, episodes_count, aliases_count, relations_count) =
+        extract_and_parse(&zip_path, output_path, include_relations, verbose)?;
 
     let db_size = std::fs::metadata(output_path).map_err(AppError::Io)?.len();
 
-    eprintln!("验证数据库完整性...");
+    if verbose {
+        eprintln!("验证数据库完整性...");
+    }
     validate_database(output_path)?;
+
+    let processing_time_ms = start_time.elapsed().as_millis();
+
+    if verbose {
+        let expected_size = 50 * 1024 * 1024;
+        eprintln!(
+            "数据库构建完成: 大小 {} MB (预期 ~{} MB)",
+            db_size / (1024 * 1024),
+            expected_size / (1024 * 1024)
+        );
+    }
 
     Ok(BuildDbStats {
         subjects_count,
         episodes_count,
+        aliases_count,
+        relations_count,
         db_size,
+        processing_time_ms,
     })
 }
 
@@ -140,20 +200,23 @@ async fn download_zip(url: &str, temp_dir: &Path) -> Result<PathBuf> {
     Ok(zip_path)
 }
 
-fn extract_and_parse(zip_path: &Path, db_path: &Path) -> Result<(usize, usize)> {
+fn extract_and_parse(
+    zip_path: &Path,
+    db_path: &Path,
+    include_relations: bool,
+    verbose: bool,
+) -> Result<(usize, usize, usize, usize)> {
     let zip_file = std::fs::File::open(zip_path).map_err(AppError::Io)?;
     let mut zip_archive = zip::ZipArchive::new(zip_file)
         .map_err(|e| AppError::MetadataFetchError(format!("解析 ZIP 文件失败: {e}")))?;
 
-    // Use single connection for both parsing to ensure FK constraints work
     let conn = get_or_create_db(db_path)?;
 
     let subject_file = "subject.jsonlines";
     let episode_file = "episode.jsonlines";
 
-    let subjects_count = parse_subjects_from_zip(&mut zip_archive, subject_file, &conn)?;
+    let subjects_count = parse_subjects_from_zip(&mut zip_archive, subject_file, &conn, verbose)?;
 
-    // Collect all subject IDs to check against when inserting episodes
     let subject_ids: std::collections::HashSet<u32> = {
         let mut stmt = conn
             .prepare("SELECT id FROM subjects")
@@ -167,30 +230,55 @@ fn extract_and_parse(zip_path: &Path, db_path: &Path) -> Result<(usize, usize)> 
     };
 
     let episodes_count =
-        parse_episodes_from_zip(&mut zip_archive, episode_file, &conn, subject_ids)?;
+        parse_episodes_from_zip(&mut zip_archive, episode_file, &conn, &subject_ids, verbose)?;
 
-    Ok((subjects_count, episodes_count))
+    let aliases_count =
+        parse_name_cn_aliases_from_zip(&mut zip_archive, &conn, &subject_ids, verbose)?;
+
+    let relations_count = if include_relations {
+        parse_relations_from_zip(&mut zip_archive, &conn, &subject_ids, verbose)?
+    } else {
+        0
+    };
+
+    Ok((
+        subjects_count,
+        episodes_count,
+        aliases_count,
+        relations_count,
+    ))
 }
 
 fn parse_subjects_from_zip(
     zip_archive: &mut zip::ZipArchive<std::fs::File>,
     filename: &str,
     conn: &Connection,
+    verbose: bool,
 ) -> Result<usize> {
-    let subject_file = zip_archive
+    let mut subject_file = zip_archive
         .by_name(filename)
         .map_err(|e| AppError::MetadataFetchError(format!("在 ZIP 中找不到 {}: {e}", filename)))?;
 
-    let reader = BufReader::new(subject_file);
+    use std::io::Read;
+    let mut content = String::new();
+    subject_file
+        .read_to_string(&mut content)
+        .map_err(|e| AppError::BangumiParseError(format!("读取文件失败: {e}")))?;
 
-    let mut stmt = conn
-        .prepare_cached(
-            "INSERT OR REPLACE INTO subjects (id, name, name_cn, summary, date, score, platform, infobox) 
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        )
-        .map_err(|e| AppError::BangumiParseError(format!("预处理 SQL 失败: {e}")))?;
+    let line_count = content.lines().count();
+    if verbose {
+        eprintln!("处理 {}: 源文件 {} 行", filename, line_count);
+    }
 
+    let reader = BufReader::new(content.as_bytes());
+
+    let parser = WikiParser::new();
+
+    let mut batch: Vec<SubjectRecord> = Vec::with_capacity(BATCH_SIZE);
+    let mut aliases_batch: Vec<(u32, String)> = Vec::with_capacity(BATCH_SIZE);
     let mut count = 0;
+    let mut skipped = 0;
+
     for line in reader.lines() {
         let line = line.map_err(|e| AppError::BangumiParseError(format!("读取行失败: {e}")))?;
         let line = line.trim();
@@ -200,46 +288,151 @@ fn parse_subjects_from_zip(
 
         if let Ok(subject) = serde_json::from_str::<SubjectRecord>(line) {
             if subject.subject_type != 2 {
+                skipped += 1;
                 continue;
             }
-            stmt.execute(params![
-                subject.id,
-                subject.name,
-                subject.name_cn,
-                subject.summary,
-                subject.date,
-                subject.score,
-                subject.platform,
-                subject.infobox,
-            ])
-            .map_err(|e| AppError::BangumiParseError(format!("插入数据失败: {e}")))?;
+
+            if let Some(ref infobox) = subject.infobox {
+                if let Ok(info) = parser.parse_anime_infobox(infobox) {
+                    for alias in &info.aliases {
+                        aliases_batch.push((subject.id, alias.clone()));
+                    }
+                }
+            }
+
+            batch.push(subject);
             count += 1;
+
+            if batch.len() >= BATCH_SIZE {
+                insert_subjects_batch(&batch, conn)?;
+                insert_aliases_batch(&aliases_batch, conn)?;
+                batch.clear();
+                aliases_batch.clear();
+            }
+        } else {
+            skipped += 1;
         }
     }
 
+    if !batch.is_empty() {
+        insert_subjects_batch(&batch, conn)?;
+        insert_aliases_batch(&aliases_batch, conn)?;
+    }
+
+    if verbose {
+        eprintln!(
+            "处理完成: 插入 {} 条，跳过 {} 条 (非动画类型或解析失败)",
+            count, skipped
+        );
+    }
+
     Ok(count)
+}
+
+fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| AppError::BangumiParseError(format!("开启事务失败: {e}")))?;
+    let placeholders: Vec<String> = (1..=13).map(|i| format!("?{}", i)).collect();
+    let sql = format!(
+        "INSERT OR REPLACE INTO subjects (id, type, name, name_cn, summary, date, score, platform, nsfw, series, eps, studio, director) VALUES {}",
+        batch.iter()
+            .map(|_| format!("({})", placeholders.join(", ")))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(batch.len() * 13);
+    for s in batch {
+        let nsfw = s.nsfw.unwrap_or(0);
+        let series = s.series.unwrap_or(0);
+        params.push(Box::new(s.id));
+        params.push(Box::new(s.subject_type));
+        params.push(Box::new(s.name.clone()));
+        params.push(Box::new(s.name_cn.clone()));
+        params.push(Box::new(s.summary.clone()));
+        params.push(Box::new(s.date.clone()));
+        params.push(Box::new(s.score));
+        params.push(Box::new(s.platform));
+        params.push(Box::new(nsfw));
+        params.push(Box::new(series));
+        params.push(Box::new(s.eps));
+        params.push(Box::new(s.studio.clone()));
+        params.push(Box::new(s.director.clone()));
+    }
+
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    tx.execute(&sql, param_refs.as_slice())
+        .map_err(|e| AppError::BangumiParseError(format!("批量插入subjects失败: {e}")))?;
+
+    tx.commit()
+        .map_err(|e| AppError::BangumiParseError(format!("提交事务失败: {e}")))?;
+    Ok(())
+}
+
+fn insert_aliases_batch(batch: &[(u32, String)], conn: &Connection) -> Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| AppError::BangumiParseError(format!("开启事务失败: {e}")))?;
+    let sql = format!(
+        "INSERT OR IGNORE INTO aliases (subject_id, alias) VALUES {}",
+        batch
+            .iter()
+            .map(|_| "(?, ?)")
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(batch.len() * 2);
+    for (subject_id, alias) in batch {
+        params.push(subject_id);
+        params.push(alias);
+    }
+
+    tx.execute(&sql, params.as_slice())
+        .map_err(|e| AppError::BangumiParseError(format!("批量插入aliases失败: {e}")))?;
+
+    tx.commit()
+        .map_err(|e| AppError::BangumiParseError(format!("提交事务失败: {e}")))?;
+    Ok(())
 }
 
 fn parse_episodes_from_zip(
     zip_archive: &mut zip::ZipArchive<std::fs::File>,
     filename: &str,
     conn: &Connection,
-    subject_ids: std::collections::HashSet<u32>,
+    subject_ids: &std::collections::HashSet<u32>,
+    verbose: bool,
 ) -> Result<usize> {
-    let episode_file = zip_archive
+    let mut episode_file = zip_archive
         .by_name(filename)
         .map_err(|e| AppError::MetadataFetchError(format!("在 ZIP 中找不到 {}: {e}", filename)))?;
 
-    let reader = BufReader::new(episode_file);
+    use std::io::Read;
+    let mut content = String::new();
+    episode_file
+        .read_to_string(&mut content)
+        .map_err(|e| AppError::BangumiParseError(format!("读取文件失败: {e}")))?;
 
-    let mut stmt = conn
-        .prepare_cached(
-            "INSERT OR REPLACE INTO episodes (id, subject_id, episode_number, title, title_cn, air_date) 
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )
-        .map_err(|e| AppError::BangumiParseError(format!("预处理 SQL 失败: {e}")))?;
+    let line_count = content.lines().count();
+    if verbose {
+        eprintln!("处理 {}: 源文件 {} 行", filename, line_count);
+    }
 
+    let reader = BufReader::new(content.as_bytes());
+
+    let mut batch: Vec<EpisodeRecord> = Vec::with_capacity(BATCH_SIZE);
     let mut count = 0;
+    let mut skipped = 0;
+
     for line in reader.lines() {
         let line = line.map_err(|e| AppError::BangumiParseError(format!("读取行失败: {e}")))?;
         let line = line.trim();
@@ -248,23 +441,149 @@ fn parse_episodes_from_zip(
         }
 
         if let Ok(episode) = serde_json::from_str::<EpisodeRecord>(line) {
-            // Only insert if subject_id exists (FK safety check)
-            if subject_ids.contains(&episode.subject_id) {
-                stmt.execute(params![
-                    episode.id,
-                    episode.subject_id,
-                    episode.sort,
-                    episode.name,
-                    episode.name_cn,
-                    episode.air_date,
-                ])
-                .map_err(|e| AppError::BangumiParseError(format!("插入数据失败: {e}")))?;
-                count += 1;
+            if !subject_ids.contains(&episode.subject_id) {
+                skipped += 1;
+                continue;
+            }
+            batch.push(episode);
+            count += 1;
+
+            if batch.len() >= BATCH_SIZE {
+                insert_episodes_batch(&batch, conn)?;
+                batch.clear();
+            }
+        } else {
+            skipped += 1;
+        }
+    }
+
+    if !batch.is_empty() {
+        insert_episodes_batch(&batch, conn)?;
+    }
+
+    if verbose {
+        eprintln!(
+            "处理完成: 插入 {} 条，跳过 {} 条 (无关subject或解析失败)",
+            count, skipped
+        );
+    }
+
+    Ok(count)
+}
+
+fn insert_episodes_batch(batch: &[EpisodeRecord], conn: &Connection) -> Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| AppError::BangumiParseError(format!("开启事务失败: {e}")))?;
+    let placeholders: Vec<String> = (1..=10).map(|i| format!("?{}", i)).collect();
+    let sql = format!(
+        "INSERT OR REPLACE INTO episodes (id, subject_id, sort, name, name_cn, airdate, type, disc, duration, description) VALUES {}",
+        batch.iter()
+            .map(|_| format!("({})", placeholders.join(", ")))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(batch.len() * 10);
+    for e in batch {
+        let disc = e.disc.unwrap_or(0);
+        params.push(Box::new(e.id));
+        params.push(Box::new(e.subject_id));
+        params.push(Box::new(e.sort));
+        params.push(Box::new(e.name.clone()));
+        params.push(Box::new(e.name_cn.clone()));
+        params.push(Box::new(e.air_date.clone()));
+        params.push(Box::new(e.ep_type));
+        params.push(Box::new(disc));
+        params.push(Box::new(e.duration.clone()));
+        params.push(Box::new(e.description.clone()));
+    }
+
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    tx.execute(&sql, param_refs.as_slice())
+        .map_err(|e| AppError::BangumiParseError(format!("批量插入episodes失败: {e}")))?;
+
+    tx.commit()
+        .map_err(|e| AppError::BangumiParseError(format!("提交事务失败: {e}")))?;
+    Ok(())
+}
+
+fn parse_name_cn_aliases_from_zip(
+    zip_archive: &mut zip::ZipArchive<std::fs::File>,
+    conn: &Connection,
+    subject_ids: &std::collections::HashSet<u32>,
+    verbose: bool,
+) -> Result<usize> {
+    let mut subject_file = zip_archive.by_name("subject.jsonlines").map_err(|e| {
+        AppError::MetadataFetchError(format!("在 ZIP 中找不到 subject.jsonlines: {e}"))
+    })?;
+
+    use std::io::Read;
+    let mut content = String::new();
+    subject_file
+        .read_to_string(&mut content)
+        .map_err(|e| AppError::BangumiParseError(format!("读取文件失败: {e}")))?;
+
+    let line_count = content.lines().count();
+    if verbose {
+        eprintln!("处理 name_cn aliases: 源文件 {} 行", line_count);
+    }
+
+    let reader = BufReader::new(content.as_bytes());
+
+    let mut batch: Vec<(u32, String)> = Vec::with_capacity(BATCH_SIZE);
+    let mut count = 0;
+    let mut skipped = 0;
+
+    for line in reader.lines() {
+        let line = line.map_err(|e| AppError::BangumiParseError(format!("读取行失败: {e}")))?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Ok(subject) = serde_json::from_str::<SubjectRecord>(line) {
+            if !subject_ids.contains(&subject.id) {
+                skipped += 1;
+                continue;
+            }
+
+            if let Some(ref name_cn) = subject.name_cn {
+                if !name_cn.is_empty() && name_cn != &subject.name {
+                    batch.push((subject.id, name_cn.clone()));
+                    count += 1;
+
+                    if batch.len() >= BATCH_SIZE {
+                        insert_aliases_batch(&batch, conn)?;
+                        batch.clear();
+                    }
+                }
             }
         }
     }
 
+    if !batch.is_empty() {
+        insert_aliases_batch(&batch, conn)?;
+    }
+
+    if verbose {
+        eprintln!("处理完成: 插入 {} 条别名，跳过 {} 条", count, skipped);
+    }
+
     Ok(count)
+}
+
+fn parse_relations_from_zip(
+    _zip_archive: &mut zip::ZipArchive<std::fs::File>,
+    _conn: &Connection,
+    _subject_ids: &std::collections::HashSet<u32>,
+    _verbose: bool,
+) -> Result<usize> {
+    Ok(0)
 }
 
 fn get_or_create_db(db_path: &Path) -> Result<Connection> {
@@ -272,32 +591,77 @@ fn get_or_create_db(db_path: &Path) -> Result<Connection> {
         .map_err(|e| AppError::BangumiParseError(format!("打开数据库失败: {e}")))?;
 
     conn.execute_batch(
-        r#"
-        PRAGMA foreign_keys = ON;
+        "PRAGMA foreign_keys = ON;
+         PRAGMA synchronous = OFF;
+         PRAGMA journal_mode = WAL;
+         PRAGMA cache_size = 1000000;
+         PRAGMA temp_store = MEMORY;",
+    )
+    .map_err(|e| AppError::BangumiParseError(format!("设置 PRAGMA 失败: {e}")))?;
 
+    conn.execute_batch(
+        r#"
         CREATE TABLE IF NOT EXISTS subjects (
             id INTEGER PRIMARY KEY,
+            type INTEGER NOT NULL,
             name TEXT NOT NULL,
             name_cn TEXT,
             summary TEXT,
             date TEXT,
             score REAL,
             platform INTEGER,
-            infobox TEXT
+            nsfw INTEGER DEFAULT 0,
+            series INTEGER DEFAULT 0,
+            eps INTEGER,
+            studio TEXT,
+            director TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS aliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            subject_id INTEGER REFERENCES subjects(id) ON DELETE CASCADE,
+            alias TEXT NOT NULL,
+            UNIQUE(subject_id, alias)
+        );
+        CREATE INDEX IF NOT EXISTS idx_aliases_alias ON aliases(alias);
+        CREATE INDEX IF NOT EXISTS idx_aliases_subject ON aliases(subject_id);
 
         CREATE TABLE IF NOT EXISTS episodes (
             id INTEGER PRIMARY KEY,
-            subject_id INTEGER REFERENCES subjects(id),
-            episode_number INTEGER,
-            title TEXT,
-            title_cn TEXT,
-            air_date TEXT
+            subject_id INTEGER REFERENCES subjects(id) ON DELETE CASCADE,
+            sort INTEGER NOT NULL,
+            name TEXT,
+            name_cn TEXT,
+            airdate TEXT,
+            type INTEGER DEFAULT 0,
+            disc INTEGER DEFAULT 0,
+            duration TEXT,
+            description TEXT
         );
 
-        CREATE INDEX IF NOT EXISTS idx_subjects_name ON subjects(name);
-        CREATE INDEX IF NOT EXISTS idx_subjects_name_cn ON subjects(name_cn);
-        CREATE INDEX IF NOT EXISTS idx_episodes_subject ON episodes(subject_id);
+        CREATE TABLE IF NOT EXISTS subject_characters (
+            subject_id INTEGER,
+            character_id INTEGER,
+            type TEXT,
+            "order" INTEGER,
+            PRIMARY KEY (subject_id, character_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS subject_persons (
+            subject_id INTEGER,
+            person_id INTEGER,
+            position INTEGER,
+            appear_eps TEXT,
+            PRIMARY KEY (subject_id, person_id, position)
+        );
+
+        CREATE TABLE IF NOT EXISTS subject_relations (
+            subject_id INTEGER,
+            related_subject_id INTEGER,
+            relation_type INTEGER,
+            "order" INTEGER,
+            PRIMARY KEY (subject_id, related_subject_id)
+        );
         "#,
     )
     .map_err(|e| AppError::BangumiParseError(format!("创建表失败: {e}")))?;
@@ -317,9 +681,13 @@ fn validate_database(db_path: &Path) -> Result<()> {
         .query_row("SELECT COUNT(*) FROM episodes", [], |row| row.get(0))
         .map_err(|e| AppError::BangumiParseError(format!("查询episodes失败: {e}")))?;
 
+    let alias_count: u32 = conn
+        .query_row("SELECT COUNT(*) FROM aliases", [], |row| row.get(0))
+        .map_err(|e| AppError::BangumiParseError(format!("查询aliases失败: {e}")))?;
+
     eprintln!(
-        "数据库验证通过: {} 个条目, {} 个章节",
-        subject_count, episode_count
+        "数据库验证通过: {} 个主体, {} 个剧集, {} 个别名",
+        subject_count, episode_count, alias_count
     );
 
     Ok(())

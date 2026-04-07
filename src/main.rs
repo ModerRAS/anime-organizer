@@ -200,9 +200,14 @@ enum MatchOutputFormat {
 #[cfg(feature = "scraper")]
 #[derive(Args, Debug, Clone)]
 struct BuildDbArgs {
-    /// SQLite 数据库输出路径
     #[arg(long, value_name = "PATH")]
     output: PathBuf,
+
+    #[arg(long, default_value = "false")]
+    include_relations: bool,
+
+    #[arg(long, short, default_value = "false")]
+    verbose: bool,
 }
 
 #[cfg(feature = "scraper")]
@@ -1040,12 +1045,28 @@ fn run_match(args: MatchArgs) -> Result<(), AppError> {
 fn run_build_db(args: BuildDbArgs) -> Result<(), AppError> {
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|e| AppError::MetadataFetchError(format!("创建异步运行时失败: {e}")))?;
-    let stats = runtime.block_on(build_bangumi_db(&args.output))?;
+    let stats = runtime.block_on(build_bangumi_db(
+        &args.output,
+        args.include_relations,
+        args.verbose,
+    ))?;
 
-    println!("数据库构建完成！");
+    println!("=== Database Build Stats ===");
     println!("Subjects: {}", stats.subjects_count);
     println!("Episodes: {}", stats.episodes_count);
-    println!("Database size: {} bytes", stats.db_size);
+    println!("Aliases: {}", stats.aliases_count);
+    println!("Relations: {}", stats.relations_count);
+    println!(
+        "Database size: {} bytes ({} KB, {} MB)",
+        stats.db_size,
+        stats.db_size / 1024,
+        stats.db_size / (1024 * 1024)
+    );
+    println!(
+        "Processing time: {} ms ({} s)",
+        stats.processing_time_ms,
+        stats.processing_time_ms as f64 / 1000.0
+    );
 
     Ok(())
 }
