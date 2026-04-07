@@ -146,6 +146,8 @@ impl CloudDriveClientTrait for CloudDriveClient {
             proto::cloud_drive_file_srv_client::CloudDriveFileSrvClient::with_interceptor(
                 channel,
                 move |mut req: tonic::Request<()>| {
+                    #[allow(clippy::result_large_err)]
+                    {
                     let header_value = format!("Bearer {}", token);
                     let metadata_value: tonic::metadata::MetadataValue<_> =
                         header_value.parse().map_err(|_| {
@@ -153,6 +155,7 @@ impl CloudDriveClientTrait for CloudDriveClient {
                         })?;
                     req.metadata_mut().insert("authorization", metadata_value);
                     Ok(req)
+                    }
                 },
             );
 
