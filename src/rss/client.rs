@@ -148,13 +148,13 @@ impl CloudDriveClientTrait for CloudDriveClient {
                 move |mut req: tonic::Request<()>| {
                     #[allow(clippy::result_large_err)]
                     {
-                    let header_value = format!("Bearer {}", token);
-                    let metadata_value: tonic::metadata::MetadataValue<_> =
-                        header_value.parse().map_err(|_| {
-                            tonic::Status::invalid_argument("Invalid authorization token")
-                        })?;
-                    req.metadata_mut().insert("authorization", metadata_value);
-                    Ok(req)
+                        let header_value = format!("Bearer {}", token);
+                        let metadata_value: tonic::metadata::MetadataValue<_> =
+                            header_value.parse().map_err(|_| {
+                                tonic::Status::invalid_argument("Invalid authorization token")
+                            })?;
+                        req.metadata_mut().insert("authorization", metadata_value);
+                        Ok(req)
                     }
                 },
             );
