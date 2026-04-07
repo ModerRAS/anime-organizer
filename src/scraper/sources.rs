@@ -23,6 +23,8 @@ pub struct ScrapedAnime {
     pub bangumi_id: Option<u32>,
     /// TMDB ID（如果来自 TMDB）
     pub tmdb_id: Option<u32>,
+    /// 别名（来自 infobox）
+    pub aliases: Vec<String>,
 }
 
 /// 数据来源类型
@@ -123,6 +125,7 @@ impl Scraper {
                     source_url: id.map(|id| format!("https://bgm.tv/subject/{id}")),
                     bangumi_id: id,
                     tmdb_id: None,
+                    aliases: Vec::new(),
                 });
             }
         }
@@ -182,6 +185,7 @@ impl Scraper {
                     source_url: id.map(|id| format!("https://www.themoviedb.org/tv/{id}")),
                     bangumi_id: None,
                     tmdb_id: id,
+                    aliases: Vec::new(),
                 });
             }
         }
@@ -294,6 +298,7 @@ fn parse_dmhy_rss(xml: &str) -> Vec<ScrapedAnime> {
             source_url: link,
             bangumi_id: None,
             tmdb_id: None,
+            aliases: Vec::new(),
         });
     }
 

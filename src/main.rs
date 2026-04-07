@@ -20,7 +20,10 @@ use anime_organizer::{
 #[cfg(any(feature = "scraper", feature = "clouddrive"))]
 use clap::Subcommand;
 use clap::{Args, Parser, ValueEnum};
-use std::collections::{HashMap, HashSet};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -140,6 +143,9 @@ enum Commands {
     #[cfg(feature = "scraper")]
     /// 从 Bangumi Archive 构建 SQLite 数据库
     BuildDb(BuildDbArgs),
+    #[cfg(feature = "scraper")]
+    /// 从 Bangumi dump 中提取别名信息
+    ExtractAliases(ExtractAliasesArgs),
     #[cfg(feature = "clouddrive")]
     /// RSS 订阅管理
     Rss(RssArgs),
@@ -197,6 +203,22 @@ struct BuildDbArgs {
     /// SQLite 数据库输出路径
     #[arg(long, value_name = "PATH")]
     output: PathBuf,
+}
+
+#[cfg(feature = "scraper")]
+#[derive(Args, Debug, Clone)]
+struct ExtractAliasesArgs {
+    /// 本地 subject.jsonlines 文件路径
+    #[arg(long, value_name = "PATH")]
+    input: Option<PathBuf>,
+
+    /// 从 Bangumi Archive 下载最新的 dump
+    #[arg(long)]
+    download: bool,
+
+    /// 输出文件路径（默认stdout）
+    #[arg(long, value_name = "PATH")]
+    output: Option<PathBuf>,
 }
 
 #[cfg(feature = "clouddrive")]
@@ -310,6 +332,8 @@ fn run_command(command: Commands) -> Result<(), AppError> {
         Commands::Match(args) => run_match(args),
         #[cfg(feature = "scraper")]
         Commands::BuildDb(args) => run_build_db(args),
+        #[cfg(feature = "scraper")]
+        Commands::ExtractAliases(args) => run_extract_aliases(args),
         #[cfg(feature = "clouddrive")]
         Commands::Rss(args) => run_rss(args),
     }
@@ -1024,6 +1048,109 @@ fn run_build_db(args: BuildDbArgs) -> Result<(), AppError> {
     println!("Database size: {} bytes", stats.db_size);
 
     Ok(())
+}
+
+#[cfg(feature = "scraper")]
+fn run_extract_aliases(args: ExtractAliasesArgs) -> Result<(), AppError> {
+    use anime_organizer::metadata::wiki::WikiParser;
+    use std::collections::HashMap;
+    use std::io::{BufRead, BufReader};
+
+    let dump_path = if args.download {
+        let runtime = tokio::runtime::Runtime::new()
+            .map_err(|e| AppError::MetadataFetchError(format!("创建异步运行时失败: {e}")))?;
+        runtime.block_on(async {
+            let client = anime_organizer::metadata::BangumiClient::new(None);
+            client.download_dump().await
+        })?
+    } else if let Some(ref path) = args.input {
+        path.clone()
+    } else {
+        let client = anime_organizer::metadata::BangumiClient::new(None);
+        client.resolve_existing_dump_path().ok_or_else(|| {
+            AppError::MetadataFetchError(
+                "未找到本地 dump，请使用 --download 下载或 --input 指定路径".to_string(),
+            )
+        })?
+    };
+
+    let file = std::fs::File::open(&dump_path)
+        .map_err(|e| AppError::BangumiParseError(format!("打开 dump 文件失败: {e}")))?;
+    let reader = BufReader::new(file);
+
+    let mut aliases_map: HashMap<String, AliasEntry> = HashMap::new();
+    let parser = WikiParser::new();
+
+    for line in reader.lines() {
+        let line = line.map_err(|e| AppError::BangumiParseError(format!("读取行失败: {e}")))?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let subject: anime_organizer::metadata::bangumi::BangumiSubject =
+            match serde_json::from_str(line) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+        if subject.subject_type != 2 {
+            continue;
+        }
+
+        let Some(ref infobox) = subject.infobox else {
+            continue;
+        };
+
+        let anime_info = match parser.parse_anime_infobox(infobox) {
+            Ok(info) => info,
+            Err(_) => continue,
+        };
+
+        if anime_info.aliases.is_empty() {
+            continue;
+        }
+
+        let entry = AliasEntry {
+            bangumi_id: subject.id,
+            name: subject.name,
+            name_cn: subject.name_cn,
+        };
+
+        for alias in anime_info.aliases {
+            if !alias.is_empty() {
+                aliases_map.insert(alias, entry.clone());
+            }
+        }
+    }
+
+    let output: Box<dyn std::io::Write> = if let Some(ref path) = args.output {
+        Box::new(
+            std::fs::File::create(path)
+                .map_err(|e| AppError::MetadataFetchError(format!("创建输出文件失败: {e}")))?,
+        )
+    } else {
+        Box::new(std::io::stdout())
+    };
+
+    let mut writer = std::io::BufWriter::new(output);
+    serde_json::to_writer(&mut writer, &aliases_map)
+        .map_err(|e| AppError::MetadataFetchError(format!("序列化别名失败: {e}")))?;
+    writer
+        .flush()
+        .map_err(|e| AppError::MetadataFetchError(format!("写入输出失败: {e}")))?;
+
+    eprintln!("成功提取 {} 个别名", aliases_map.len());
+
+    Ok(())
+}
+
+#[cfg(feature = "scraper")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AliasEntry {
+    bangumi_id: u32,
+    name: String,
+    name_cn: Option<String>,
 }
 
 #[cfg(feature = "clouddrive")]

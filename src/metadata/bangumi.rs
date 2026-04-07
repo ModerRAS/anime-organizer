@@ -252,7 +252,7 @@ impl BangumiClient {
         Ok(index.as_ref().map(HashMap::len))
     }
 
-    fn resolve_existing_dump_path(&self) -> Option<PathBuf> {
+    pub fn resolve_existing_dump_path(&self) -> Option<PathBuf> {
         let candidates = [
             self.source_path.clone(),
             Some(self.cache_dir.join(SUBJECT_DUMP_FILENAME)),

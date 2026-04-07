@@ -79,22 +79,76 @@ jobs:
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
 
+      - name: Extract infobox aliases from Bangumi dump
+        run: |
+          echo "::group::Extracting infobox aliases"
+          echo "::notice::Extracting aliases from Bangumi dump..."
+          # Extract aliases from Bangumi dump - these are official aliases from infobox
+          if cargo run --release --features "scraper" -- extract-aliases \
+            --download \
+            --output /tmp/extracted_aliases.json; then
+            echo "::notice::Extraction completed successfully"
+          else
+            echo "::warning::Extraction failed"
+            echo "{}" > /tmp/extracted_aliases.json
+          fi
+
+          # Merge extracted aliases into aliases.json
+          if [ -s /tmp/extracted_aliases.json ]; then
+            echo "::notice::Merging extracted aliases into aliases.json..."
+            python3 << 'PYEOF'
+import json, sys
+
+with open('data/aliases.json', 'r', encoding='utf-8') as f:
+    existing = json.load(f)
+
+with open('/tmp/extracted_aliases.json', 'r', encoding='utf-8') as f:
+    extracted = json.load(f)
+
+added = 0
+for key, value in extracted.items():
+    if key not in existing:
+        existing[key] = value
+        added += 1
+
+with open('data/aliases.json', 'w', encoding='utf-8') as f:
+    json.dump(existing, f, ensure_ascii=False, indent=2)
+
+print(f"Added {added} infobox aliases")
+PYEOF
+            echo "::notice::Infobox aliases merged successfully"
+          else
+            echo "::warning::No extracted aliases to merge"
+          fi
+          echo "::endgroup::"
+
       - name: Run LLM matcher
         id: match
         continue-on-error: true
         run: |
+          echo "::group::Running LLM matcher"
+          echo "::notice::Starting LLM-based alias matching..."
           # Use the scraper's match command which uses LLM to find new aliases
-          cargo run --release --features "scraper,llm-api" -- match \
+          if cargo run --release --features "scraper,llm-api" -- match \
             --input /tmp/scraped.json \
             --aliases data/aliases.json \
-            --format github > /tmp/match_result.txt 2>/dev/null || true
+            --format github > /tmp/match_result.txt; then
+            echo "::notice::Matching completed successfully"
+          else
+            echo "::warning::Matching command failed, processing partial results"
+            touch /tmp/match_result.txt
+          fi
 
           # Parse output for GitHub Actions
-          CONFIDENT=$(grep -oP 'confident_count=\K\d+' /tmp/match_result.txt 2>/dev/null || echo "0")
-          UNCERTAIN=$(grep -oP 'uncertain_count=\K\d+' /tmp/match_result.txt 2>/dev/null || echo "0")
+          echo "::notice::Parsing match results..."
+          CONFIDENT=$(grep -oP 'confident_count=\K\d+' /tmp/match_result.txt || echo "0")
+          UNCERTAIN=$(grep -oP 'uncertain_count=\K\d+' /tmp/match_result.txt || echo "0")
 
+          echo "::notice::Confident matches: ${CONFIDENT}"
+          echo "::notice::Uncertain matches: ${UNCERTAIN}"
           echo "confident_count=${CONFIDENT}" >> "$GITHUB_OUTPUT"
           echo "uncertain_count=${UNCERTAIN}" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
@@ -103,11 +157,14 @@ jobs:
       - name: Update aliases.json with confident matches
         if: steps.match.outputs.confident_count != '0'
         run: |
+          echo "::group::Updating aliases.json"
+          echo "::notice::Extracting confident proposals from match results..."
           # Extract confident proposals and merge into aliases.json
           grep 'confident_proposals=' /tmp/match_result.txt | \
             sed 's/confident_proposals=//' > /tmp/confident.json || true
 
           if [ -s /tmp/confident.json ]; then
+            echo "::notice::Merging $(wc -l < /tmp/confident.json) confident proposals into aliases.json..."
             # Use jq to merge new aliases (if available, otherwise Python)
             python3 -c "
           import json, sys
@@ -118,6 +175,7 @@ jobs:
           with open('/tmp/confident.json', 'r', encoding='utf-8') as f:
               proposals = json.load(f)
 
+          added_count = 0
           for p in proposals:
               key = p.get('fan_translation', '')
               if key and key not in aliases:
@@ -127,98 +185,126 @@ jobs:
                       'tmdb_id': p['alias_entry'].get('tmdb_id'),
                       'anidb_id': p['alias_entry'].get('anidb_id')
                   }
+                  added_count += 1
 
           with open('data/aliases.json', 'w', encoding='utf-8') as f:
               json.dump(aliases, f, ensure_ascii=False, indent=2)
+          print(f'Added {added_count} new aliases')
           "
+            echo "::notice::aliases.json updated successfully"
+          else
+            echo "::warning::No confident proposals found to merge"
           fi
+          echo "::endgroup::"
 
       - name: Create PR for confident matches
         if: steps.match.outputs.confident_count != '0'
         run: |
+          echo "::group::Creating Pull Request"
+          echo "::notice::Configuring git user for PR creation..."
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           BRANCH="alias-update-$(date +%Y%m%d)"
+          echo "::notice::Creating branch: ${BRANCH}"
           git checkout -b "${BRANCH}"
           git add data/aliases.json
+          echo "::notice::Committing ${{ steps.match.outputs.confident_count }} alias entries..."
           git commit -m "feat(aliases): add ${{ steps.match.outputs.confident_count }} new alias entries
 
-          Auto-generated by LLM alias matching.
-          Matched with high confidence from recent anime data."
+Auto-generated by LLM alias matching.
+Matched with high confidence from recent anime data."
 
+          echo "::notice::Pushing branch to origin..."
           git push origin "${BRANCH}"
 
+          echo "::notice::Creating pull request..."
           gh pr create \
             --title "feat(aliases): add new alias entries (auto)" \
             --body "## Auto-generated Alias Update
 
-          This PR was auto-generated by the alias update workflow.
+This PR was auto-generated by the alias update workflow.
 
-          **Confident matches**: ${{ steps.match.outputs.confident_count }}
+**Confident matches**: ${{ steps.match.outputs.confident_count }}
 
-          Please review the changes to \`data/aliases.json\`." \
+Please review the changes to \`data/aliases.json\`." \
             --label "alias-update" \
             --base master
+          echo "::notice::Pull request created successfully"
+          echo "::endgroup::"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create issues for uncertain matches
         if: steps.match.outputs.uncertain_count != '0'
         run: |
+          echo "::group::Creating issues for uncertain matches"
+          echo "::notice::Extracting uncertain proposals from match results..."
           grep 'uncertain_proposals=' /tmp/match_result.txt | \
             sed 's/uncertain_proposals=//' > /tmp/uncertain.json || true
 
           if [ -s /tmp/uncertain.json ]; then
-            python3 -c "
-          import json, subprocess, sys
+            echo "::notice::Processing uncertain proposals and creating issues..."
+            python3 << 'PYEOF'
+import json, subprocess, sys
 
-          with open('/tmp/uncertain.json', 'r', encoding='utf-8') as f:
-              proposals = json.load(f)
+with open('/tmp/uncertain.json', 'r', encoding='utf-8') as f:
+    proposals = json.load(f)
 
-          for p in proposals:
-              fan = p.get('fan_translation', 'Unknown')
-              entry = p.get('alias_entry', {})
-              bgm_id = entry.get('bangumi_id', 0)
-              name = entry.get('name', '')
-              confidence = p.get('confidence', 'low')
-              reasoning = p.get('reasoning', '')
+issue_count = 0
+for p in proposals:
+    fan = p.get('fan_translation', 'Unknown')
+    entry = p.get('alias_entry', {})
+    bgm_id = entry.get('bangumi_id', 0)
+    name = entry.get('name', '')
+    confidence = p.get('confidence', 'low')
+    reasoning = p.get('reasoning', '')
 
-              body = f'''## Anime Information
+    # Build body manually to avoid f-string issues with YAML
+    body_lines = [
+        "## Anime Information",
+        "",
+        "| Field | Value |",
+        "|-------|-------|",
+        f"| **Bangumi ID** | {bgm_id} |",
+        f"| **Bangumi Name** | {name} |",
+        f"| **Fan Translation** | {fan} |",
+        "",
+        "## LLM Analysis",
+        "",
+        f"**Confidence**: {confidence}",
+        f"**Reasoning**: {reasoning}",
+        "",
+        "## Proposed Alias Entry",
+        "",
+        "```json",
+        f'{{"{fan}": {{"bangumi_id": {bgm_id}, "name": "{name}", "tmdb_id": null, "anidb_id": null}}}}',
+        "```",
+        "",
+        "## User Action Required",
+        "",
+        "Reply with:",
+        "- `confirm` - approve as-is",
+        "- `correct: {...}` - provide correction",
+        "- `reject` - discard"
+    ]
+    body = '\n'.join(body_lines)
 
-          | Field | Value |
-          |-------|-------|
-          | **Bangumi ID** | {bgm_id} |
-          | **Bangumi Name** | {name} |
-          | **Fan Translation** | {fan} |
+    title = f'[Alias Request] {fan} -> {name} (bgm:{bgm_id})'
+    subprocess.run([
+        'gh', 'issue', 'create',
+        '--title', title,
+        '--body', body,
+        '--label', 'alias-request'
+    ], check=False)
+    issue_count += 1
 
-          ## LLM Analysis
-
-          **Confidence**: {confidence}
-          **Reasoning**: {reasoning}
-
-          ## Proposed Alias Entry
-
-          \`\`\`json
-          {{\"{fan}\": {{\"bangumi_id\": {bgm_id}, \"name\": \"{name}\", \"tmdb_id\": null, \"anidb_id\": null}}}}
-          \`\`\`
-
-          ## User Action Required
-
-          Reply with:
-          - \`confirm\` - approve as-is
-          - \`correct: {{...}}\` - provide correction
-          - \`reject\` - discard
-          '''
-
-              title = f'[Alias Request] {fan} → {name} (bgm:{bgm_id})'
-              subprocess.run([
-                  'gh', 'issue', 'create',
-                  '--title', title,
-                  '--body', body,
-                  '--label', 'alias-request'
-              ], check=False)
-          "
+print(f'Created {issue_count} alias request issues')
+PYEOF
+            echo "::notice::Created issues for uncertain matches"
+          else
+            echo "::warning::No uncertain proposals found"
           fi
+          echo "::endgroup::"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

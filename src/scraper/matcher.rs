@@ -584,6 +584,7 @@ mod tests {
             source_url: None,
             bangumi_id: Some(12345),
             tmdb_id: None,
+            aliases: Vec::new(),
         }];
 
         let aliases = std::collections::HashMap::new();
@@ -635,6 +636,7 @@ mod tests {
             source_url: None,
             bangumi_id: Some(328609),
             tmdb_id: Some(203028),
+            aliases: Vec::new(),
         }];
 
         let mut aliases = HashMap::new();
