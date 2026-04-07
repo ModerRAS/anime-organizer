@@ -17,7 +17,7 @@ use anime_organizer::{
     nfo::{EpisodeNfo, NfoWriter, TvShowNfo, UniqueId},
     AnimeMetadata,
 };
-#[cfg(feature = "scraper")]
+#[cfg(any(feature = "scraper", feature = "clouddrive"))]
 use clap::Subcommand;
 use clap::{Args, Parser, ValueEnum};
 use std::collections::{HashMap, HashSet};
@@ -45,7 +45,7 @@ const DEFAULT_EXTENSIONS: &[&str] = &[".mp4", ".mkv", ".avi", ".mov", ".wmv", ".
     aniorg match --input scraped.json --format github
 "#)]
 struct Cli {
-    #[cfg(feature = "scraper")]
+    #[cfg(any(feature = "scraper", feature = "clouddrive"))]
     #[command(subcommand)]
     command: Option<Commands>,
 
@@ -129,15 +129,20 @@ impl FallbackMode {
     }
 }
 
-#[cfg(feature = "scraper")]
+#[cfg(any(feature = "scraper", feature = "clouddrive"))]
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// 刮削最近的动画数据
+    #[cfg(feature = "scraper")]
     Scrape(ScrapeArgs),
+    #[cfg(feature = "scraper")]
     /// 根据刮削结果生成别名提案
     Match(MatchArgs),
+    #[cfg(feature = "scraper")]
     /// 从 Bangumi Archive 构建 SQLite 数据库
     BuildDb(BuildDbArgs),
+    #[cfg(feature = "clouddrive")]
+    /// RSS 订阅管理
+    Rss(RssArgs),
 }
 
 #[cfg(feature = "scraper")]
@@ -194,6 +199,58 @@ struct BuildDbArgs {
     output: PathBuf,
 }
 
+#[cfg(feature = "clouddrive")]
+#[derive(Args, Debug, Clone)]
+struct RssArgs {
+    /// 持续运行的 Daemon 模式
+    #[arg(long)]
+    daemon: bool,
+
+    /// 单次执行模式
+    #[arg(long)]
+    single_shot: bool,
+
+    /// RSS 订阅 URL
+    #[arg(long, value_name = "URL")]
+    rss_url: Option<String>,
+
+    /// 正则过滤表达式
+    #[arg(long, value_name = "REGEX")]
+    rss_filter: Option<String>,
+
+    /// 轮询间隔（秒）
+    #[arg(long, default_value_t = 300, value_name = "SECS")]
+    rss_interval: u64,
+
+    /// 115网盘目标目录
+    #[arg(long, value_name = "PATH")]
+    rss_target: Option<String>,
+
+    /// CloudDrive2 服务地址（如 http://localhost:19798）
+    #[arg(long, value_name = "URL")]
+    clouddrive_url: Option<String>,
+
+    /// CloudDrive2 JWT 令牌（已有令牌时直接使用）
+    #[arg(long, value_name = "TOKEN")]
+    clouddrive_token: Option<String>,
+
+    /// CloudDrive2 用户名（用于登录获取令牌）
+    #[arg(long, value_name = "USER")]
+    clouddrive_user: Option<String>,
+
+    /// CloudDrive2 密码
+    #[arg(long, value_name = "PASS")]
+    clouddrive_pass: Option<String>,
+
+    /// 添加 RSS 订阅到数据库
+    #[arg(long)]
+    add_subscription: bool,
+
+    /// 列出所有已保存的订阅
+    #[arg(long)]
+    list_subscriptions: bool,
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("错误: {error}");
@@ -201,7 +258,7 @@ fn main() {
     }
 }
 
-#[cfg(feature = "scraper")]
+#[cfg(any(feature = "scraper", feature = "clouddrive"))]
 fn run() -> Result<(), AppError> {
     let cli = Cli::parse();
 
@@ -212,7 +269,7 @@ fn run() -> Result<(), AppError> {
     run_organize_entry(cli.organize)
 }
 
-#[cfg(not(feature = "scraper"))]
+#[cfg(not(any(feature = "scraper", feature = "clouddrive")))]
 fn run() -> Result<(), AppError> {
     let cli = Cli::parse();
     run_organize_entry(cli.organize)
@@ -240,16 +297,21 @@ fn run_organize_entry(args: OrganizeArgs) -> Result<(), AppError> {
     run_organize(args)
 }
 
-#[cfg(feature = "scraper")]
+#[cfg(any(feature = "scraper", feature = "clouddrive"))]
 fn run_command(command: Commands) -> Result<(), AppError> {
     match command {
+        #[cfg(feature = "scraper")]
         Commands::Scrape(args) => {
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|e| AppError::MetadataFetchError(format!("创建异步运行时失败: {e}")))?;
             runtime.block_on(run_scrape(args))
         }
+        #[cfg(feature = "scraper")]
         Commands::Match(args) => run_match(args),
+        #[cfg(feature = "scraper")]
         Commands::BuildDb(args) => run_build_db(args),
+        #[cfg(feature = "clouddrive")]
+        Commands::Rss(args) => run_rss(args),
     }
 }
 
@@ -962,4 +1024,131 @@ fn run_build_db(args: BuildDbArgs) -> Result<(), AppError> {
     println!("Database size: {} bytes", stats.db_size);
 
     Ok(())
+}
+
+#[cfg(feature = "clouddrive")]
+fn run_rss(args: RssArgs) -> Result<(), AppError> {
+    use anime_organizer::rss::{
+        client::CloudDriveClient,
+        db::{default_db_path, RssDatabase},
+        proxy::ProxyConfig,
+        scheduler::RssScheduler,
+    };
+
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| AppError::MetadataFetchError(format!("创建异步运行时失败: {e}")))?;
+
+    runtime.block_on(async {
+        // 初始化 tracing
+        tracing_subscriber::fmt::init();
+
+        // 初始化数据库
+        let db_path = default_db_path();
+        let db = RssDatabase::new(&db_path)?;
+
+        // --list-subscriptions：列出订阅后退出
+        if args.list_subscriptions {
+            let subs = db.list_all_subscriptions()?;
+            if subs.is_empty() {
+                println!("暂无 RSS 订阅");
+            } else {
+                println!(
+                    "{:<4} {:<60} {:<20} {:<10} 目标目录",
+                    "ID", "URL", "过滤器", "间隔(s)"
+                );
+                println!("{}", "-".repeat(120));
+                for sub in &subs {
+                    println!(
+                        "{:<4} {:<60} {:<20} {:<10} {}",
+                        sub.id,
+                        sub.url,
+                        sub.filter_regex.as_deref().unwrap_or("-"),
+                        sub.interval_secs,
+                        sub.target_folder
+                    );
+                }
+            }
+            return Ok(());
+        }
+
+        // --add-subscription：添加订阅后退出
+        if args.add_subscription {
+            let rss_url = args.rss_url.as_deref().ok_or_else(|| {
+                AppError::MetadataFetchError("添加订阅需要 --rss-url 参数".to_string())
+            })?;
+            let target = args.rss_target.as_deref().ok_or_else(|| {
+                AppError::MetadataFetchError("添加订阅需要 --rss-target 参数".to_string())
+            })?;
+            let id = db.add_subscription(
+                rss_url,
+                args.rss_filter.as_deref(),
+                target,
+                args.rss_interval as i64,
+            )?;
+            println!("已添加/更新订阅 (id={id}): {rss_url}");
+            return Ok(());
+        }
+
+        // 构建 CloudDrive2 客户端
+        let cd_url = args.clouddrive_url.as_deref().ok_or_else(|| {
+            AppError::MetadataFetchError("需要 --clouddrive-url 参数".to_string())
+        })?;
+        let mut cd_client = CloudDriveClient::new(cd_url, args.clouddrive_token.clone())?;
+
+        // 如果没有 token 但有用户名/密码，则登录
+        if cd_client.get_token_value().is_none() {
+            let user = args.clouddrive_user.as_deref().ok_or_else(|| {
+                AppError::MetadataFetchError(
+                    "需要 --clouddrive-token 或 --clouddrive-user + --clouddrive-pass".to_string(),
+                )
+            })?;
+            let pass = args.clouddrive_pass.as_deref().ok_or_else(|| {
+                AppError::MetadataFetchError("需要 --clouddrive-pass 参数".to_string())
+            })?;
+            let token = cd_client.login(user, pass).await?;
+            tracing::info!("CloudDrive2 登录成功，获取到令牌");
+            let _ = token;
+        }
+
+        let proxy_config = ProxyConfig::from_env();
+        let scheduler = RssScheduler::new(
+            db,
+            cd_client,
+            &proxy_config,
+            args.daemon || args.single_shot,
+        )?;
+
+        // 根据模式选择执行路径
+        if args.daemon {
+            let interval = std::time::Duration::from_secs(args.rss_interval);
+
+            if let Some(ref rss_url) = args.rss_url {
+                let target = args.rss_target.as_deref().ok_or_else(|| {
+                    AppError::MetadataFetchError("daemon 模式需要 --rss-target 参数".to_string())
+                })?;
+                scheduler
+                    .run_daemon_url(rss_url, args.rss_filter.as_deref(), target, interval)
+                    .await
+            } else {
+                scheduler.run_daemon(interval).await
+            }
+        } else {
+            // 默认单次执行
+            if let Some(ref rss_url) = args.rss_url {
+                let target = args.rss_target.as_deref().ok_or_else(|| {
+                    AppError::MetadataFetchError("单次执行需要 --rss-target 参数".to_string())
+                })?;
+                scheduler
+                    .run_once_url(
+                        rss_url,
+                        args.rss_filter.as_deref(),
+                        target,
+                        args.rss_interval,
+                    )
+                    .await
+            } else {
+                scheduler.run_once().await
+            }
+        }
+    })
 }

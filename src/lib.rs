@@ -39,6 +39,8 @@ pub mod metadata;
 pub mod nfo;
 pub mod organizer;
 pub mod parser;
+#[cfg(feature = "clouddrive")]
+pub mod rss;
 #[cfg(feature = "scraper")]
 pub mod scraper;
 
