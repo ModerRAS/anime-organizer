@@ -1029,11 +1029,13 @@ fn run_build_db(args: BuildDbArgs) -> Result<(), AppError> {
 #[cfg(feature = "clouddrive")]
 fn run_rss(args: RssArgs) -> Result<(), AppError> {
     use anime_organizer::rss::{
-        client::CloudDriveClient,
+        client::{CloudDriveClient, CloudDriveClientTrait},
         db::{default_db_path, RssDatabase},
-        proxy::ProxyConfig,
+        http_client::HttpClient,
+        proxy::{build_http_client, ProxyConfig},
         scheduler::RssScheduler,
     };
+    use std::sync::Arc;
 
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|e| AppError::MetadataFetchError(format!("创建异步运行时失败: {e}")))?;
@@ -1111,12 +1113,13 @@ fn run_rss(args: RssArgs) -> Result<(), AppError> {
         }
 
         let proxy_config = ProxyConfig::from_env();
+        let http_client = build_http_client(&proxy_config)?;
         let scheduler = RssScheduler::new(
             db,
-            cd_client,
-            &proxy_config,
+            Arc::new(HttpClient::new(http_client)),
+            Arc::new(cd_client),
             args.daemon || args.single_shot,
-        )?;
+        );
 
         // 根据模式选择执行路径
         if args.daemon {

@@ -32,6 +32,7 @@ dependencies = [
 name = "anime-organizer"
 version = "1.0.0"
 dependencies = [
+ "async-trait",
  "bt_bencode",
  "clap",
  "flate2",

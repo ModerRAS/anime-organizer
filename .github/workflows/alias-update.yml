@@ -43,7 +43,12 @@ jobs:
           key: ${{ runner.os }}-cargo-scraper-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build with scraper and llm-api features
-        run: cargo build --release --features "scraper,llm-api"
+        run: |
+          echo "::group::Building scraper binary"
+          echo "Building anime-organizer with scraper and llm-api features..."
+          cargo build --release --features "scraper,llm-api"
+          echo "::notice::Build completed successfully"
+          echo "::endgroup::"
 
       - name: Download Bangumi DB from release
         continue-on-error: true
@@ -58,12 +63,19 @@ jobs:
         id: scrape
         run: |
           DAYS="${{ github.event.inputs.days || '7' }}"
-          echo "Scraping anime from last ${DAYS} days..."
+          echo "::group::Running scraper"
+          echo "::notice::Scraping anime from last ${DAYS} days..."
           # Output scraped data as JSON for the matcher
-          cargo run --release --features "scraper,llm-api" -- scrape \
+          if cargo run --release --features "scraper,llm-api" -- scrape \
             --days "${DAYS}" \
-            --format json > /tmp/scraped.json 2>/dev/null || echo "[]" > /tmp/scraped.json
+            --format json > /tmp/scraped.json; then
+            echo "::notice::Scraping completed successfully"
+          else
+            echo "::warning::Scraping failed, using empty result"
+            echo "[]" > /tmp/scraped.json
+          fi
           echo "scraped_file=/tmp/scraped.json" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
 

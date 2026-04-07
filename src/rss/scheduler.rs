@@ -2,21 +2,19 @@
 //!
 //! 提供 Daemon 模式下的定时调度功能，定期检查 RSS 更新。
 
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal;
 use tokio::sync::watch;
 use tracing::{error, info};
 
 use crate::error::Result;
-use crate::rss::client::CloudDriveClient;
+use crate::rss::client::CloudDriveClientTrait;
 use crate::rss::db::{RssDatabase, Subscription};
 use crate::rss::filter::RssFilter;
+use crate::rss::http_client::HttpClientTrait;
 use crate::rss::processor::RssProcessor;
-use crate::rss::proxy::build_http_client;
 
-/// RSS 调度器
-///
-/// 管理 RSS 抓取的定时逻辑，支持 daemon 模式和单次执行。
 pub struct RssScheduler {
     db: RssDatabase,
     processor: RssProcessor,
@@ -24,20 +22,18 @@ pub struct RssScheduler {
 }
 
 impl RssScheduler {
-    /// 创建新的调度器
     pub fn new(
         db: RssDatabase,
-        cd_client: CloudDriveClient,
-        proxy_config: &Option<crate::rss::proxy::ProxyConfig>,
+        http_client: Arc<dyn HttpClientTrait>,
+        cd_client: Arc<dyn CloudDriveClientTrait>,
         verbose: bool,
-    ) -> Result<Self> {
-        let http_client = build_http_client(proxy_config)?;
+    ) -> Self {
         let processor = RssProcessor::new(http_client, cd_client);
-        Ok(Self {
+        Self {
             db,
             processor,
             verbose,
-        })
+        }
     }
 
     /// 单次执行：处理所有订阅一遍后退出

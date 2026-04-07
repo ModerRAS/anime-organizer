@@ -2,6 +2,7 @@
 //!
 //! 提供与 CloudDrive2 服务通信的客户端实现，包括 Token 获取和离线文件添加功能。
 
+use async_trait::async_trait;
 use std::time::Duration;
 use tonic::transport::{Channel, Endpoint};
 
@@ -14,6 +15,18 @@ use crate::error::{AppError, Result};
 pub mod proto {
     #![allow(clippy::large_enum_variant)]
     tonic::include_proto!("clouddrive");
+}
+
+/// CloudDrive2 客户端 trait，用于测试时 mock
+///
+/// 定义与 CloudDrive2 服务交互的核心操作。
+#[async_trait]
+pub trait CloudDriveClientTrait: Send + Sync {
+    /// 登录获取 JWT 令牌
+    async fn login(&mut self, username: &str, password: &str) -> Result<String>;
+
+    /// 添加离线下载任务
+    async fn add_offline_files(&self, urls: Vec<String>, to_folder: &str) -> Result<()>;
 }
 
 /// CloudDrive2 gRPC 客户端
@@ -29,21 +42,10 @@ pub struct CloudDriveClient {
 
 impl CloudDriveClient {
     /// 创建新的 CloudDriveClient 实例
-    ///
-    /// # Arguments
-    ///
-    /// * `url` - CloudDrive2 gRPC 服务地址 (如 "http://localhost:8080" 或 "https://localhost:443")
-    /// * `token` - 可选的 JWT 认证令牌
-    ///
-    /// # Errors
-    ///
-    /// 如果 URL 格式无效，则返回错误
     pub fn new(url: &str, token: Option<String>) -> Result<Self> {
-        // 验证 URL 格式
         let parsed_url = url::Url::parse(url)
             .map_err(|e| AppError::MetadataFetchError(format!("Invalid endpoint URL: {}", e)))?;
 
-        // 验证 URL 是 http 还是 https
         if parsed_url.scheme() != "http" && parsed_url.scheme() != "https" {
             return Err(AppError::MetadataFetchError(format!(
                 "Invalid URL scheme: {} (expected http or https)",
@@ -67,23 +69,41 @@ impl CloudDriveClient {
         self.token.as_deref()
     }
 
+    /// 构建 gRPC 通道
+    async fn build_channel(&self) -> Result<Channel> {
+        let endpoint = Endpoint::from_shared(self.endpoint.clone())
+            .map_err(|e| AppError::MetadataFetchError(format!("Invalid endpoint: {}", e)))?;
+
+        let channel = if self.endpoint.starts_with("https") {
+            let tls_config = tonic::transport::ClientTlsConfig::new().domain_name(
+                url::Url::parse(&self.endpoint)
+                    .ok()
+                    .and_then(|u| u.host_str().map(|s| s.to_string()))
+                    .unwrap_or_default(),
+            );
+            endpoint
+                .tls_config(tls_config)
+                .map_err(|e| AppError::MetadataFetchError(format!("TLS config error: {}", e)))?
+                .timeout(Duration::from_secs(30))
+                .connect()
+                .await
+                .map_err(|e| AppError::MetadataFetchError(format!("Connection failed: {}", e)))?
+        } else {
+            endpoint
+                .timeout(Duration::from_secs(30))
+                .connect()
+                .await
+                .map_err(|e| AppError::MetadataFetchError(format!("Connection failed: {}", e)))?
+        };
+
+        Ok(channel)
+    }
+}
+
+#[async_trait]
+impl CloudDriveClientTrait for CloudDriveClient {
     /// 登录获取 JWT 令牌
-    ///
-    /// 调用 CloudDrive2 的 GetToken API，使用用户名密码获取认证令牌。
-    ///
-    /// # Arguments
-    ///
-    /// * `username` - 用户名
-    /// * `password` - 密码
-    ///
-    /// # Returns
-    ///
-    /// 成功时返回 JWT 令牌字符串
-    ///
-    /// # Errors
-    ///
-    /// * `MetadataFetchError` - gRPC 调用失败或服务器返回错误
-    pub async fn login(&mut self, username: &str, password: &str) -> Result<String> {
+    async fn login(&mut self, username: &str, password: &str) -> Result<String> {
         let channel = self.build_channel().await?;
 
         let mut client = proto::cloud_drive_file_srv_client::CloudDriveFileSrvClient::new(channel);
@@ -115,22 +135,7 @@ impl CloudDriveClient {
     }
 
     /// 添加离线下载任务
-    ///
-    /// 调用 CloudDrive2 的 AddOfflineFiles API，提交磁力链接或 URL 进行离线下载。
-    ///
-    /// # Arguments
-    ///
-    /// * `urls` - 要下载的 URL/磁力链接列表
-    /// * `to_folder` - 目标文件夹路径
-    ///
-    /// # Returns
-    ///
-    /// 成功时返回 ()
-    ///
-    /// # Errors
-    ///
-    /// * `MetadataFetchError` - gRPC 调用失败、未认证或服务器返回错误
-    pub async fn add_offline_files(&self, urls: Vec<String>, to_folder: &str) -> Result<()> {
+    async fn add_offline_files(&self, urls: Vec<String>, to_folder: &str) -> Result<()> {
         let token = self.token.clone().ok_or_else(|| {
             AppError::MetadataFetchError("Not authenticated. Call login() first.".to_string())
         })?;
@@ -174,36 +179,6 @@ impl CloudDriveClient {
         }
 
         Ok(())
-    }
-
-    /// 构建 gRPC 通道
-    async fn build_channel(&self) -> Result<Channel> {
-        let endpoint = Endpoint::from_shared(self.endpoint.clone())
-            .map_err(|e| AppError::MetadataFetchError(format!("Invalid endpoint: {}", e)))?;
-
-        let channel = if self.endpoint.starts_with("https") {
-            let tls_config = tonic::transport::ClientTlsConfig::new().domain_name(
-                url::Url::parse(&self.endpoint)
-                    .ok()
-                    .and_then(|u| u.host_str().map(|s| s.to_string()))
-                    .unwrap_or_default(),
-            );
-            endpoint
-                .tls_config(tls_config)
-                .map_err(|e| AppError::MetadataFetchError(format!("TLS config error: {}", e)))?
-                .timeout(Duration::from_secs(30))
-                .connect()
-                .await
-                .map_err(|e| AppError::MetadataFetchError(format!("Connection failed: {}", e)))?
-        } else {
-            endpoint
-                .timeout(Duration::from_secs(30))
-                .connect()
-                .await
-                .map_err(|e| AppError::MetadataFetchError(format!("Connection failed: {}", e)))?
-        };
-
-        Ok(channel)
     }
 }
 
