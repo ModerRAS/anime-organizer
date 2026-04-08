@@ -54,7 +54,7 @@ jobs:
         run: |
           echo "::group::Building Bangumi database"
           echo "::notice::Building bangumi.db from latest dump..."
-          if cargo run --release --features "scraper" -- build-db --verbose bangumi.db; then
+          if cargo run --release --features "scraper" -- build-db --verbose --output bangumi.db; then
             echo "::notice::Database built successfully"
           else
             echo "::warning::Database build failed, will try to use existing"
