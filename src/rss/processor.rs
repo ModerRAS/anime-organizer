@@ -11,6 +11,7 @@ use crate::rss::db::{compute_item_hash, RssDatabase};
 use crate::rss::filter::{matches_filter, RssFilter};
 use crate::rss::http_client::HttpClientTrait;
 use crate::rss::parser::{parse_rss, RssItem};
+use crate::rss::proxy::{build_http_client, ProxyConfig};
 use crate::rss::torrent::download_torrent_to_magnet;
 
 pub struct RssProcessor {
@@ -91,7 +92,9 @@ impl RssProcessor {
             if verbose {
                 info!("下载 .torrent: {}", torrent_url);
             }
-            let client = reqwest::Client::new();
+            let proxy_config = ProxyConfig::from_env();
+            let client = build_http_client(&proxy_config)
+                .unwrap_or_else(|_| reqwest::Client::new());
             download_torrent_to_magnet(&client, torrent_url).await?
         } else {
             return Err(AppError::MetadataFetchError(format!(

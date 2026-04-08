@@ -1,4 +1,5 @@
 use crate::error::{AppError, Result};
+use crate::rss::proxy::{build_http_client, ProxyConfig};
 use rusqlite::Connection;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
@@ -266,11 +267,8 @@ pub async fn build_bangumi_db(
 }
 
 async fn fetch_latest_version_url() -> Result<String> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .timeout(std::time::Duration::from_secs(60))
-        .user_agent("anime-organizer/0.1")
-        .build()
+    let proxy_config = ProxyConfig::from_env();
+    let client = build_http_client(&proxy_config)
         .map_err(|e| AppError::MetadataFetchError(format!("创建 HTTP 客户端失败: {e}")))?;
 
     let latest_url = "https://raw.githubusercontent.com/bangumi/Archive/master/aux/latest.json";

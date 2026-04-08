@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, Result};
+use crate::rss::proxy::{build_http_client, ProxyConfig};
 
 /// 刮削到的动画条目
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,9 +59,10 @@ pub struct Scraper {
 impl Scraper {
     /// 创建刮削器实例
     pub fn new() -> Self {
-        Self {
-            http: reqwest::Client::new(),
-        }
+        let proxy_config = ProxyConfig::from_env();
+        let http = build_http_client(&proxy_config)
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self { http }
     }
 
     /// 从 Bangumi Archive 刮削最近的动画
