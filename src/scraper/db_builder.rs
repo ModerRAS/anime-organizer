@@ -518,30 +518,39 @@ fn parse_subjects_from_zip(
     Ok(count)
 }
 
-fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<()> {
+fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<usize> {
     if batch.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
 
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| AppError::BangumiParseError(format!("开启事务失败: {e}")))?;
 
-    // Use explicit ON CONFLICT DO UPDATE instead of INSERT OR REPLACE
-    let placeholders: Vec<&str> = vec!["?"; 11];
+    let placeholders: Vec<&str> = vec!["?"; 13];
     let sql = format!(
-        "INSERT INTO subjects (id, type, name, name_cn, summary, date, score, platform, nsfw, series, infobox) VALUES {} ON CONFLICT(id) DO UPDATE SET type=excluded.type, name=excluded.name, name_cn=excluded.name_cn, summary=excluded.summary, date=excluded.date, score=excluded.score, platform=excluded.platform, nsfw=excluded.nsfw, series=excluded.series, infobox=excluded.infobox",
+        "INSERT INTO subjects (id, type, name, name_cn, summary, date, score, platform, nsfw, series, studio, director, infobox) VALUES {} ON CONFLICT(id) DO UPDATE SET type=excluded.type, name=excluded.name, name_cn=excluded.name_cn, summary=excluded.summary, date=excluded.date, score=excluded.score, platform=excluded.platform, nsfw=excluded.nsfw, series=excluded.series, studio=excluded.studio, director=excluded.director, infobox=excluded.infobox",
         batch.iter()
             .map(|_| format!("({})", placeholders.join(", ")))
             .collect::<Vec<_>>()
             .join(", ")
     );
 
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(batch.len() * 11);
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(batch.len() * 13);
+    let mut infobox_aliases: Vec<(u32, String)> = Vec::new();
+
     for s in batch {
-        let nsfw: i32 = if s.nsfw { 1 } else { 0 };
-        let series: i32 = if s.series { 1 } else { 0 };
-        let platform: i32 = s.platform as i32;
+        let nsfw_val: i32 = if s.nsfw { 1 } else { 0 };
+        let series_val: i32 = if s.series { 1 } else { 0 };
+        let platform_val: i32 = s.platform as i32;
+        let infobox_fields = crate::scraper::wiki_parser::InfoboxFields::parse(s.infobox.as_deref().unwrap_or(""));
+        infobox_aliases.extend(
+                infobox_fields
+                    .aliases
+                    .into_iter()
+                    .filter(|a| !a.is_empty() && a != &s.name)
+                    .map(|a| (s.id, a)),
+            );
         params.push(Box::new(s.id));
         params.push(Box::new(s.subject_type));
         params.push(Box::new(s.name.clone()));
@@ -549,9 +558,11 @@ fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<(
         params.push(Box::new(s.summary.clone()));
         params.push(Box::new(s.date.clone()));
         params.push(Box::new(s.score));
-        params.push(Box::new(platform));
-        params.push(Box::new(nsfw));
-        params.push(Box::new(series));
+        params.push(Box::new(platform_val));
+        params.push(Box::new(nsfw_val));
+        params.push(Box::new(series_val));
+        params.push(Box::new(infobox_fields.studio));
+        params.push(Box::new(infobox_fields.director));
         params.push(Box::new(s.infobox.clone()));
     }
 
@@ -559,9 +570,29 @@ fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<(
     tx.execute(&sql, param_refs.as_slice())
         .map_err(|e| AppError::BangumiParseError(format!("批量插入subjects失败: {e}")))?;
 
+    let alias_count = infobox_aliases.len();
+    if !infobox_aliases.is_empty() {
+        let alias_sql = format!(
+            "INSERT OR IGNORE INTO aliases (subject_id, alias) VALUES {}",
+            infobox_aliases
+                .iter()
+                .map(|_| "(?, ?)")
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let mut alias_params: Vec<&dyn rusqlite::ToSql> =
+            Vec::with_capacity(alias_count * 2);
+        for (subject_id, alias) in &infobox_aliases {
+            alias_params.push(subject_id);
+            alias_params.push(alias);
+        }
+        tx.execute(&alias_sql, alias_params.as_slice())
+            .map_err(|e| AppError::BangumiParseError(format!("批量插入infobox别名失败: {e}")))?;
+    }
+
     tx.commit()
         .map_err(|e| AppError::BangumiParseError(format!("提交事务失败: {e}")))?;
-    Ok(())
+    Ok(alias_count)
 }
 
 fn insert_aliases_batch(batch: &[(u32, String)], conn: &Connection) -> Result<()> {
@@ -1216,6 +1247,8 @@ fn get_or_create_db(db_path: &Path) -> Result<Connection> {
             platform INTEGER NOT NULL DEFAULT 0,
             nsfw INTEGER NOT NULL DEFAULT 0,
             series INTEGER NOT NULL DEFAULT 0,
+            studio TEXT,
+            director TEXT,
             infobox TEXT
         );
 
