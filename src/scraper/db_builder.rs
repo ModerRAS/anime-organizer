@@ -1,7 +1,6 @@
 use crate::error::{AppError, Result};
-use crate::metadata::wiki::WikiParser;
 use rusqlite::Connection;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -43,8 +42,6 @@ struct SubjectRecord {
     score: Option<f32>,
     #[serde(default)]
     platform: Option<serde_json::Value>,
-    #[serde(default)]
-    infobox: Option<String>,
     #[serde(default)]
     nsfw: Option<serde_json::Value>,
     #[serde(default)]
@@ -291,10 +288,7 @@ fn parse_subjects_from_zip(
 
     let reader = BufReader::new(content.as_bytes());
 
-    let parser = WikiParser::new();
-
     let mut batch: Vec<SubjectRecord> = Vec::with_capacity(BATCH_SIZE);
-    let mut aliases_batch: Vec<(u32, String)> = Vec::with_capacity(BATCH_SIZE);
     let mut count = 0;
     let mut skipped_parse = 0;
     let mut skipped_type = 0;
@@ -315,14 +309,6 @@ fn parse_subjects_from_zip(
                 continue;
             }
 
-            if let Some(ref infobox) = subject.infobox {
-                if let Ok(info) = parser.parse_anime_infobox(infobox) {
-                    for alias in &info.aliases {
-                        aliases_batch.push((subject.id, alias.clone()));
-                    }
-                }
-            }
-
             batch.push(subject);
             count += 1;
 
@@ -334,12 +320,10 @@ fn parse_subjects_from_zip(
 
             if batch.len() >= BATCH_SIZE {
                 insert_subjects_batch(&batch, conn)?;
-                insert_aliases_batch(&aliases_batch, conn)?;
                 if verbose {
                     eprintln!("[DEBUG] 批处理: 已插入 {} 条, 当前批 {} 条", count, BATCH_SIZE);
                 }
                 batch.clear();
-                aliases_batch.clear();
             }
         } else {
             skipped_parse += 1;
@@ -352,7 +336,6 @@ fn parse_subjects_from_zip(
 
     if !batch.is_empty() {
         insert_subjects_batch(&batch, conn)?;
-        insert_aliases_batch(&aliases_batch, conn)?;
     }
 
     if verbose {
