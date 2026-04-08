@@ -403,6 +403,14 @@ fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<(
     }
 
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let expected_params = batch.len() * 13;
+    eprintln!("[DEBUG] 批量插入subjects: batch_size={}, expected_params={}, actual_params={}", batch.len(), expected_params, param_refs.len());
+    if param_refs.len() != expected_params {
+        return Err(AppError::BangumiParseError(format!(
+            "参数数量不匹配: batch_size={}, expected_params={}, actual_params={}",
+            batch.len(), expected_params, param_refs.len()
+        )));
+    }
     tx.execute(&sql, param_refs.as_slice())
         .map_err(|e| AppError::BangumiParseError(format!("批量插入subjects失败: {e}")))?;
 
