@@ -42,7 +42,7 @@ struct SubjectRecord {
     #[serde(default)]
     score: Option<f32>,
     #[serde(default)]
-    platform: Option<u32>,
+    platform: Option<serde_json::Value>,
     #[serde(default)]
     infobox: Option<String>,
     #[serde(default)]
@@ -386,6 +386,11 @@ fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<(
     for s in batch {
         let nsfw = s.nsfw.unwrap_or(0);
         let series = s.series.unwrap_or(0);
+        let platform = match &s.platform {
+            Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0) as i32,
+            Some(serde_json::Value::Bool(b)) => if *b { 1 } else { 0 },
+            _ => 0,
+        };
         params.push(Box::new(s.id));
         params.push(Box::new(s.subject_type));
         params.push(Box::new(s.name.clone()));
@@ -393,7 +398,7 @@ fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<(
         params.push(Box::new(s.summary.clone()));
         params.push(Box::new(s.date.clone()));
         params.push(Box::new(s.score));
-        params.push(Box::new(s.platform));
+        params.push(Box::new(platform));
         params.push(Box::new(nsfw));
         params.push(Box::new(series));
         params.push(Box::new(s.eps));
