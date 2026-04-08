@@ -358,7 +358,7 @@ fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<(
         .map_err(|e| AppError::BangumiParseError(format!("开启事务失败: {e}")))?;
 
     // Use explicit ON CONFLICT DO UPDATE instead of INSERT OR REPLACE
-    let placeholders: Vec<String> = (1..=13).map(|i| format!("?{}", i)).collect();
+    let placeholders: Vec<&str> = vec!["?"; 13];
     let sql = format!(
         "INSERT INTO subjects (id, type, name, name_cn, summary, date, score, platform, nsfw, series, eps, studio, director) VALUES {} ON CONFLICT(id) DO UPDATE SET type=excluded.type, name=excluded.name, name_cn=excluded.name_cn, summary=excluded.summary, date=excluded.date, score=excluded.score, platform=excluded.platform, nsfw=excluded.nsfw, series=excluded.series, eps=excluded.eps, studio=excluded.studio, director=excluded.director",
         batch.iter()
