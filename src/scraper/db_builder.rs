@@ -52,6 +52,8 @@ struct SubjectRecord {
     studio: Option<String>,
     #[serde(default)]
     director: Option<String>,
+    #[serde(default)]
+    infobox: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +77,45 @@ struct EpisodeRecord {
     duration: Option<String>,
     #[serde(default)]
     description: Option<String>,
+}
+
+/// Record for subject_characters.jsonlines
+#[derive(Debug, Deserialize)]
+struct SubjectCharacterRecord {
+    #[serde(rename = "subject_id")]
+    subject_id: u32,
+    #[serde(rename = "character_id")]
+    character_id: u32,
+    #[serde(rename = "type", default)]
+    character_type: Option<String>,
+    #[serde(default)]
+    order: Option<i32>,
+}
+
+/// Record for subject_persons.jsonlines
+#[derive(Debug, Deserialize)]
+struct SubjectPersonRecord {
+    #[serde(rename = "subject_id")]
+    subject_id: u32,
+    #[serde(rename = "person_id")]
+    person_id: u32,
+    #[serde(default)]
+    position: Option<String>,
+    #[serde(rename = "appear_eps", default)]
+    appear_eps: Option<String>,
+}
+
+/// Record for subject_relations.jsonlines
+#[derive(Debug, Deserialize)]
+struct SubjectRelationRecord {
+    #[serde(rename = "subject_id")]
+    subject_id: u32,
+    #[serde(rename = "related_subject_id")]
+    related_subject_id: u32,
+    #[serde(rename = "relation_type", default)]
+    relation_type: Option<i32>,
+    #[serde(default)]
+    order: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -247,7 +288,20 @@ fn extract_and_parse(
         parse_name_cn_aliases_from_zip(&mut zip_archive, &conn, &subject_ids, verbose)?;
 
     let relations_count = if include_relations {
-        parse_relations_from_zip(&mut zip_archive, &conn, &subject_ids, verbose)?
+        let chars_count =
+            parse_characters_from_zip(&mut zip_archive, &conn, &subject_ids, verbose)?;
+        if verbose && chars_count > 0 {
+            eprintln!("[DEBUG] 解析了 {} 条角色关系", chars_count);
+        }
+        let persons_count = parse_persons_from_zip(&mut zip_archive, &conn, &subject_ids, verbose)?;
+        if verbose && persons_count > 0 {
+            eprintln!("[DEBUG] 解析了 {} 条人物关系", persons_count);
+        }
+        let rels_count = parse_relations_from_zip(&mut zip_archive, &conn, &subject_ids, verbose)?;
+        if verbose && rels_count > 0 {
+            eprintln!("[DEBUG] 解析了 {} 条subject关系", rels_count);
+        }
+        chars_count + persons_count + rels_count
     } else {
         0
     };
@@ -376,9 +430,9 @@ fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<(
         .map_err(|e| AppError::BangumiParseError(format!("开启事务失败: {e}")))?;
 
     // Use explicit ON CONFLICT DO UPDATE instead of INSERT OR REPLACE
-    let placeholders: Vec<&str> = vec!["?"; 13];
+    let placeholders: Vec<&str> = vec!["?"; 14];
     let sql = format!(
-        "INSERT INTO subjects (id, type, name, name_cn, summary, date, score, platform, nsfw, series, eps, studio, director) VALUES {} ON CONFLICT(id) DO UPDATE SET type=excluded.type, name=excluded.name, name_cn=excluded.name_cn, summary=excluded.summary, date=excluded.date, score=excluded.score, platform=excluded.platform, nsfw=excluded.nsfw, series=excluded.series, eps=excluded.eps, studio=excluded.studio, director=excluded.director",
+        "INSERT INTO subjects (id, type, name, name_cn, summary, date, score, platform, nsfw, series, eps, studio, director, infobox) VALUES {} ON CONFLICT(id) DO UPDATE SET type=excluded.type, name=excluded.name, name_cn=excluded.name_cn, summary=excluded.summary, date=excluded.date, score=excluded.score, platform=excluded.platform, nsfw=excluded.nsfw, series=excluded.series, eps=excluded.eps, studio=excluded.studio, director=excluded.director, infobox=excluded.infobox",
         batch.iter()
             .map(|_| format!("({})", placeholders.join(", ")))
             .collect::<Vec<_>>()
@@ -391,7 +445,7 @@ fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<(
         &sql[..sql.len().min(200)]
     );
 
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(batch.len() * 13);
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(batch.len() * 14);
     for s in batch {
         let nsfw = match &s.nsfw {
             Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0) as i32,
@@ -450,10 +504,11 @@ fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<(
         params.push(Box::new(eps));
         params.push(Box::new(s.studio.clone()));
         params.push(Box::new(s.director.clone()));
+        params.push(Box::new(s.infobox.clone()));
     }
 
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    let expected_params = batch.len() * 13;
+    let expected_params = batch.len() * 14;
     eprintln!(
         "[DEBUG] 批量插入subjects: batch_size={}, expected_params={}, actual_params={}",
         batch.len(),
@@ -732,12 +787,321 @@ fn parse_name_cn_aliases_from_zip(
 }
 
 fn parse_relations_from_zip(
-    _zip_archive: &mut zip::ZipArchive<std::fs::File>,
-    _conn: &Connection,
-    _subject_ids: &std::collections::HashSet<u32>,
-    _verbose: bool,
+    zip_archive: &mut zip::ZipArchive<std::fs::File>,
+    conn: &Connection,
+    subject_ids: &std::collections::HashSet<u32>,
+    verbose: bool,
 ) -> Result<usize> {
-    Ok(0)
+    let filename = "subject_relations.jsonlines";
+    let mut relation_file = match zip_archive.by_name(filename) {
+        Ok(f) => f,
+        Err(_) => {
+            if verbose {
+                eprintln!("[DEBUG] 文件 {} 不在ZIP中，跳过", filename);
+            }
+            return Ok(0);
+        }
+    };
+
+    use std::io::Read;
+    let mut content = String::new();
+    relation_file
+        .read_to_string(&mut content)
+        .map_err(|e| AppError::BangumiParseError(format!("读取文件失败: {e}")))?;
+
+    let line_count = content.lines().count();
+    if verbose {
+        eprintln!("处理 {}: 源文件 {} 行", filename, line_count);
+    }
+
+    let reader = BufReader::new(content.as_bytes());
+
+    let mut batch: Vec<SubjectRelationRecord> = Vec::with_capacity(BATCH_SIZE);
+    let mut count = 0;
+    let mut skipped_parse = 0;
+    let mut skipped_subject = 0;
+
+    for line in reader.lines() {
+        let line = line.map_err(|e| AppError::BangumiParseError(format!("读取行失败: {e}")))?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Ok(relation) = serde_json::from_str::<SubjectRelationRecord>(line) {
+            if !subject_ids.contains(&relation.subject_id) {
+                skipped_subject += 1;
+                continue;
+            }
+            batch.push(relation);
+            count += 1;
+
+            if batch.len() >= BATCH_SIZE {
+                insert_relations_batch(&batch, conn)?;
+                batch.clear();
+            }
+        } else {
+            skipped_parse += 1;
+        }
+    }
+
+    if !batch.is_empty() {
+        insert_relations_batch(&batch, conn)?;
+    }
+
+    if verbose {
+        eprintln!(
+            "处理完成: 插入 {} 条关系，跳过 {} 条(解析失败) + {} 条(无关subject)",
+            count, skipped_parse, skipped_subject
+        );
+    }
+
+    Ok(count)
+}
+
+fn insert_relations_batch(batch: &[SubjectRelationRecord], conn: &Connection) -> Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| AppError::BangumiParseError(format!("开启事务失败: {e}")))?;
+    let sql = format!(
+        "INSERT OR IGNORE INTO subject_relations (subject_id, related_subject_id, relation_type, \"order\") VALUES {}",
+        batch
+            .iter()
+            .map(|_| "(?, ?, ?, ?)")
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(batch.len() * 4);
+    for r in batch {
+        params.push(&r.subject_id);
+        params.push(&r.related_subject_id);
+        params.push(&r.relation_type);
+        params.push(&r.order);
+    }
+
+    tx.execute(&sql, params.as_slice())
+        .map_err(|e| AppError::BangumiParseError(format!("批量插入relations失败: {e}")))?;
+
+    tx.commit()
+        .map_err(|e| AppError::BangumiParseError(format!("提交事务失败: {e}")))?;
+    Ok(())
+}
+
+fn parse_characters_from_zip(
+    zip_archive: &mut zip::ZipArchive<std::fs::File>,
+    conn: &Connection,
+    subject_ids: &std::collections::HashSet<u32>,
+    verbose: bool,
+) -> Result<usize> {
+    let filename = "subject_characters.jsonlines";
+    let mut char_file = match zip_archive.by_name(filename) {
+        Ok(f) => f,
+        Err(_) => {
+            if verbose {
+                eprintln!("[DEBUG] 文件 {} 不在ZIP中，跳过", filename);
+            }
+            return Ok(0);
+        }
+    };
+
+    use std::io::Read;
+    let mut content = String::new();
+    char_file
+        .read_to_string(&mut content)
+        .map_err(|e| AppError::BangumiParseError(format!("读取文件失败: {e}")))?;
+
+    let line_count = content.lines().count();
+    if verbose {
+        eprintln!("处理 {}: 源文件 {} 行", filename, line_count);
+    }
+
+    let reader = BufReader::new(content.as_bytes());
+
+    let mut batch: Vec<SubjectCharacterRecord> = Vec::with_capacity(BATCH_SIZE);
+    let mut count = 0;
+    let mut skipped_parse = 0;
+    let mut skipped_subject = 0;
+
+    for line in reader.lines() {
+        let line = line.map_err(|e| AppError::BangumiParseError(format!("读取行失败: {e}")))?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Ok(char_rec) = serde_json::from_str::<SubjectCharacterRecord>(line) {
+            if !subject_ids.contains(&char_rec.subject_id) {
+                skipped_subject += 1;
+                continue;
+            }
+            batch.push(char_rec);
+            count += 1;
+
+            if batch.len() >= BATCH_SIZE {
+                insert_characters_batch(&batch, conn)?;
+                batch.clear();
+            }
+        } else {
+            skipped_parse += 1;
+        }
+    }
+
+    if !batch.is_empty() {
+        insert_characters_batch(&batch, conn)?;
+    }
+
+    if verbose {
+        eprintln!(
+            "处理完成: 插入 {} 条角色，跳过 {} 条(解析失败) + {} 条(无关subject)",
+            count, skipped_parse, skipped_subject
+        );
+    }
+
+    Ok(count)
+}
+
+fn insert_characters_batch(batch: &[SubjectCharacterRecord], conn: &Connection) -> Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| AppError::BangumiParseError(format!("开启事务失败: {e}")))?;
+    let sql = format!(
+        "INSERT OR IGNORE INTO subject_characters (subject_id, character_id, type, \"order\") VALUES {}",
+        batch
+            .iter()
+            .map(|_| "(?, ?, ?, ?)")
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(batch.len() * 4);
+    for c in batch {
+        params.push(&c.subject_id);
+        params.push(&c.character_id);
+        params.push(&c.character_type);
+        params.push(&c.order);
+    }
+
+    tx.execute(&sql, params.as_slice())
+        .map_err(|e| AppError::BangumiParseError(format!("批量插入characters失败: {e}")))?;
+
+    tx.commit()
+        .map_err(|e| AppError::BangumiParseError(format!("提交事务失败: {e}")))?;
+    Ok(())
+}
+
+fn parse_persons_from_zip(
+    zip_archive: &mut zip::ZipArchive<std::fs::File>,
+    conn: &Connection,
+    subject_ids: &std::collections::HashSet<u32>,
+    verbose: bool,
+) -> Result<usize> {
+    let filename = "subject_persons.jsonlines";
+    let mut person_file = match zip_archive.by_name(filename) {
+        Ok(f) => f,
+        Err(_) => {
+            if verbose {
+                eprintln!("[DEBUG] 文件 {} 不在ZIP中，跳过", filename);
+            }
+            return Ok(0);
+        }
+    };
+
+    use std::io::Read;
+    let mut content = String::new();
+    person_file
+        .read_to_string(&mut content)
+        .map_err(|e| AppError::BangumiParseError(format!("读取文件失败: {e}")))?;
+
+    let line_count = content.lines().count();
+    if verbose {
+        eprintln!("处理 {}: 源文件 {} 行", filename, line_count);
+    }
+
+    let reader = BufReader::new(content.as_bytes());
+
+    let mut batch: Vec<SubjectPersonRecord> = Vec::with_capacity(BATCH_SIZE);
+    let mut count = 0;
+    let mut skipped_parse = 0;
+    let mut skipped_subject = 0;
+
+    for line in reader.lines() {
+        let line = line.map_err(|e| AppError::BangumiParseError(format!("读取行失败: {e}")))?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Ok(person_rec) = serde_json::from_str::<SubjectPersonRecord>(line) {
+            if !subject_ids.contains(&person_rec.subject_id) {
+                skipped_subject += 1;
+                continue;
+            }
+            batch.push(person_rec);
+            count += 1;
+
+            if batch.len() >= BATCH_SIZE {
+                insert_persons_batch(&batch, conn)?;
+                batch.clear();
+            }
+        } else {
+            skipped_parse += 1;
+        }
+    }
+
+    if !batch.is_empty() {
+        insert_persons_batch(&batch, conn)?;
+    }
+
+    if verbose {
+        eprintln!(
+            "处理完成: 插入 {} 条人物，跳过 {} 条(解析失败) + {} 条(无关subject)",
+            count, skipped_parse, skipped_subject
+        );
+    }
+
+    Ok(count)
+}
+
+fn insert_persons_batch(batch: &[SubjectPersonRecord], conn: &Connection) -> Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| AppError::BangumiParseError(format!("开启事务失败: {e}")))?;
+    let sql = format!(
+        "INSERT OR IGNORE INTO subject_persons (subject_id, person_id, position, appear_eps) VALUES {}",
+        batch
+            .iter()
+            .map(|_| "(?, ?, ?, ?)")
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(batch.len() * 4);
+    for p in batch {
+        params.push(&p.subject_id);
+        params.push(&p.person_id);
+        params.push(&p.position);
+        params.push(&p.appear_eps);
+    }
+
+    tx.execute(&sql, params.as_slice())
+        .map_err(|e| AppError::BangumiParseError(format!("批量插入persons失败: {e}")))?;
+
+    tx.commit()
+        .map_err(|e| AppError::BangumiParseError(format!("提交事务失败: {e}")))?;
+    Ok(())
 }
 
 fn get_or_create_db(db_path: &Path) -> Result<Connection> {
@@ -768,7 +1132,8 @@ fn get_or_create_db(db_path: &Path) -> Result<Connection> {
             series INTEGER DEFAULT 0,
             eps INTEGER,
             studio TEXT,
-            director TEXT
+            director TEXT,
+            infobox TEXT
         );
 
         CREATE TABLE IF NOT EXISTS aliases (
