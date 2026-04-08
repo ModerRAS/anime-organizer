@@ -196,6 +196,7 @@ impl CloudDriveClientTrait for CloudDriveClient {
         let mut client =
             proto::cloud_drive_file_srv_client::CloudDriveFileSrvClient::with_interceptor(
                 channel,
+                #[allow(clippy::result_large_err)]
                 move |mut req: tonic::Request<()>| {
                     let header_value = format!("Bearer {}", token);
                     let metadata_value: tonic::metadata::MetadataValue<_> =
