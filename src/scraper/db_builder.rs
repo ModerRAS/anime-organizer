@@ -18,6 +18,9 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     result
 }
 
+// infobox: Bangumi Archive stores raw wiki text, NOT JSON.
+// e.g. "{{|type=动画|话数=12|制作公司=Studio X|}}"
+// Store as-is; parse with wiki-parser later if needed.
 fn deserialize_infobox<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -25,19 +28,61 @@ where
     let value = serde_json::Value::deserialize(deserializer)?;
     match value {
         serde_json::Value::Null => Ok(None),
-        _ => Ok(Some(serde_json::to_string(&value).unwrap_or_default())),
+        serde_json::Value::String(s) => Ok(Some(s)),
+        _ => Ok(None),
     }
 }
 
 #[derive(Debug, Deserialize)]
-struct LatestVersion {
-    #[allow(dead_code)]
+#[allow(dead_code)]
+struct Tag {
     name: String,
-    #[serde(rename = "browser_download_url")]
-    download_url: String,
+    #[serde(default)]
+    count: u32,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[allow(dead_code)]
+struct ScoreDetails {
+    #[serde(default)]
+    total: u32,
+    #[serde(default)]
+    d10: u32,
+    #[serde(default)]
+    d9: u32,
+    #[serde(default)]
+    d8: u32,
+    #[serde(default)]
+    d7: u32,
+    #[serde(default)]
+    d6: u32,
+    #[serde(default)]
+    d5: u32,
+    #[serde(default)]
+    d4: u32,
+    #[serde(default)]
+    d3: u32,
+    #[serde(default)]
+    d2: u32,
+    #[serde(default)]
+    d1: u32,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[allow(dead_code)]
+struct Favorite {
+    #[serde(default)]
+    wish: u32,
+    #[serde(default)]
+    collect: u32,
+    #[serde(default)]
+    doing: u32,
+    #[serde(default)]
+    dropped: u32,
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct SubjectRecord {
     id: u32,
     #[serde(rename = "type")]
@@ -46,26 +91,38 @@ struct SubjectRecord {
     #[serde(default)]
     name_cn: Option<String>,
     #[serde(default)]
+    #[serde(deserialize_with = "deserialize_infobox")]
+    infobox: Option<String>,
+    #[serde(default)]
+    platform: u32,
+    #[serde(default)]
     summary: Option<String>,
+    #[serde(default)]
+    nsfw: bool,
     #[serde(default)]
     date: Option<String>,
     #[serde(default)]
-    score: Option<f32>,
+    score: Option<f64>,
     #[serde(default)]
-    platform: Option<serde_json::Value>,
+    tags: Vec<Tag>,
     #[serde(default)]
-    nsfw: Option<serde_json::Value>,
+    score_details: Option<ScoreDetails>,
     #[serde(default)]
-    series: Option<serde_json::Value>,
+    rank: u32,
     #[serde(default)]
-    eps: Option<serde_json::Value>,
+    favorite: Option<Favorite>,
     #[serde(default)]
-    studio: Option<String>,
+    meta_tags: Vec<String>,
     #[serde(default)]
-    director: Option<String>,
-    #[serde(default)]
-    #[serde(deserialize_with = "deserialize_infobox")]
-    infobox: Option<String>,
+    series: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct LatestVersion {
+    #[allow(dead_code)]
+    name: String,
+    #[serde(rename = "browser_download_url")]
+    download_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -471,67 +528,20 @@ fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<(
         .map_err(|e| AppError::BangumiParseError(format!("开启事务失败: {e}")))?;
 
     // Use explicit ON CONFLICT DO UPDATE instead of INSERT OR REPLACE
-    let placeholders: Vec<&str> = vec!["?"; 14];
+    let placeholders: Vec<&str> = vec!["?"; 11];
     let sql = format!(
-        "INSERT INTO subjects (id, type, name, name_cn, summary, date, score, platform, nsfw, series, eps, studio, director, infobox) VALUES {} ON CONFLICT(id) DO UPDATE SET type=excluded.type, name=excluded.name, name_cn=excluded.name_cn, summary=excluded.summary, date=excluded.date, score=excluded.score, platform=excluded.platform, nsfw=excluded.nsfw, series=excluded.series, eps=excluded.eps, studio=excluded.studio, director=excluded.director, infobox=excluded.infobox",
+        "INSERT INTO subjects (id, type, name, name_cn, summary, date, score, platform, nsfw, series, infobox) VALUES {} ON CONFLICT(id) DO UPDATE SET type=excluded.type, name=excluded.name, name_cn=excluded.name_cn, summary=excluded.summary, date=excluded.date, score=excluded.score, platform=excluded.platform, nsfw=excluded.nsfw, series=excluded.series, infobox=excluded.infobox",
         batch.iter()
             .map(|_| format!("({})", placeholders.join(", ")))
             .collect::<Vec<_>>()
             .join(", ")
     );
 
-    // Debug: print first 200 chars of SQL
-    eprintln!(
-        "[DEBUG] SQL (first 200 chars): {}",
-        &sql[..sql.len().min(200)]
-    );
-
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(batch.len() * 14);
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(batch.len() * 11);
     for s in batch {
-        let nsfw = match &s.nsfw {
-            Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0) as i32,
-            Some(serde_json::Value::Bool(b)) => {
-                if *b {
-                    1
-                } else {
-                    0
-                }
-            }
-            _ => 0,
-        };
-        let series = match &s.series {
-            Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0) as i32,
-            Some(serde_json::Value::Bool(b)) => {
-                if *b {
-                    1
-                } else {
-                    0
-                }
-            }
-            _ => 0,
-        };
-        let platform = match &s.platform {
-            Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0) as i32,
-            Some(serde_json::Value::Bool(b)) => {
-                if *b {
-                    1
-                } else {
-                    0
-                }
-            }
-            _ => 0,
-        };
-        let eps = match &s.eps {
-            Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0) as i32,
-            Some(serde_json::Value::Bool(b)) => {
-                if *b {
-                    1
-                } else {
-                    0
-                }
-            }
-            _ => 0,
-        };
+        let nsfw: i32 = if s.nsfw { 1 } else { 0 };
+        let series: i32 = if s.series { 1 } else { 0 };
+        let platform: i32 = s.platform as i32;
         params.push(Box::new(s.id));
         params.push(Box::new(s.subject_type));
         params.push(Box::new(s.name.clone()));
@@ -542,28 +552,10 @@ fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<(
         params.push(Box::new(platform));
         params.push(Box::new(nsfw));
         params.push(Box::new(series));
-        params.push(Box::new(eps));
-        params.push(Box::new(s.studio.clone()));
-        params.push(Box::new(s.director.clone()));
         params.push(Box::new(s.infobox.clone()));
     }
 
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    let expected_params = batch.len() * 14;
-    eprintln!(
-        "[DEBUG] 批量插入subjects: batch_size={}, expected_params={}, actual_params={}",
-        batch.len(),
-        expected_params,
-        param_refs.len()
-    );
-    if param_refs.len() != expected_params {
-        return Err(AppError::BangumiParseError(format!(
-            "参数数量不匹配: batch_size={}, expected_params={}, actual_params={}",
-            batch.len(),
-            expected_params,
-            param_refs.len()
-        )));
-    }
     tx.execute(&sql, param_refs.as_slice())
         .map_err(|e| AppError::BangumiParseError(format!("批量插入subjects失败: {e}")))?;
 
@@ -1221,12 +1213,9 @@ fn get_or_create_db(db_path: &Path) -> Result<Connection> {
             summary TEXT,
             date TEXT,
             score REAL,
-            platform INTEGER,
-            nsfw INTEGER DEFAULT 0,
-            series INTEGER DEFAULT 0,
-            eps INTEGER,
-            studio TEXT,
-            director TEXT,
+            platform INTEGER NOT NULL DEFAULT 0,
+            nsfw INTEGER NOT NULL DEFAULT 0,
+            series INTEGER NOT NULL DEFAULT 0,
             infobox TEXT
         );
 
