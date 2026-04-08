@@ -281,7 +281,7 @@ fn parse_subjects_from_zip(
         eprintln!("处理 {}: 源文件 {} 行", filename, line_count);
         eprintln!("[DEBUG] 前3行原始JSON:");
         for (i, line) in content.lines().take(3).enumerate() {
-            eprintln!("[DEBUG] 行{}: {}", i + 1, truncate_str(&line, 200));
+            eprintln!("[DEBUG] 行{}: {}", i + 1, truncate_str(line, 200));
         }
         eprintln!("[DEBUG] JSON结构调试结束");
     }
@@ -304,7 +304,11 @@ fn parse_subjects_from_zip(
             if subject.subject_type != 2 {
                 skipped_type += 1;
                 if verbose && skipped_type <= 5 {
-                    eprintln!("[DEBUG] 第{}行: subject_type={}, 跳过(非动画)", line_idx + 1, subject.subject_type);
+                    eprintln!(
+                        "[DEBUG] 第{}行: subject_type={}, 跳过(非动画)",
+                        line_idx + 1,
+                        subject.subject_type
+                    );
                 }
                 continue;
             }
@@ -313,15 +317,24 @@ fn parse_subjects_from_zip(
             count += 1;
 
             if verbose && count <= 5 {
-                eprintln!("[DEBUG] 第{}行: 插入subject id={}, name={}", line_idx + 1, 
+                eprintln!(
+                    "[DEBUG] 第{}行: 插入subject id={}, name={}",
+                    line_idx + 1,
                     batch.last().map(|s| s.id).unwrap_or(0),
-                    batch.last().map(|s| truncate_str(&s.name, 50)).unwrap_or_else(|| "".to_string()));
+                    batch
+                        .last()
+                        .map(|s| truncate_str(&s.name, 50))
+                        .unwrap_or_default()
+                );
             }
 
             if batch.len() >= BATCH_SIZE {
                 insert_subjects_batch(&batch, conn)?;
                 if verbose {
-                    eprintln!("[DEBUG] 批处理: 已插入 {} 条, 当前批 {} 条", count, BATCH_SIZE);
+                    eprintln!(
+                        "[DEBUG] 批处理: 已插入 {} 条, 当前批 {} 条",
+                        count, BATCH_SIZE
+                    );
                 }
                 batch.clear();
             }
@@ -329,7 +342,12 @@ fn parse_subjects_from_zip(
             skipped_parse += 1;
             if verbose && skipped_parse <= 3 {
                 let parse_err = serde_json::from_str::<SubjectRecord>(line).unwrap_err();
-                eprintln!("[DEBUG] 第{}行: JSON解析失败, serde错误: {}, 内容前100字符: {}", line_idx + 1, parse_err, truncate_str(line, 100));
+                eprintln!(
+                    "[DEBUG] 第{}行: JSON解析失败, serde错误: {}, 内容前100字符: {}",
+                    line_idx + 1,
+                    parse_err,
+                    truncate_str(line, 100)
+                );
             }
         }
     }
@@ -368,28 +386,55 @@ fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<(
     );
 
     // Debug: print first 200 chars of SQL
-    eprintln!("[DEBUG] SQL (first 200 chars): {}", &sql[..sql.len().min(200)]);
+    eprintln!(
+        "[DEBUG] SQL (first 200 chars): {}",
+        &sql[..sql.len().min(200)]
+    );
 
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(batch.len() * 13);
     for s in batch {
         let nsfw = match &s.nsfw {
             Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0) as i32,
-            Some(serde_json::Value::Bool(b)) => if *b { 1 } else { 0 },
+            Some(serde_json::Value::Bool(b)) => {
+                if *b {
+                    1
+                } else {
+                    0
+                }
+            }
             _ => 0,
         };
         let series = match &s.series {
             Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0) as i32,
-            Some(serde_json::Value::Bool(b)) => if *b { 1 } else { 0 },
+            Some(serde_json::Value::Bool(b)) => {
+                if *b {
+                    1
+                } else {
+                    0
+                }
+            }
             _ => 0,
         };
         let platform = match &s.platform {
             Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0) as i32,
-            Some(serde_json::Value::Bool(b)) => if *b { 1 } else { 0 },
+            Some(serde_json::Value::Bool(b)) => {
+                if *b {
+                    1
+                } else {
+                    0
+                }
+            }
             _ => 0,
         };
         let eps = match &s.eps {
             Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0) as i32,
-            Some(serde_json::Value::Bool(b)) => if *b { 1 } else { 0 },
+            Some(serde_json::Value::Bool(b)) => {
+                if *b {
+                    1
+                } else {
+                    0
+                }
+            }
             _ => 0,
         };
         params.push(Box::new(s.id));
@@ -409,11 +454,18 @@ fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<(
 
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
     let expected_params = batch.len() * 13;
-    eprintln!("[DEBUG] 批量插入subjects: batch_size={}, expected_params={}, actual_params={}", batch.len(), expected_params, param_refs.len());
+    eprintln!(
+        "[DEBUG] 批量插入subjects: batch_size={}, expected_params={}, actual_params={}",
+        batch.len(),
+        expected_params,
+        param_refs.len()
+    );
     if param_refs.len() != expected_params {
         return Err(AppError::BangumiParseError(format!(
             "参数数量不匹配: batch_size={}, expected_params={}, actual_params={}",
-            batch.len(), expected_params, param_refs.len()
+            batch.len(),
+            expected_params,
+            param_refs.len()
         )));
     }
     tx.execute(&sql, param_refs.as_slice())
@@ -474,13 +526,18 @@ fn parse_episodes_from_zip(
 
     let line_count = content.lines().count();
     if verbose {
-        eprintln!("处理 {}: 源文件 {} 行, 已加载 {} 个subject", filename, line_count, subject_ids.len());
+        eprintln!(
+            "处理 {}: 源文件 {} 行, 已加载 {} 个subject",
+            filename,
+            line_count,
+            subject_ids.len()
+        );
         if subject_ids.is_empty() {
             eprintln!("[WARNING] subject_ids 为空! episodes 将全部被跳过!");
         }
         eprintln!("[DEBUG] 前3行原始JSON:");
         for (i, line) in content.lines().take(3).enumerate() {
-            eprintln!("[DEBUG] 行{}: {}", i + 1, truncate_str(&line, 200));
+            eprintln!("[DEBUG] 行{}: {}", i + 1, truncate_str(line, 200));
         }
     }
 
@@ -502,8 +559,12 @@ fn parse_episodes_from_zip(
             if !subject_ids.contains(&episode.subject_id) {
                 skipped_subject += 1;
                 if verbose && skipped_subject <= 5 {
-                    eprintln!("[DEBUG] 第{}行: episode id={}, subject_id={} 不在subject_ids中, 跳过", 
-                        line_idx + 1, episode.id, episode.subject_id);
+                    eprintln!(
+                        "[DEBUG] 第{}行: episode id={}, subject_id={} 不在subject_ids中, 跳过",
+                        line_idx + 1,
+                        episode.id,
+                        episode.subject_id
+                    );
                 }
                 continue;
             }
@@ -520,7 +581,11 @@ fn parse_episodes_from_zip(
         } else {
             skipped_parse += 1;
             if verbose && skipped_parse <= 5 {
-                eprintln!("[DEBUG] 第{}行: episode JSON解析失败: {}", line_idx + 1, truncate_str(line, 100));
+                eprintln!(
+                    "[DEBUG] 第{}行: episode JSON解析失败: {}",
+                    line_idx + 1,
+                    truncate_str(line, 100)
+                );
             }
         }
     }
@@ -560,12 +625,24 @@ fn insert_episodes_batch(batch: &[EpisodeRecord], conn: &Connection) -> Result<(
     for e in batch {
         let ep_type = match &e.ep_type {
             serde_json::Value::Number(n) => n.as_i64().unwrap_or(0) as i32,
-            serde_json::Value::Bool(b) => if *b { 1 } else { 0 },
+            serde_json::Value::Bool(b) => {
+                if *b {
+                    1
+                } else {
+                    0
+                }
+            }
             _ => 0,
         };
         let disc = match &e.disc {
             Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0) as i32,
-            Some(serde_json::Value::Bool(b)) => if *b { 1 } else { 0 },
+            Some(serde_json::Value::Bool(b)) => {
+                if *b {
+                    1
+                } else {
+                    0
+                }
+            }
             _ => 0,
         };
         params.push(Box::new(e.id));
