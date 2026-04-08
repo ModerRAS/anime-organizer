@@ -94,10 +94,18 @@ fn parse_infobox(text: &str) -> InfoboxFields {
     fields
 }
 
-fn cleanup_value(value: &str) -> String {
+pub(crate) fn cleanup_value(value: &str) -> String {
     let value = value.trim();
     if value.is_empty() {
         return String::new();
+    }
+
+    if value.starts_with("[[") && value.ends_with("]]") {
+        let inner = &value[2..value.len() - 2];
+        if let Some((_, rest)) = inner.split_once('|') {
+            return rest.trim().to_string();
+        }
+        return inner.trim().to_string();
     }
 
     if value.starts_with('[') && value.ends_with(']') {
@@ -205,6 +213,47 @@ mod tests {
         let wiki = "{{Infobox\n|监督=新房昭之\n}}";
         let fields = InfoboxFields::parse(wiki);
         assert_eq!(fields.director.as_deref(), Some("新房昭之"));
+    }
+
+    #[test]
+    fn test_cleanup_value_wiki_link() {
+        assert_eq!(cleanup_value("[[鲁路修]]"), "鲁路修");
+        assert_eq!(cleanup_value("[[鲁路修|ルルーシュ]]"), "ルルーシュ");
+        assert_eq!(cleanup_value("[[鲁路修|]]"), "");
+    }
+
+    #[test]
+    fn test_cleanup_value_bracket() {
+        assert_eq!(cleanup_value("[鲁路修]"), "鲁路修");
+        assert_eq!(cleanup_value("[鲁路修|ルルーシュ]"), "ルルーシュ");
+        assert_eq!(
+            cleanup_value("[ぼっち・ざ・ろっく！]"),
+            "ぼっち・ざ・ろっく！"
+        );
+        assert_eq!(cleanup_value("[Bocchi the Rock!]"), "Bocchi the Rock!");
+    }
+
+    #[test]
+    fn test_cleanup_value_template() {
+        assert_eq!(cleanup_value("{{Studio|Pierrot}}"), "Pierrot");
+        assert_eq!(cleanup_value("{{导演|痞子}}"), "痞子");
+        assert_eq!(cleanup_value("{{CloverWorks}}"), "CloverWorks");
+    }
+
+    #[test]
+    fn test_cleanup_value_mixed() {
+        assert_eq!(cleanup_value("[[鲁路修]]"), cleanup_value("[鲁路修]"));
+        assert_eq!(cleanup_value("  [[鲁路修]]  "), "鲁路修");
+        assert_eq!(cleanup_value(""), "");
+        assert_eq!(cleanup_value("普通文本"), "普通文本");
+    }
+
+    #[test]
+    fn test_cleanup_value_complex_nested() {
+        assert_eq!(
+            cleanup_value("[[鲁路修|ルルーシュ·ランペルージ]]"),
+            "ルルーシュ·ランペルージ"
+        );
     }
 
     #[test]

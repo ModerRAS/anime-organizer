@@ -321,8 +321,6 @@ fn download_zip(url: &str, temp_dir: &Path) -> Result<PathBuf> {
 
     if let Some(ref proxy) = http_proxy {
         cmd.arg("--all-proxy").arg(proxy);
-    } else {
-        cmd.arg("--all-proxy").arg("");
     }
 
     let status = cmd
@@ -579,7 +577,13 @@ fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<u
         params.push(Box::new(s.id));
         params.push(Box::new(s.subject_type));
         params.push(Box::new(s.name.clone()));
-        params.push(Box::new(s.name_cn.clone()));
+        let cleaned =
+            crate::scraper::wiki_parser::cleanup_value(s.name_cn.as_deref().unwrap_or(""));
+        params.push(if cleaned.is_empty() {
+            Box::new(None::<String>) as Box<dyn rusqlite::ToSql>
+        } else {
+            Box::new(cleaned)
+        });
         params.push(Box::new(s.summary.clone()));
         params.push(Box::new(s.date.clone()));
         params.push(Box::new(s.score));
