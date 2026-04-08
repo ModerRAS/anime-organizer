@@ -268,6 +268,11 @@ fn parse_subjects_from_zip(
     let line_count = content.lines().count();
     if verbose {
         eprintln!("处理 {}: 源文件 {} 行", filename, line_count);
+        eprintln!("[DEBUG] 前3行原始JSON:");
+        for (i, line) in content.lines().take(3).enumerate() {
+            eprintln!("[DEBUG] 行{}: {}", i + 1, &line[..line.len().min(200)]);
+        }
+        eprintln!("[DEBUG] JSON结构调试结束");
     }
 
     let reader = BufReader::new(content.as_bytes());
@@ -277,9 +282,10 @@ fn parse_subjects_from_zip(
     let mut batch: Vec<SubjectRecord> = Vec::with_capacity(BATCH_SIZE);
     let mut aliases_batch: Vec<(u32, String)> = Vec::with_capacity(BATCH_SIZE);
     let mut count = 0;
-    let mut skipped = 0;
+    let mut skipped_parse = 0;
+    let mut skipped_type = 0;
 
-    for line in reader.lines() {
+    for (line_idx, line) in reader.lines().enumerate() {
         let line = line.map_err(|e| AppError::BangumiParseError(format!("读取行失败: {e}")))?;
         let line = line.trim();
         if line.is_empty() {
@@ -288,7 +294,10 @@ fn parse_subjects_from_zip(
 
         if let Ok(subject) = serde_json::from_str::<SubjectRecord>(line) {
             if subject.subject_type != 2 {
-                skipped += 1;
+                skipped_type += 1;
+                if verbose && skipped_type <= 5 {
+                    eprintln!("[DEBUG] 第{}行: subject_type={}, 跳过(非动画)", line_idx + 1, subject.subject_type);
+                }
                 continue;
             }
 
@@ -303,14 +312,26 @@ fn parse_subjects_from_zip(
             batch.push(subject);
             count += 1;
 
+            if verbose && count <= 5 {
+                eprintln!("[DEBUG] 第{}行: 插入subject id={}, name={}", line_idx + 1, 
+                    batch.last().map(|s| s.id).unwrap_or(0),
+                    batch.last().map(|s| &s.name[..s.name.len().min(50)]).unwrap_or(""));
+            }
+
             if batch.len() >= BATCH_SIZE {
                 insert_subjects_batch(&batch, conn)?;
                 insert_aliases_batch(&aliases_batch, conn)?;
+                if verbose {
+                    eprintln!("[DEBUG] 批处理: 已插入 {} 条, 当前批 {} 条", count, BATCH_SIZE);
+                }
                 batch.clear();
                 aliases_batch.clear();
             }
         } else {
-            skipped += 1;
+            skipped_parse += 1;
+            if verbose && skipped_parse <= 5 {
+                eprintln!("[DEBUG] 第{}行: JSON解析失败, 内容: {}", line_idx + 1, &line[..line.len().min(100)]);
+            }
         }
     }
 
@@ -321,8 +342,8 @@ fn parse_subjects_from_zip(
 
     if verbose {
         eprintln!(
-            "处理完成: 插入 {} 条，跳过 {} 条 (非动画类型或解析失败)",
-            count, skipped
+            "处理完成: 插入 {} 条, 跳过 {} 条(解析失败) + {} 条(非动画类型)",
+            count, skipped_parse, skipped_type
         );
     }
 
@@ -424,16 +445,24 @@ fn parse_episodes_from_zip(
 
     let line_count = content.lines().count();
     if verbose {
-        eprintln!("处理 {}: 源文件 {} 行", filename, line_count);
+        eprintln!("处理 {}: 源文件 {} 行, 已加载 {} 个subject", filename, line_count, subject_ids.len());
+        if subject_ids.is_empty() {
+            eprintln!("[WARNING] subject_ids 为空! episodes 将全部被跳过!");
+        }
+        eprintln!("[DEBUG] 前3行原始JSON:");
+        for (i, line) in content.lines().take(3).enumerate() {
+            eprintln!("[DEBUG] 行{}: {}", i + 1, &line[..line.len().min(200)]);
+        }
     }
 
     let reader = BufReader::new(content.as_bytes());
 
     let mut batch: Vec<EpisodeRecord> = Vec::with_capacity(BATCH_SIZE);
     let mut count = 0;
-    let mut skipped = 0;
+    let mut skipped_parse = 0;
+    let mut skipped_subject = 0;
 
-    for line in reader.lines() {
+    for (line_idx, line) in reader.lines().enumerate() {
         let line = line.map_err(|e| AppError::BangumiParseError(format!("读取行失败: {e}")))?;
         let line = line.trim();
         if line.is_empty() {
@@ -442,7 +471,11 @@ fn parse_episodes_from_zip(
 
         if let Ok(episode) = serde_json::from_str::<EpisodeRecord>(line) {
             if !subject_ids.contains(&episode.subject_id) {
-                skipped += 1;
+                skipped_subject += 1;
+                if verbose && skipped_subject <= 5 {
+                    eprintln!("[DEBUG] 第{}行: episode id={}, subject_id={} 不在subject_ids中, 跳过", 
+                        line_idx + 1, episode.id, episode.subject_id);
+                }
                 continue;
             }
             batch.push(episode);
@@ -450,10 +483,16 @@ fn parse_episodes_from_zip(
 
             if batch.len() >= BATCH_SIZE {
                 insert_episodes_batch(&batch, conn)?;
+                if verbose {
+                    eprintln!("[DEBUG] 批处理: 已插入 {} 条episode", count);
+                }
                 batch.clear();
             }
         } else {
-            skipped += 1;
+            skipped_parse += 1;
+            if verbose && skipped_parse <= 5 {
+                eprintln!("[DEBUG] 第{}行: episode JSON解析失败: {}", line_idx + 1, &line[..line.len().min(100)]);
+            }
         }
     }
 
@@ -463,8 +502,8 @@ fn parse_episodes_from_zip(
 
     if verbose {
         eprintln!(
-            "处理完成: 插入 {} 条，跳过 {} 条 (无关subject或解析失败)",
-            count, skipped
+            "处理完成: 插入 {} 条, 跳过 {} 条(解析失败) + {} 条(无关subject)",
+            count, skipped_parse, skipped_subject
         );
     }
 
