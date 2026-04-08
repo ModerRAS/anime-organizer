@@ -356,14 +356,19 @@ fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<(
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| AppError::BangumiParseError(format!("开启事务失败: {e}")))?;
+
+    // Use explicit ON CONFLICT DO UPDATE instead of INSERT OR REPLACE
     let placeholders: Vec<String> = (1..=13).map(|i| format!("?{}", i)).collect();
     let sql = format!(
-        "INSERT OR REPLACE INTO subjects (id, type, name, name_cn, summary, date, score, platform, nsfw, series, eps, studio, director) VALUES {}",
+        "INSERT INTO subjects (id, type, name, name_cn, summary, date, score, platform, nsfw, series, eps, studio, director) VALUES {} ON CONFLICT(id) DO UPDATE SET type=excluded.type, name=excluded.name, name_cn=excluded.name_cn, summary=excluded.summary, date=excluded.date, score=excluded.score, platform=excluded.platform, nsfw=excluded.nsfw, series=excluded.series, eps=excluded.eps, studio=excluded.studio, director=excluded.director",
         batch.iter()
             .map(|_| format!("({})", placeholders.join(", ")))
             .collect::<Vec<_>>()
             .join(", ")
     );
+
+    // Debug: print first 200 chars of SQL
+    eprintln!("[DEBUG] SQL (first 200 chars): {}", &sql[..sql.len().min(200)]);
 
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(batch.len() * 13);
     for s in batch {
