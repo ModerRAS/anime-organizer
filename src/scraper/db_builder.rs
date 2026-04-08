@@ -27,7 +27,7 @@ struct LatestVersion {
     download_url: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 struct SubjectRecord {
     id: u32,
     #[serde(rename = "type")]
@@ -48,9 +48,9 @@ struct SubjectRecord {
     #[serde(default)]
     nsfw: Option<serde_json::Value>,
     #[serde(default)]
-    series: Option<u32>,
+    series: Option<serde_json::Value>,
     #[serde(default)]
-    eps: Option<u32>,
+    eps: Option<serde_json::Value>,
     #[serde(default)]
     studio: Option<String>,
     #[serde(default)]
@@ -71,9 +71,9 @@ struct EpisodeRecord {
     air_date: Option<String>,
     #[serde(rename = "type", default)]
     #[allow(dead_code)]
-    ep_type: u32,
+    ep_type: serde_json::Value,
     #[serde(default)]
-    disc: Option<u32>,
+    disc: Option<serde_json::Value>,
     #[serde(default)]
     duration: Option<String>,
     #[serde(default)]
@@ -389,8 +389,17 @@ fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<(
             Some(serde_json::Value::Bool(b)) => if *b { 1 } else { 0 },
             _ => 0,
         };
-        let series = s.series.unwrap_or(0);
+        let series = match &s.series {
+            Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0) as i32,
+            Some(serde_json::Value::Bool(b)) => if *b { 1 } else { 0 },
+            _ => 0,
+        };
         let platform = match &s.platform {
+            Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0) as i32,
+            Some(serde_json::Value::Bool(b)) => if *b { 1 } else { 0 },
+            _ => 0,
+        };
+        let eps = match &s.eps {
             Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0) as i32,
             Some(serde_json::Value::Bool(b)) => if *b { 1 } else { 0 },
             _ => 0,
@@ -405,7 +414,7 @@ fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<(
         params.push(Box::new(platform));
         params.push(Box::new(nsfw));
         params.push(Box::new(series));
-        params.push(Box::new(s.eps));
+        params.push(Box::new(eps));
         params.push(Box::new(s.studio.clone()));
         params.push(Box::new(s.director.clone()));
     }
@@ -553,14 +562,23 @@ fn insert_episodes_batch(batch: &[EpisodeRecord], conn: &Connection) -> Result<(
 
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(batch.len() * 10);
     for e in batch {
-        let disc = e.disc.unwrap_or(0);
+        let ep_type = match &e.ep_type {
+            serde_json::Value::Number(n) => n.as_i64().unwrap_or(0) as i32,
+            serde_json::Value::Bool(b) => if *b { 1 } else { 0 },
+            _ => 0,
+        };
+        let disc = match &e.disc {
+            Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0) as i32,
+            Some(serde_json::Value::Bool(b)) => if *b { 1 } else { 0 },
+            _ => 0,
+        };
         params.push(Box::new(e.id));
         params.push(Box::new(e.subject_id));
         params.push(Box::new(e.sort));
         params.push(Box::new(e.name.clone()));
         params.push(Box::new(e.name_cn.clone()));
         params.push(Box::new(e.air_date.clone()));
-        params.push(Box::new(e.ep_type));
+        params.push(Box::new(ep_type));
         params.push(Box::new(disc));
         params.push(Box::new(e.duration.clone()));
         params.push(Box::new(e.description.clone()));
