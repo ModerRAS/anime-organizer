@@ -12,26 +12,40 @@
 
 ## 中文
 
+### 📖 项目描述
+
+anime-organizer（简称 aniorg）是一款专为动漫收藏者设计的命令行工具，旨在自动化整理下载目录中的动漫视频文件。
+
+**核心功能：**
+
+- 自动解析文件名，识别动漫名称、集数、发布组等信息
+- 支持硬链接模式，整理后不占用额外磁盘空间
+- 自动生成 Kodi 兼容的 NFO 元数据文件
+- 下载封面海报和背景图
+- 支持 RSS 订阅和 115 网盘同步（需启用 clouddrive feature）
+
+**适用场景：**
+
+- 整理下载目录中的动漫文件
+- 自动化管理动漫媒体库
+- 为 Kodi/Jellyfin/Plex 等媒体中心生成元数据
+
 ### 🚀 功能特性
 
 - **智能解析**: 自动识别 `[发布组] 动漫名 - 集数 [标签].ext` 格式
-- **灵活整理**: 重构为 `动漫名/集数 [标签].ext` 结构
+- **灵活整理**: 重构为 `动漫名/Season N/集数 [标签].ext` 结构
 - **多种模式**: 支持移动、复制、硬链接三种操作模式
 - **元数据刮削**: 基于 Bangumi 生成 Kodi 兼容的 NFO 文件
 - **封面下载**: 通过 TMDB 下载海报和背景图，失败时回退 AniDB 海报
+- **别名匹配**: 内置 SQLite 别名库，支持模糊匹配和本地 dump 查询
+- **RSS 订阅**: 支持 RSS 自动订阅和 115 网盘同步（需 `clouddrive` feature）
 - **跨平台**: 支持 Windows、Linux、macOS
 - **零依赖运行**: 单文件部署，无需外部配置
 - **高性能**: Rust 原生实现，极速处理
 
 ### 📥 安装方式
 
-#### 方式一：从 Cargo 安装
-
-```bash
-cargo install anime-organizer
-```
-
-#### 方式二：下载预编译二进制
+#### 方式一：下载预编译二进制
 
 从 [GitHub Releases](https://github.com/ModerRAS/anime-organizer/releases) 下载对应平台的二进制文件：
 
@@ -45,12 +59,17 @@ cargo install anime-organizer
 | macOS x64 | `aniorg-x86_64-apple-darwin.tar.gz` |
 | macOS ARM64 | `aniorg-aarch64-apple-darwin.tar.gz` |
 
-#### 方式三：从源码构建
+#### 方式二：从源码构建
 
 ```bash
 git clone https://github.com/ModerRAS/anime-organizer.git
 cd anime-organizer
+
+# 默认构建（启用 metadata feature）
 cargo build --release
+
+# 全功能构建
+cargo build --release --features "scraper clouddrive"
 ```
 
 编译后的二进制文件位于 `target/release/aniorg`。
@@ -94,9 +113,9 @@ aniorg --source="/path/to/downloads" --dry-run --verbose
 | `--fallback-on-link-failure` | | enum | ❌ | - | 硬链接失败时回退模式：move 或 copy（默认不回退） |
 | `--scrape-metadata` / `--刮削` | | bool | ❌ | false | 启用 Bangumi/TMDB 元数据刮削 |
 | `--tmdb-api-key` | | string | ❌ | - | TMDB API Key，用于下载海报和背景图 |
-| `--alias-file` | | string | ❌ | - | 自定义别名文件，覆盖内置别名库 |
+| `--alias-file` | | string | ❌ | 内置库 | 自定义别名文件，覆盖内置别名库 |
 | `--no-images` | | bool | ❌ | false | 只生成 NFO，不下载图片 |
-| `--force-overwrite` | | bool | ❌ | false | 覆盖已有的 NFO 和图片 |
+| `--force-overwrite` | | bool | ❌ | false | 覆盖已有的 NFO 和图片文件 |
 | `--bangumi-cache` | | string | ❌ | 系统临时目录 | Bangumi 缓存目录 |
 | `--metadata-source` | | string | ❌ | - | 指定本地 `subject.jsonlines` 或其所在目录 |
 | `--help` | `-h` | bool | ❌ | false | 显示帮助 |
@@ -110,13 +129,6 @@ aniorg --source="/path/to/downloads" --dry-run --verbose
 - 在动画根目录生成 `tvshow.nfo`
 - 在 `Season N/` 目录下生成与视频同名的 `*.nfo`
 - 如果提供了 TMDB API Key，则下载 `poster.jpg`、`fanart.jpg` 和 `seasonXX-poster.jpg`
-
-也可以通过 scraper 子命令为 GitHub Actions 提供数据：
-
-```bash
-cargo run --features scraper -- scrape --days 7 --format json
-cargo run --features scraper -- match --input scraped.json --format github
-```
 
 ### 🎨 文件命名格式
 
@@ -135,9 +147,15 @@ cargo run --features scraper -- match --input scraped.json --format github
 
 ```
 动漫名称（含季度）/
-├── 01 [标签信息].扩展名
-├── 02 [标签信息].扩展名
-└── ...
+├── Season 1/
+│   ├── 01 [标签信息].扩展名
+│   └── 02 [标签信息].扩展名
+├── Season 2/
+│   ├── 01 [标签信息].扩展名
+│   └── ...
+├── tvshow.nfo
+├── poster.jpg
+└── fanart.jpg
 ```
 
 ### 🔗 硬链接说明
@@ -166,6 +184,55 @@ cargo run --features scraper -- match --input scraped.json --format github
 - 使用复制模式 (`--mode=copy`)，或通过 `--fallback-on-link-failure=copy` 自动回退
 - 使用移动模式 (`--mode=move`)，或通过 `--fallback-on-link-failure=move` 自动回退
 
+### 🔧 刮削子命令（需 `--features scraper`）
+
+```bash
+# 刮削近期更新
+cargo run --features scraper -- scrape --days 7 --format json
+
+# 匹配别名提案
+cargo run --features scraper -- match --input scraped.json --format github
+
+# 构建 SQLite 别名库
+cargo run --features scraper -- build-db --output bangumi.db
+
+# 从 dump 提取别名
+cargo run --features scraper -- extract-aliases --download
+
+# 合并新别名到数据库
+cargo run --features scraper -- merge-aliases --input new_aliases.json
+
+# 应用匹配的别名提案
+cargo run --features scraper -- apply-matches --input proposals.json
+
+# 创建别名请求 issue
+cargo run --features scraper -- create-alias-issues --input uncertain.json --repo ModerRAS/anime-organizer
+```
+
+### 📡 RSS 订阅管理（需 `--features clouddrive`）
+
+```bash
+# 列出订阅
+aniorg rss --list-subscriptions
+
+# 添加订阅
+aniorg rss --add-subscription \
+  --rss-url "https://example.com/rss" \
+  --rss-target "/anime" \
+  --rss-filter "720p"
+
+# 单次执行
+aniorg rss \
+  --clouddrive-url http://localhost:19798 \
+  --rss-url "https://example.com/rss" \
+  --rss-target "/anime"
+
+# Daemon 模式（持续监控）
+aniorg rss --daemon \
+  --clouddrive-url http://localhost:19798 \
+  --rss-interval 300
+```
+
 ### 💡 使用示例
 
 ```bash
@@ -183,41 +250,66 @@ aniorg -s "/path/to/downloads" --dry-run -v
 
 # 指定文件类型
 aniorg -s "/path/to/downloads" --include-ext="mp4,mkv"
+
+# 使用自定义别名库
+aniorg -s "/path/to/downloads" --alias-file="./my-aliases.json"
+
+# 强制覆盖已有 NFO
+aniorg -s "/path/to/downloads" --scrape-metadata --force-overwrite
 ```
 
 ---
 
 ## English
 
+### 📖 Project Description
+
+anime-organizer (aniorg) is a command-line tool designed for anime collectors to automatically organize video files in download directories.
+
+**Core Features:**
+
+- Auto-parse filenames to extract anime name, episode number, publisher info
+- Support hard link mode - organize files without using extra disk space
+- Generate Kodi-compatible NFO metadata files
+- Download poster and fanart images
+- RSS subscription and 115 cloud drive sync (requires clouddrive feature)
+
+**Use Cases:**
+
+- Organize anime files in download directories
+- Automate anime media library management
+- Generate metadata for Kodi/Jellyfin/Plex media centers
+
 ### 🚀 Features
 
 - **Smart Parsing**: Auto-recognize `[Publisher] AnimeName - Episode [Tags].ext` format
-- **Flexible Organization**: Restructure to `AnimeName/Episode [Tags].ext`
+- **Flexible Organization**: Restructure to `AnimeName/Season N/Episode [Tags].ext`
 - **Multiple Modes**: Support move, copy, and hard link operations
 - **Metadata Scraping**: Generate Kodi-compatible NFO files from Bangumi metadata
 - **Artwork Download**: Download posters and fanart from TMDB with AniDB poster fallback
+- **Alias Matching**: Built-in SQLite alias database with fuzzy matching and local dump lookup
+- **RSS Subscription**: RSS auto-subscription and 115 cloud drive sync (requires `clouddrive` feature)
 - **Cross-Platform**: Support Windows, Linux, macOS
 - **Zero Runtime Dependencies**: Single binary deployment
 - **High Performance**: Native Rust implementation
 
 ### 📥 Installation
 
-#### Option 1: Install via Cargo
-
-```bash
-cargo install anime-organizer
-```
-
-#### Option 2: Download Pre-built Binary
+#### Option 1: Download Pre-built Binary
 
 Download from [GitHub Releases](https://github.com/ModerRAS/anime-organizer/releases).
 
-#### Option 3: Build from Source
+#### Option 2: Build from Source
 
 ```bash
 git clone https://github.com/ModerRAS/anime-organizer.git
 cd anime-organizer
+
+# Default build (metadata feature enabled)
 cargo build --release
+
+# Full features
+cargo build --release --features "scraper clouddrive"
 ```
 
 ### 🎯 Quick Start
@@ -249,7 +341,7 @@ aniorg --source="/path/to/downloads" --scrape-metadata --tmdb-api-key="YOUR_TMDB
 | `--fallback-on-link-failure` | | enum | ❌ | - | Fallback when hard link fails: move or copy (disabled by default) |
 | `--scrape-metadata` / `--刮削` | | bool | ❌ | false | Enable Bangumi/TMDB metadata scraping |
 | `--tmdb-api-key` | | string | ❌ | - | TMDB API key for artwork download |
-| `--alias-file` | | string | ❌ | - | Custom alias file overriding the bundled library |
+| `--alias-file` | | string | ❌ | built-in | Custom alias file overriding the bundled library |
 | `--no-images` | | bool | ❌ | false | Generate NFO only, skip artwork download |
 | `--force-overwrite` | | bool | ❌ | false | Overwrite existing NFO and image files |
 | `--bangumi-cache` | | string | ❌ | system temp dir | Bangumi cache directory |
@@ -272,6 +364,55 @@ If hard linking fails due to cross-filesystem layouts or lack of support, you ca
 2. Filesystem must support hard links (ext4, NTFS, APFS, etc.)
 3. Write permission required for both directories
 
+### 🔧 Scraper Subcommands (requires `--features scraper`)
+
+```bash
+# Scrape recent updates
+cargo run --features scraper -- scrape --days 7 --format json
+
+# Match alias proposals
+cargo run --features scraper -- match --input scraped.json --format github
+
+# Build SQLite alias database
+cargo run --features scraper -- build-db --output bangumi.db
+
+# Extract aliases from dump
+cargo run --features scraper -- extract-aliases --download
+
+# Merge new aliases into database
+cargo run --features scraper -- merge-aliases --input new_aliases.json
+
+# Apply confident match proposals
+cargo run --features scraper -- apply-matches --input proposals.json
+
+# Create alias request issues
+cargo run --features scraper -- create-alias-issues --input uncertain.json --repo ModerRAS/anime-organizer
+```
+
+### 📡 RSS Subscription Management (requires `--features clouddrive`)
+
+```bash
+# List subscriptions
+aniorg rss --list-subscriptions
+
+# Add subscription
+aniorg rss --add-subscription \
+  --rss-url "https://example.com/rss" \
+  --rss-target "/anime" \
+  --rss-filter "720p"
+
+# Single shot execution
+aniorg rss \
+  --clouddrive-url http://localhost:19798 \
+  --rss-url "https://example.com/rss" \
+  --rss-target "/anime"
+
+# Daemon mode (continuous monitoring)
+aniorg rss --daemon \
+  --clouddrive-url http://localhost:19798 \
+  --rss-interval 300
+```
+
 ### 🛠️ Development
 
 ```bash
@@ -283,6 +424,9 @@ cargo run -- --source="/path/to/downloads" --verbose
 
 # Build release binary
 cargo build --release
+
+# Build with all features
+cargo build --release --features "scraper clouddrive"
 ```
 
 ## License
