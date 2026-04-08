@@ -18,6 +18,18 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     result
 }
 
+fn deserialize_infobox<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::String(s) => Ok(Some(s)),
+        serde_json::Value::Object(_) => Ok(Some(serde_json::to_string(&value).unwrap_or_default())),
+        _ => Ok(None),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct LatestVersion {
     #[allow(dead_code)]
@@ -53,6 +65,7 @@ struct SubjectRecord {
     #[serde(default)]
     director: Option<String>,
     #[serde(default)]
+    #[serde(deserialize_with = "deserialize_infobox")]
     infobox: Option<String>,
 }
 
@@ -262,6 +275,23 @@ fn extract_and_parse(
     let mut zip_archive = zip::ZipArchive::new(zip_file)
         .map_err(|e| AppError::MetadataFetchError(format!("解析 ZIP 文件失败: {e}")))?;
 
+    if verbose {
+        let zip_contents: Vec<String> = (0..zip_archive.len())
+            .filter_map(|i| {
+                zip_archive
+                    .by_index(i)
+                    .ok()
+                    .map(|f| (f.name().to_string(), f.size()))
+            })
+            .map(|(name, size)| format!("{} ({} bytes)", name, size))
+            .collect();
+        eprintln!("[INFO] ZIP 包含 {} 个文件:", zip_contents.len());
+        for name in &zip_contents {
+            eprintln!("[INFO]   - {}", name);
+        }
+        eprintln!("[INFO] 开始解析数据...\n");
+    }
+
     let conn = get_or_create_db(db_path)?;
 
     let subject_file = "subject.jsonlines";
@@ -305,6 +335,18 @@ fn extract_and_parse(
     } else {
         0
     };
+
+    if verbose {
+        eprintln!(
+            "[INFO] ===== 数据库构建完成 =====\n\
+             [INFO] subjects: {} 条\n\
+             [INFO] episodes: {} 条\n\
+             [INFO] aliases: {} 条\n\
+             [INFO] relations: {} 条\n\
+             [INFO] ==============================",
+            subjects_count, episodes_count, aliases_count, relations_count
+        );
+    }
 
     Ok((
         subjects_count,
@@ -667,16 +709,18 @@ fn insert_episodes_batch(batch: &[EpisodeRecord], conn: &Connection) -> Result<(
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| AppError::BangumiParseError(format!("开启事务失败: {e}")))?;
-    let placeholders: Vec<&str> = vec!["?"; 10];
+    let placeholders: Vec<&str> = vec!["?"; 11];
+    // Use composite primary key (subject_id, sort, disc, type) for proper multi-disc/SP handling
+    // Use DO NOTHING to avoid overwriting existing records on conflict
     let sql = format!(
-        "INSERT INTO episodes (id, subject_id, sort, name, name_cn, airdate, type, disc, duration, description) VALUES {} ON CONFLICT(id) DO UPDATE SET subject_id=excluded.subject_id, sort=excluded.sort, name=excluded.name, name_cn=excluded.name_cn, airdate=excluded.airdate, type=excluded.type, disc=excluded.disc, duration=excluded.duration, description=excluded.description",
+        "INSERT INTO episodes (id, subject_id, sort, name, name_cn, airdate, type, disc, duration, description) VALUES {} ON CONFLICT(subject_id, sort, disc, type) DO NOTHING",
         batch.iter()
             .map(|_| format!("({})", placeholders.join(", ")))
             .collect::<Vec<_>>()
             .join(", ")
     );
 
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(batch.len() * 10);
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(batch.len() * 11);
     for e in batch {
         let ep_type = match &e.ep_type {
             serde_json::Value::Number(n) => n.as_i64().unwrap_or(0) as i32,
@@ -691,13 +735,7 @@ fn insert_episodes_batch(batch: &[EpisodeRecord], conn: &Connection) -> Result<(
         };
         let disc = match &e.disc {
             Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0) as i32,
-            Some(serde_json::Value::Bool(b)) => {
-                if *b {
-                    1
-                } else {
-                    0
-                }
-            }
+            Some(serde_json::Value::String(s)) => s.parse().unwrap_or(0),
             _ => 0,
         };
         params.push(Box::new(e.id));
@@ -820,12 +858,22 @@ fn parse_relations_from_zip(
     let mut count = 0;
     let mut skipped_parse = 0;
     let mut skipped_subject = 0;
+    let mut processed_lines = 0;
 
     for line in reader.lines() {
         let line = line.map_err(|e| AppError::BangumiParseError(format!("读取行失败: {e}")))?;
         let line = line.trim();
         if line.is_empty() {
             continue;
+        }
+        processed_lines += 1;
+
+        if verbose && processed_lines <= 3 {
+            eprintln!(
+                "[DEBUG] 关系行{}: {}",
+                processed_lines,
+                truncate_str(line, 150)
+            );
         }
 
         if let Ok(relation) = serde_json::from_str::<SubjectRelationRecord>(line) {
@@ -838,10 +886,19 @@ fn parse_relations_from_zip(
 
             if batch.len() >= BATCH_SIZE {
                 insert_relations_batch(&batch, conn)?;
+                if verbose {
+                    eprintln!(
+                        "[DEBUG] 关系批处理: 已插入 {} 条, 当前批 {} 条",
+                        count, BATCH_SIZE
+                    );
+                }
                 batch.clear();
             }
         } else {
             skipped_parse += 1;
+            if verbose && skipped_parse <= 3 {
+                eprintln!("[DEBUG] 关系第{}行: JSON解析失败", processed_lines);
+            }
         }
     }
 
@@ -851,8 +908,8 @@ fn parse_relations_from_zip(
 
     if verbose {
         eprintln!(
-            "处理完成: 插入 {} 条关系，跳过 {} 条(解析失败) + {} 条(无关subject)",
-            count, skipped_parse, skipped_subject
+            "[INFO] 关系处理完成: 插入 {} 条, 跳过 {} 条(解析失败) + {} 条(无关subject), 总行数 {}",
+            count, skipped_parse, skipped_subject, processed_lines
         );
     }
 
@@ -868,7 +925,7 @@ fn insert_relations_batch(batch: &[SubjectRelationRecord], conn: &Connection) ->
         .unchecked_transaction()
         .map_err(|e| AppError::BangumiParseError(format!("开启事务失败: {e}")))?;
     let sql = format!(
-        "INSERT OR IGNORE INTO subject_relations (subject_id, related_subject_id, relation_type, \"order\") VALUES {}",
+        "INSERT INTO subject_relations (subject_id, related_subject_id, relation_type, \"order\") VALUES {} ON CONFLICT(subject_id, related_subject_id) DO NOTHING",
         batch
             .iter()
             .map(|_| "(?, ?, ?, ?)")
@@ -926,12 +983,22 @@ fn parse_characters_from_zip(
     let mut count = 0;
     let mut skipped_parse = 0;
     let mut skipped_subject = 0;
+    let mut processed_lines = 0;
 
     for line in reader.lines() {
         let line = line.map_err(|e| AppError::BangumiParseError(format!("读取行失败: {e}")))?;
         let line = line.trim();
         if line.is_empty() {
             continue;
+        }
+        processed_lines += 1;
+
+        if verbose && processed_lines <= 3 {
+            eprintln!(
+                "[DEBUG] 角色行{}: {}",
+                processed_lines,
+                truncate_str(line, 150)
+            );
         }
 
         if let Ok(char_rec) = serde_json::from_str::<SubjectCharacterRecord>(line) {
@@ -944,10 +1011,19 @@ fn parse_characters_from_zip(
 
             if batch.len() >= BATCH_SIZE {
                 insert_characters_batch(&batch, conn)?;
+                if verbose {
+                    eprintln!(
+                        "[DEBUG] 角色批处理: 已插入 {} 条, 当前批 {} 条",
+                        count, BATCH_SIZE
+                    );
+                }
                 batch.clear();
             }
         } else {
             skipped_parse += 1;
+            if verbose && skipped_parse <= 3 {
+                eprintln!("[DEBUG] 角色第{}行: JSON解析失败", processed_lines);
+            }
         }
     }
 
@@ -957,8 +1033,8 @@ fn parse_characters_from_zip(
 
     if verbose {
         eprintln!(
-            "处理完成: 插入 {} 条角色，跳过 {} 条(解析失败) + {} 条(无关subject)",
-            count, skipped_parse, skipped_subject
+            "[INFO] 角色处理完成: 插入 {} 条, 跳过 {} 条(解析失败) + {} 条(无关subject), 总行数 {}",
+            count, skipped_parse, skipped_subject, processed_lines
         );
     }
 
@@ -974,7 +1050,7 @@ fn insert_characters_batch(batch: &[SubjectCharacterRecord], conn: &Connection) 
         .unchecked_transaction()
         .map_err(|e| AppError::BangumiParseError(format!("开启事务失败: {e}")))?;
     let sql = format!(
-        "INSERT OR IGNORE INTO subject_characters (subject_id, character_id, type, \"order\") VALUES {}",
+        "INSERT INTO subject_characters (subject_id, character_id, type, \"order\") VALUES {} ON CONFLICT(subject_id, character_id) DO NOTHING",
         batch
             .iter()
             .map(|_| "(?, ?, ?, ?)")
@@ -1032,12 +1108,22 @@ fn parse_persons_from_zip(
     let mut count = 0;
     let mut skipped_parse = 0;
     let mut skipped_subject = 0;
+    let mut processed_lines = 0;
 
     for line in reader.lines() {
         let line = line.map_err(|e| AppError::BangumiParseError(format!("读取行失败: {e}")))?;
         let line = line.trim();
         if line.is_empty() {
             continue;
+        }
+        processed_lines += 1;
+
+        if verbose && processed_lines <= 3 {
+            eprintln!(
+                "[DEBUG] 人物行{}: {}",
+                processed_lines,
+                truncate_str(line, 150)
+            );
         }
 
         if let Ok(person_rec) = serde_json::from_str::<SubjectPersonRecord>(line) {
@@ -1050,10 +1136,19 @@ fn parse_persons_from_zip(
 
             if batch.len() >= BATCH_SIZE {
                 insert_persons_batch(&batch, conn)?;
+                if verbose {
+                    eprintln!(
+                        "[DEBUG] 人物批处理: 已插入 {} 条, 当前批 {} 条",
+                        count, BATCH_SIZE
+                    );
+                }
                 batch.clear();
             }
         } else {
             skipped_parse += 1;
+            if verbose && skipped_parse <= 3 {
+                eprintln!("[DEBUG] 人物第{}行: JSON解析失败", processed_lines);
+            }
         }
     }
 
@@ -1063,8 +1158,8 @@ fn parse_persons_from_zip(
 
     if verbose {
         eprintln!(
-            "处理完成: 插入 {} 条人物，跳过 {} 条(解析失败) + {} 条(无关subject)",
-            count, skipped_parse, skipped_subject
+            "[INFO] 人物处理完成: 插入 {} 条, 跳过 {} 条(解析失败) + {} 条(无关subject), 总行数 {}",
+            count, skipped_parse, skipped_subject, processed_lines
         );
     }
 
@@ -1080,7 +1175,7 @@ fn insert_persons_batch(batch: &[SubjectPersonRecord], conn: &Connection) -> Res
         .unchecked_transaction()
         .map_err(|e| AppError::BangumiParseError(format!("开启事务失败: {e}")))?;
     let sql = format!(
-        "INSERT OR IGNORE INTO subject_persons (subject_id, person_id, position, appear_eps) VALUES {}",
+        "INSERT INTO subject_persons (subject_id, person_id, position, appear_eps) VALUES {} ON CONFLICT(subject_id, person_id, position) DO NOTHING",
         batch
             .iter()
             .map(|_| "(?, ?, ?, ?)")
@@ -1146,7 +1241,7 @@ fn get_or_create_db(db_path: &Path) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_aliases_subject ON aliases(subject_id);
 
         CREATE TABLE IF NOT EXISTS episodes (
-            id INTEGER PRIMARY KEY,
+            id INTEGER,
             subject_id INTEGER REFERENCES subjects(id) ON DELETE CASCADE,
             sort INTEGER NOT NULL,
             name TEXT,
@@ -1155,7 +1250,8 @@ fn get_or_create_db(db_path: &Path) -> Result<Connection> {
             type INTEGER DEFAULT 0,
             disc INTEGER DEFAULT 0,
             duration TEXT,
-            description TEXT
+            description TEXT,
+            PRIMARY KEY (subject_id, sort, disc, type)
         );
 
         CREATE TABLE IF NOT EXISTS subject_characters (
@@ -1169,7 +1265,7 @@ fn get_or_create_db(db_path: &Path) -> Result<Connection> {
         CREATE TABLE IF NOT EXISTS subject_persons (
             subject_id INTEGER,
             person_id INTEGER,
-            position INTEGER,
+            position TEXT,
             appear_eps TEXT,
             PRIMARY KEY (subject_id, person_id, position)
         );
@@ -1204,9 +1300,31 @@ fn validate_database(db_path: &Path) -> Result<()> {
         .query_row("SELECT COUNT(*) FROM aliases", [], |row| row.get(0))
         .map_err(|e| AppError::BangumiParseError(format!("查询aliases失败: {e}")))?;
 
+    let char_count: u32 = conn
+        .query_row("SELECT COUNT(*) FROM subject_characters", [], |row| {
+            row.get(0)
+        })
+        .unwrap_or(0);
+
+    let person_count: u32 = conn
+        .query_row("SELECT COUNT(*) FROM subject_persons", [], |row| row.get(0))
+        .unwrap_or(0);
+
+    let relation_count: u32 = conn
+        .query_row("SELECT COUNT(*) FROM subject_relations", [], |row| {
+            row.get(0)
+        })
+        .unwrap_or(0);
+
     eprintln!(
-        "数据库验证通过: {} 个主体, {} 个剧集, {} 个别名",
-        subject_count, episode_count, alias_count
+        "[INFO] 数据库验证通过:\n\
+         [INFO]   - subjects: {} 个主体\n\
+         [INFO]   - episodes: {} 个剧集\n\
+         [INFO]   - aliases: {} 个别名\n\
+         [INFO]   - subject_characters: {} 个角色\n\
+         [INFO]   - subject_persons: {} 个人物\n\
+         [INFO]   - subject_relations: {} 个关系",
+        subject_count, episode_count, alias_count, char_count, person_count, relation_count
     );
 
     Ok(())
