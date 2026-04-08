@@ -222,7 +222,9 @@ pub async fn build_bangumi_db(
     if verbose {
         eprintln!("下载 Bangumi Archive: {}", latest_url);
     }
-    let zip_path = download_zip(&latest_url, &temp_path).await?;
+    let zip_path = tokio::task::spawn_blocking(move || download_zip(&latest_url, &temp_path))
+        .await
+        .map_err(|e| AppError::MetadataFetchError(format!("下载任务失败: {e}")))??;
 
     let download_size = std::fs::metadata(&zip_path).map_err(AppError::Io)?.len();
     if verbose {
@@ -265,6 +267,8 @@ pub async fn build_bangumi_db(
 
 async fn fetch_latest_version_url() -> Result<String> {
     let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(60))
         .user_agent("anime-organizer/0.1")
         .build()
         .map_err(|e| AppError::MetadataFetchError(format!("创建 HTTP 客户端失败: {e}")))?;
@@ -291,32 +295,52 @@ async fn fetch_latest_version_url() -> Result<String> {
     Ok(version.download_url)
 }
 
-async fn download_zip(url: &str, temp_dir: &Path) -> Result<PathBuf> {
-    let client = reqwest::Client::builder()
-        .user_agent("anime-organizer/0.1")
-        .build()
-        .map_err(|e| AppError::MetadataFetchError(format!("创建 HTTP 客户端失败: {e}")))?;
+fn download_zip(url: &str, temp_dir: &Path) -> Result<PathBuf> {
+    let http_proxy = std::env::var("http_proxy")
+        .or_else(|_| std::env::var("HTTP_PROXY"))
+        .ok();
 
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| AppError::MetadataFetchError(format!("下载 ZIP 失败: {e}")))?;
+    let zip_path = temp_dir.join("bangumi_dump.zip");
 
-    if !resp.status().is_success() {
+    let mut cmd = std::process::Command::new("aria2c");
+    cmd.arg("-x16")
+        .arg("-s16")
+        .arg("-j1")
+        .arg("-d")
+        .arg(temp_dir.to_string_lossy().as_ref())
+        .arg("-o")
+        .arg("bangumi_dump.zip")
+        .arg("--max-connection-per-server=16")
+        .arg("--max-tries=5")
+        .arg("--retry-wait=10")
+        .arg("--timeout=60")
+        .arg("--connect-timeout=30")
+        .arg("--disk-cache=32M")
+        .args(["--console-log-level=info"])
+        .arg(url);
+
+    if let Some(ref proxy) = http_proxy {
+        cmd.arg("--all-proxy").arg(proxy);
+    } else {
+        cmd.arg("--all-proxy").arg("");
+    }
+
+    let status = cmd
+        .status()
+        .map_err(|e| AppError::MetadataFetchError(format!("启动 aria2c 失败: {e}")))?;
+
+    if !status.success() {
         return Err(AppError::MetadataFetchError(format!(
-            "下载 ZIP 失败 (HTTP {})",
-            resp.status()
+            "aria2c 下载失败 (exit code {:?})",
+            status.code()
         )));
     }
 
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| AppError::MetadataFetchError(format!("读取 ZIP 数据失败: {e}")))?;
-
-    let zip_path = temp_dir.join("bangumi_dump.zip");
-    std::fs::write(&zip_path, &bytes).map_err(AppError::Io)?;
+    if !zip_path.exists() {
+        return Err(AppError::MetadataFetchError(
+            "aria2c 下载完成但文件不存在".to_string(),
+        ));
+    }
 
     Ok(zip_path)
 }
