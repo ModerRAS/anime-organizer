@@ -93,8 +93,8 @@ impl RssProcessor {
                 info!("下载 .torrent: {}", torrent_url);
             }
             let proxy_config = ProxyConfig::from_env();
-            let client = build_http_client(&proxy_config)
-                .unwrap_or_else(|_| reqwest::Client::new());
+            let client =
+                build_http_client(&proxy_config).unwrap_or_else(|_| reqwest::Client::new());
             download_torrent_to_magnet(&client, torrent_url).await?
         } else {
             return Err(AppError::MetadataFetchError(format!(

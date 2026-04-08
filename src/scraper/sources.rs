@@ -60,8 +60,7 @@ impl Scraper {
     /// 创建刮削器实例
     pub fn new() -> Self {
         let proxy_config = ProxyConfig::from_env();
-        let http = build_http_client(&proxy_config)
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let http = build_http_client(&proxy_config).unwrap_or_else(|_| reqwest::Client::new());
         Self { http }
     }
 
