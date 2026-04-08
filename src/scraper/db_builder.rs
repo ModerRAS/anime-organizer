@@ -547,9 +547,9 @@ fn insert_episodes_batch(batch: &[EpisodeRecord], conn: &Connection) -> Result<(
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| AppError::BangumiParseError(format!("开启事务失败: {e}")))?;
-    let placeholders: Vec<String> = (1..=10).map(|i| format!("?{}", i)).collect();
+    let placeholders: Vec<&str> = vec!["?"; 10];
     let sql = format!(
-        "INSERT OR REPLACE INTO episodes (id, subject_id, sort, name, name_cn, airdate, type, disc, duration, description) VALUES {}",
+        "INSERT INTO episodes (id, subject_id, sort, name, name_cn, airdate, type, disc, duration, description) VALUES {} ON CONFLICT(id) DO UPDATE SET subject_id=excluded.subject_id, sort=excluded.sort, name=excluded.name, name_cn=excluded.name_cn, airdate=excluded.airdate, type=excluded.type, disc=excluded.disc, duration=excluded.duration, description=excluded.description",
         batch.iter()
             .map(|_| format!("({})", placeholders.join(", ")))
             .collect::<Vec<_>>()
