@@ -543,14 +543,15 @@ fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<u
         let nsfw_val: i32 = if s.nsfw { 1 } else { 0 };
         let series_val: i32 = if s.series { 1 } else { 0 };
         let platform_val: i32 = s.platform as i32;
-        let infobox_fields = crate::scraper::wiki_parser::InfoboxFields::parse(s.infobox.as_deref().unwrap_or(""));
+        let infobox_fields =
+            crate::scraper::wiki_parser::InfoboxFields::parse(s.infobox.as_deref().unwrap_or(""));
         infobox_aliases.extend(
-                infobox_fields
-                    .aliases
-                    .into_iter()
-                    .filter(|a| !a.is_empty() && a != &s.name)
-                    .map(|a| (s.id, a)),
-            );
+            infobox_fields
+                .aliases
+                .into_iter()
+                .filter(|a| !a.is_empty() && a != &s.name)
+                .map(|a| (s.id, a)),
+        );
         params.push(Box::new(s.id));
         params.push(Box::new(s.subject_type));
         params.push(Box::new(s.name.clone()));
@@ -580,8 +581,7 @@ fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<u
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        let mut alias_params: Vec<&dyn rusqlite::ToSql> =
-            Vec::with_capacity(alias_count * 2);
+        let mut alias_params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(alias_count * 2);
         for (subject_id, alias) in &infobox_aliases {
             alias_params.push(subject_id);
             alias_params.push(alias);
