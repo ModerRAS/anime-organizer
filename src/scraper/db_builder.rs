@@ -5,6 +5,20 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
+fn truncate_str(s: &str, max_len: usize) -> String {
+    let mut result = String::new();
+    for c in s.chars() {
+        if result.len() + c.len_utf8() > max_len {
+            break;
+        }
+        result.push(c);
+    }
+    if result.len() < s.len() {
+        result.push_str("...");
+    }
+    result
+}
+
 #[derive(Debug, Deserialize)]
 struct LatestVersion {
     #[allow(dead_code)]
@@ -270,7 +284,7 @@ fn parse_subjects_from_zip(
         eprintln!("处理 {}: 源文件 {} 行", filename, line_count);
         eprintln!("[DEBUG] 前3行原始JSON:");
         for (i, line) in content.lines().take(3).enumerate() {
-            eprintln!("[DEBUG] 行{}: {}", i + 1, &line[..line.len().min(200)]);
+            eprintln!("[DEBUG] 行{}: {}", i + 1, truncate_str(&line, 200));
         }
         eprintln!("[DEBUG] JSON结构调试结束");
     }
@@ -315,7 +329,7 @@ fn parse_subjects_from_zip(
             if verbose && count <= 5 {
                 eprintln!("[DEBUG] 第{}行: 插入subject id={}, name={}", line_idx + 1, 
                     batch.last().map(|s| s.id).unwrap_or(0),
-                    batch.last().map(|s| &s.name[..s.name.len().min(50)]).unwrap_or(""));
+                    batch.last().map(|s| truncate_str(&s.name, 50)).unwrap_or_else(|| "".to_string()));
             }
 
             if batch.len() >= BATCH_SIZE {
@@ -330,7 +344,7 @@ fn parse_subjects_from_zip(
         } else {
             skipped_parse += 1;
             if verbose && skipped_parse <= 5 {
-                eprintln!("[DEBUG] 第{}行: JSON解析失败, 内容: {}", line_idx + 1, &line[..line.len().min(100)]);
+                eprintln!("[DEBUG] 第{}行: JSON解析失败, 内容: {}", line_idx + 1, truncate_str(line, 100));
             }
         }
     }
@@ -451,7 +465,7 @@ fn parse_episodes_from_zip(
         }
         eprintln!("[DEBUG] 前3行原始JSON:");
         for (i, line) in content.lines().take(3).enumerate() {
-            eprintln!("[DEBUG] 行{}: {}", i + 1, &line[..line.len().min(200)]);
+            eprintln!("[DEBUG] 行{}: {}", i + 1, truncate_str(&line, 200));
         }
     }
 
@@ -491,7 +505,7 @@ fn parse_episodes_from_zip(
         } else {
             skipped_parse += 1;
             if verbose && skipped_parse <= 5 {
-                eprintln!("[DEBUG] 第{}行: episode JSON解析失败: {}", line_idx + 1, &line[..line.len().min(100)]);
+                eprintln!("[DEBUG] 第{}行: episode JSON解析失败: {}", line_idx + 1, truncate_str(line, 100));
             }
         }
     }
