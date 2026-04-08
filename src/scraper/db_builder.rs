@@ -343,8 +343,9 @@ fn parse_subjects_from_zip(
             }
         } else {
             skipped_parse += 1;
-            if verbose && skipped_parse <= 5 {
-                eprintln!("[DEBUG] 第{}行: JSON解析失败, 内容: {}", line_idx + 1, truncate_str(line, 100));
+            if verbose && skipped_parse <= 3 {
+                let parse_err = serde_json::from_str::<SubjectRecord>(line).unwrap_err();
+                eprintln!("[DEBUG] 第{}行: JSON解析失败, serde错误: {}, 内容前100字符: {}", line_idx + 1, parse_err, truncate_str(line, 100));
             }
         }
     }
