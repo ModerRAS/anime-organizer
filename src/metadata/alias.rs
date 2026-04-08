@@ -1,21 +1,16 @@
 //! 别名库查找
 //!
 //! 提供动画名称别名到 Bangumi/TMDB/AniDB ID 的映射查找功能。
-//! 别名数据通过 `rust-embed` 嵌入到二进制文件中，也支持用户自定义别名文件覆盖。
+//! 别名数据从 Bangumi SQLite 数据库加载。
 
 use regex::Regex;
-use rust_embed::Embed;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::LazyLock;
 
 use crate::error::{AppError, Result};
-
-/// 嵌入的数据资源
-#[derive(Embed)]
-#[folder = "data/"]
-struct DataAssets;
 
 static RELEASE_TITLE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(?P<title>.+?)\s+-\s+(?:ep?\s*)?\d{1,4}(?:[vV]\d+)?(?:\s.*)?$")
@@ -51,14 +46,14 @@ pub struct AliasEntry {
 
 /// 别名库查找
 ///
-/// 管理动画名称别名到元数据 ID 的映射关系，支持从嵌入的 JSON 文件加载。
+/// 管理动画名称别名到元数据 ID 的映射关系，支持从 Bangumi SQLite 数据库加载。
 ///
 /// # 示例
 ///
 /// ```no_run
 /// use anime_organizer::metadata::AliasLookup;
 ///
-/// let lookup = AliasLookup::load(None).unwrap();
+/// let lookup = AliasLookup::load("bangumi.db".as_ref()).unwrap();
 /// if let Some(entry) = lookup.find("孤独摇滚") {
 ///     println!("Bangumi ID: {}", entry.bangumi_id);
 /// }
@@ -69,32 +64,52 @@ pub struct AliasLookup {
 }
 
 impl AliasLookup {
-    /// 从嵌入的 `aliases.json` 加载别名库，可选用户自定义文件覆盖
+    /// 从 Bangumi SQLite 数据库加载别名库
     ///
     /// # 参数
     ///
-    /// - `user_file` - 用户自定义别名文件路径（可选）。
-    ///   用户文件中的条目会覆盖内置别名库中相同键的条目。
-    pub fn load(user_file: Option<&Path>) -> Result<Self> {
-        let data = DataAssets::get("aliases.json")
-            .ok_or_else(|| AppError::AliasLoadError("嵌入的 aliases.json 未找到".to_string()))?;
+    /// - `db_path` - Bangumi 数据库路径（通常为 `bangumi.db`）。
+    pub fn load(db_path: &Path) -> Result<Self> {
+        if !db_path.exists() {
+            return Err(AppError::AliasLoadError(format!(
+                "数据库文件不存在: {}",
+                db_path.display()
+            )));
+        }
 
-        let json_str = std::str::from_utf8(data.data.as_ref())
-            .map_err(|e| AppError::AliasLoadError(format!("UTF-8 解码失败: {e}")))?;
+        let conn = Connection::open(db_path)
+            .map_err(|e| AppError::AliasLoadError(format!("打开数据库失败: {e}")))?;
 
-        // 去除 BOM 等前导字符
-        let json_str = json_str.trim_start_matches('\u{FEFF}').trim_start();
+        let mut aliases: HashMap<String, AliasEntry> = HashMap::new();
 
-        let mut aliases: HashMap<String, AliasEntry> = serde_json::from_str(json_str)
-            .map_err(|e| AppError::AliasLoadError(format!("JSON 解析失败: {e}")))?;
+        // 从数据库加载别名：关联 aliases 表和 subjects 表
+        let mut stmt = conn
+            .prepare(
+                "SELECT a.alias, a.subject_id, s.name FROM aliases a JOIN subjects s ON a.subject_id = s.id",
+            )
+            .map_err(|e| AppError::AliasLoadError(format!("预处理 SQL 失败: {e}")))?;
 
-        // 加载用户自定义文件（覆盖内置条目）
-        if let Some(path) = user_file {
-            let user_data = std::fs::read_to_string(path)
-                .map_err(|e| AppError::AliasLoadError(format!("读取用户别名文件失败: {e}")))?;
-            let user_aliases: HashMap<String, AliasEntry> = serde_json::from_str(&user_data)
-                .map_err(|e| AppError::AliasLoadError(format!("解析用户别名文件失败: {e}")))?;
-            aliases.extend(user_aliases);
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| AppError::AliasLoadError(format!("查询别名失败: {e}")))?;
+
+        for row in rows {
+            let (alias, subject_id, name) =
+                row.map_err(|e| AppError::AliasLoadError(format!("读取别名失败: {e}")))?;
+            // tmdb_id 和 anidb_id 不存储在数据库别名表中，设为 None
+            let entry = AliasEntry {
+                bangumi_id: subject_id,
+                name,
+                tmdb_id: None,
+                anidb_id: None,
+            };
+            aliases.insert(alias, entry);
         }
 
         expand_generated_aliases(&mut aliases);
@@ -307,63 +322,125 @@ fn compact_name(name: &str) -> String {
 mod tests {
     use super::*;
 
+    fn create_test_db() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let conn = Connection::open(&db_path).unwrap();
+
+        // Create schema
+        conn.execute_batch(
+            r#"
+            CREATE TABLE subjects (
+                id INTEGER PRIMARY KEY,
+                type INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                name_cn TEXT
+            );
+            CREATE TABLE aliases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject_id INTEGER REFERENCES subjects(id) ON DELETE CASCADE,
+                alias TEXT NOT NULL,
+                UNIQUE(subject_id, alias)
+            );
+            "#,
+        )
+        .unwrap();
+
+        // Insert test data
+        conn.execute(
+            "INSERT INTO subjects (id, type, name, name_cn) VALUES (?1, 2, ?2, ?3)",
+            rusqlite::params![1, "進撃の巨人", "进击的巨人"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO aliases (subject_id, alias) VALUES (1, '进击的巨人')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO subjects (id, type, name, name_cn) VALUES (?1, 2, ?2, ?3)",
+            rusqlite::params![2, "CLANNAD", "CLANNAD"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO aliases (subject_id, alias) VALUES (2, 'clannad')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO subjects (id, type, name, name_cn) VALUES (?1, 2, ?2, ?3)",
+            rusqlite::params![3, "ぼっち・ざ・ろっく！", "孤独摇滚"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO aliases (subject_id, alias) VALUES (3, '孤独摇滚')",
+            [],
+        )
+        .unwrap();
+
+        dir
+    }
+
     #[test]
-    fn test_load_bundled_aliases() {
-        let lookup = AliasLookup::load(None).unwrap();
+    fn test_load_from_database() {
+        let dir = create_test_db();
+        let db_path = dir.path().join("test.db");
+        let lookup = AliasLookup::load(&db_path).unwrap();
         assert!(!lookup.is_empty());
-        assert!(lookup.len() > 500);
+        assert!(
+            lookup.len() >= 3,
+            "Expected >= 3 aliases after expansion, got {}",
+            lookup.len()
+        );
     }
 
     #[test]
     fn test_find_exact_match() {
-        let lookup = AliasLookup::load(None).unwrap();
+        let dir = create_test_db();
+        let db_path = dir.path().join("test.db");
+        let lookup = AliasLookup::load(&db_path).unwrap();
         let entry = lookup.find("进击的巨人");
         assert!(entry.is_some());
         let entry = entry.unwrap();
-        assert!(entry.bangumi_id > 0);
+        assert_eq!(entry.bangumi_id, 1);
     }
 
     #[test]
     fn test_find_returns_none_for_unknown() {
-        let lookup = AliasLookup::load(None).unwrap();
+        let dir = create_test_db();
+        let db_path = dir.path().join("test.db");
+        let lookup = AliasLookup::load(&db_path).unwrap();
         assert!(lookup.find("这个动画不存在_xyz_123").is_none());
     }
 
     #[test]
     fn test_find_fuzzy() {
-        let lookup = AliasLookup::load(None).unwrap();
-        // 测试大小写不敏感
+        let dir = create_test_db();
+        let db_path = dir.path().join("test.db");
+        let lookup = AliasLookup::load(&db_path).unwrap();
         let entry = lookup.find_fuzzy("CLANNAD");
-        // 如果别名库中有 clannad 相关条目则应找到
-        if let Some(e) = entry {
-            assert!(e.bangumi_id > 0);
-        }
+        assert!(entry.is_some());
+        assert_eq!(entry.unwrap().bangumi_id, 2);
     }
 
     #[test]
     fn test_find_by_bangumi_id() {
-        let lookup = AliasLookup::load(None).unwrap();
-        // 找到任意一个条目的 bangumi_id 进行反查
-        if let Some(entry) = lookup.find("进击的巨人") {
-            let result = lookup.find_by_bangumi_id(entry.bangumi_id);
-            assert!(result.is_some());
-        }
-    }
-
-    #[test]
-    fn test_user_file_override() {
-        let dir = tempfile::tempdir().unwrap();
-        let user_file = dir.path().join("user_aliases.json");
-        std::fs::write(
-            &user_file,
-            r#"{"测试动画": {"bangumi_id": 99999, "name": "テスト", "tmdb_id": null, "anidb_id": null}}"#,
-        )
-        .unwrap();
-
-        let lookup = AliasLookup::load(Some(&user_file)).unwrap();
-        let entry = lookup.find("测试动画").unwrap();
-        assert_eq!(entry.bangumi_id, 99999);
-        assert_eq!(entry.name, "テスト");
+        let dir = create_test_db();
+        let db_path = dir.path().join("test.db");
+        let lookup = AliasLookup::load(&db_path).unwrap();
+        let result = lookup.find_by_bangumi_id(1);
+        assert!(result.is_some());
+        let (key, entry) = result.unwrap();
+        // entry.name is the canonical Japanese name which is always correct
+        assert_eq!(entry.name, "進撃の巨人");
+        // key could be either the Chinese alias or canonical name due to expand_generated_aliases
+        assert!(
+            key == "进击的巨人" || key == "進撃の巨人",
+            "key was '{}'",
+            key
+        );
     }
 
     #[test]
@@ -374,9 +451,19 @@ mod tests {
 
     #[test]
     fn test_find_fuzzy_from_release_filename() {
-        let lookup = AliasLookup::load(None).unwrap();
+        let dir = create_test_db();
+        let db_path = dir.path().join("test.db");
+        let lookup = AliasLookup::load(&db_path).unwrap();
         let entry = lookup.find_fuzzy("[ANi] 进击的巨人 / Attack on Titan - 01 [1080P].mp4");
         assert!(entry.is_some());
         assert_eq!(entry.unwrap().name, "進撃の巨人");
+    }
+
+    #[test]
+    fn test_load_nonexistent_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("nonexistent.db");
+        let result = AliasLookup::load(&db_path);
+        assert!(result.is_err());
     }
 }

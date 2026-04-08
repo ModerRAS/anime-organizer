@@ -2,7 +2,7 @@ name: Alias Update - Scrape & Match
 
 on:
   schedule:
-    - cron: '0 16 * * 1'  # Every Monday 16:00 UTC
+    - cron: '0 16 * * 1'
   workflow_dispatch:
     inputs:
       days:
@@ -50,14 +50,55 @@ jobs:
           echo "::notice::Build completed successfully"
           echo "::endgroup::"
 
-      - name: Download Bangumi DB from release
+      - name: Build Bangumi database
+        run: |
+          echo "::group::Building Bangumi database"
+          echo "::notice::Building bangumi.db from latest dump..."
+          if cargo run --release --features "scraper" -- build-db --verbose bangumi.db; then
+            echo "::notice::Database built successfully"
+          else
+            echo "::warning::Database build failed, will try to use existing"
+          fi
+          echo "::endgroup::"
+
+      - name: Download existing database from release
         continue-on-error: true
         run: |
-          gh release download bangumi-db-latest \
-            --pattern 'bangumi.db' \
-            --dir /tmp/bangumi-cache || true
+          if [ ! -f bangumi.db ]; then
+            echo "::notice::Downloading existing database from release..."
+            gh release download bangumi-db-latest \
+              --pattern 'bangumi.db' \
+              --dir . || true
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract infobox aliases from Bangumi dump
+        run: |
+          echo "::group::Extracting infobox aliases"
+          echo "::notice::Extracting aliases from Bangumi dump..."
+          if cargo run --release --features "scraper" -- extract-aliases \
+            --download \
+            --output /tmp/extracted_aliases.json; then
+            echo "::notice::Extraction completed successfully"
+          else
+            echo "::warning::Extraction failed"
+            echo "{}" > /tmp/extracted_aliases.json
+          fi
+
+          if [ -s /tmp/extracted_aliases.json ]; then
+            echo "::notice::Merging extracted aliases into database..."
+            if cargo run --release --features "scraper" -- merge-aliases \
+              --input /tmp/extracted_aliases.json \
+              --target bangumi.db; then
+              echo "::notice::Infobox aliases merged successfully"
+            else
+              echo "::warning::Merge failed or database not available"
+            fi
+          else
+            echo "::warning::No extracted aliases to merge"
+          fi
+          echo "::endgroup::"
 
       - name: Run scraper
         id: scrape
@@ -65,7 +106,6 @@ jobs:
           DAYS="${{ github.event.inputs.days || '7' }}"
           echo "::group::Running scraper"
           echo "::notice::Scraping anime from last ${DAYS} days..."
-          # Output scraped data as JSON for the matcher
           if cargo run --release --features "scraper,llm-api" -- scrape \
             --days "${DAYS}" \
             --format json > /tmp/scraped.json; then
@@ -79,40 +119,15 @@ jobs:
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
 
-      - name: Extract infobox aliases from Bangumi dump
-        run: |
-          echo "::group::Extracting infobox aliases"
-          echo "::notice::Extracting aliases from Bangumi dump..."
-          # Extract aliases from Bangumi dump - these are official aliases from infobox
-          if cargo run --release --features "scraper" -- extract-aliases \
-            --download \
-            --output /tmp/extracted_aliases.json; then
-            echo "::notice::Extraction completed successfully"
-          else
-            echo "::warning::Extraction failed"
-            echo "{}" > /tmp/extracted_aliases.json
-          fi
-
-          # Merge extracted aliases into aliases.json
-          if [ -s /tmp/extracted_aliases.json ]; then
-            echo "::notice::Merging extracted aliases into aliases.json..."
-            python3 scripts/merge_aliases.py
-            echo "::notice::Infobox aliases merged successfully"
-          else
-            echo "::warning::No extracted aliases to merge"
-          fi
-          echo "::endgroup::"
-
       - name: Run LLM matcher
         id: match
         continue-on-error: true
         run: |
           echo "::group::Running LLM matcher"
           echo "::notice::Starting LLM-based alias matching..."
-          # Use the scraper's match command which uses LLM to find new aliases
           if cargo run --release --features "scraper,llm-api" -- match \
             --input /tmp/scraped.json \
-            --aliases data/aliases.json \
+            --aliases bangumi.db \
             --format github > /tmp/match_result.txt; then
             echo "::notice::Matching completed successfully"
           else
@@ -120,7 +135,6 @@ jobs:
             touch /tmp/match_result.txt
           fi
 
-          # Parse output for GitHub Actions
           echo "::notice::Parsing match results..."
           CONFIDENT=$(grep -oP 'confident_count=\K\d+' /tmp/match_result.txt || echo "0")
           UNCERTAIN=$(grep -oP 'uncertain_count=\K\d+' /tmp/match_result.txt || echo "0")
@@ -135,25 +149,29 @@ jobs:
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_MODEL: MiniMax-M2.7
 
-      - name: Update aliases.json with confident matches
+      - name: Apply confident matches to database
         if: steps.match.outputs.confident_count != '0'
         run: |
-          echo "::group::Updating aliases.json"
+          echo "::group::Applying confident matches to database"
           echo "::notice::Extracting confident proposals from match results..."
-          # Extract confident proposals and merge into aliases.json
           grep 'confident_proposals=' /tmp/match_result.txt | \
             sed 's/confident_proposals=//' > /tmp/confident.json || true
 
           if [ -s /tmp/confident.json ]; then
-            echo "::notice::Merging $(wc -l < /tmp/confident.json) confident proposals into aliases.json..."
-            python3 scripts/update_aliases.py
-            echo "::notice::aliases.json updated successfully"
+            echo "::notice::Applying confident proposals to database..."
+            if cargo run --release --features "scraper" -- apply-matches \
+              --input /tmp/confident.json \
+              --target bangumi.db; then
+              echo "::notice::Confident matches applied successfully"
+            else
+              echo "::warning::Apply matches failed or database not available"
+            fi
           else
-            echo "::warning::No confident proposals found to merge"
+            echo "::warning::No confident proposals found"
           fi
           echo "::endgroup::"
 
-      - name: Create PR for confident matches
+      - name: Create PR with database changes
         if: steps.match.outputs.confident_count != '0'
         run: |
           echo "::group::Creating Pull Request"
@@ -164,17 +182,16 @@ jobs:
           BRANCH="alias-update-$(date +%Y%m%d)"
           echo "::notice::Creating branch: ${BRANCH}"
           git checkout -b "${BRANCH}"
-          git add data/aliases.json
-          echo "::notice::Committing ${{ steps.match.outputs.confident_count }} alias entries..."
+          git add bangumi.db
+          echo "::notice::Committing alias entries..."
           git commit -m "feat(aliases): add ${{ steps.match.outputs.confident_count }} new alias entries"
-
           echo "::notice::Pushing branch to origin..."
           git push origin "${BRANCH}"
 
           echo "::notice::Creating pull request..."
           gh pr create \
             --title "feat(aliases): add new alias entries (auto)" \
-            --body "## Auto-generated Alias Update\n\nThis PR was auto-generated by the alias update workflow.\n\n**Confident matches**: ${{ steps.match.outputs.confident_count }}\n\nPlease review the changes to data/aliases.json." \
+            --body "## Auto-generated Alias Update\n\nThis PR was auto-generated by the alias update workflow.\n\n**Confident matches**: ${{ steps.match.outputs.confident_count }}\n\nPlease review the changes to bangumi.db." \
             --label "alias-update" \
             --base master
           echo "::notice::Pull request created successfully"
@@ -186,14 +203,17 @@ jobs:
         if: steps.match.outputs.uncertain_count != '0'
         run: |
           echo "::group::Creating issues for uncertain matches"
-          echo "::notice::Extracting uncertain proposals from match results..."
           grep 'uncertain_proposals=' /tmp/match_result.txt | \
             sed 's/uncertain_proposals=//' > /tmp/uncertain.json || true
 
           if [ -s /tmp/uncertain.json ]; then
-            echo "::notice::Processing uncertain proposals and creating issues..."
-            python3 scripts/create_alias_issues.py
-            echo "::notice::Created issues for uncertain matches"
+            echo "::notice::Creating issues for uncertain proposals..."
+            if cargo run --release --features "scraper" -- create-alias-issues \
+              --input /tmp/uncertain.json; then
+              echo "::notice::Issues created successfully"
+            else
+              echo "::warning::Failed to create issues"
+            fi
           else
             echo "::warning::No uncertain proposals found"
           fi

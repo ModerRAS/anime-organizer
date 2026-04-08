@@ -94,10 +94,6 @@ struct OrganizeArgs {
     #[arg(long, value_name = "KEY")]
     tmdb_api_key: Option<String>,
 
-    /// 自定义别名文件路径（覆盖内置别名库）
-    #[arg(long, value_name = "PATH")]
-    alias_file: Option<PathBuf>,
-
     /// 跳过图片下载
     #[arg(long)]
     no_images: bool,
@@ -146,6 +142,15 @@ enum Commands {
     #[cfg(feature = "scraper")]
     /// 从 Bangumi dump 中提取别名信息
     ExtractAliases(ExtractAliasesArgs),
+    #[cfg(feature = "scraper")]
+    /// Merge new aliases from input JSON into database
+    MergeAliases(MergeAliasesArgs),
+    #[cfg(feature = "scraper")]
+    /// Apply confident match proposals to database
+    ApplyMatches(ApplyMatchesArgs),
+    #[cfg(feature = "scraper")]
+    /// Create GitHub issues for uncertain alias match proposals
+    CreateAliasIssues(CreateAliasIssuesArgs),
     #[cfg(feature = "clouddrive")]
     /// RSS 订阅管理
     Rss(RssArgs),
@@ -180,10 +185,6 @@ struct MatchArgs {
     /// scrape 子命令生成的 JSON 文件
     #[arg(long, value_name = "PATH")]
     input: PathBuf,
-
-    /// 别名库 JSON 路径，未传时使用内置别名库
-    #[arg(long, value_name = "PATH")]
-    aliases: Option<PathBuf>,
 
     /// 输出格式
     #[arg(long, value_enum, default_value = "github")]
@@ -224,6 +225,42 @@ struct ExtractAliasesArgs {
     /// 输出文件路径（默认stdout）
     #[arg(long, value_name = "PATH")]
     output: Option<PathBuf>,
+}
+
+#[cfg(feature = "scraper")]
+#[derive(Args, Debug, Clone)]
+struct MergeAliasesArgs {
+    /// JSON file containing new aliases to merge
+    #[arg(long, value_name = "PATH")]
+    input: PathBuf,
+
+    /// Target database file (default: bangumi.db in current directory)
+    #[arg(long, value_name = "PATH")]
+    target: Option<PathBuf>,
+}
+
+#[cfg(feature = "scraper")]
+#[derive(Args, Debug, Clone)]
+struct ApplyMatchesArgs {
+    /// JSON file containing confident match proposals
+    #[arg(long, value_name = "PATH")]
+    input: PathBuf,
+
+    /// Target database file (default: bangumi.db in current directory)
+    #[arg(long, value_name = "PATH")]
+    target: Option<PathBuf>,
+}
+
+#[cfg(feature = "scraper")]
+#[derive(Args, Debug, Clone)]
+struct CreateAliasIssuesArgs {
+    /// JSON file containing uncertain match proposals
+    #[arg(long, value_name = "PATH")]
+    input: PathBuf,
+
+    /// Repository owner/name (e.g., ModerRAS/anime-organizer)
+    #[arg(long, value_name = "REPO")]
+    repo: Option<String>,
 }
 
 #[cfg(feature = "clouddrive")]
@@ -339,6 +376,12 @@ fn run_command(command: Commands) -> Result<(), AppError> {
         Commands::BuildDb(args) => run_build_db(args),
         #[cfg(feature = "scraper")]
         Commands::ExtractAliases(args) => run_extract_aliases(args),
+        #[cfg(feature = "scraper")]
+        Commands::MergeAliases(args) => run_merge_aliases(args),
+        #[cfg(feature = "scraper")]
+        Commands::ApplyMatches(args) => run_apply_matches(args),
+        #[cfg(feature = "scraper")]
+        Commands::CreateAliasIssues(args) => run_create_alias_issues(args),
         #[cfg(feature = "clouddrive")]
         Commands::Rss(args) => run_rss(args),
     }
@@ -406,7 +449,12 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
         .map(FallbackMode::to_operation_mode);
     let extensions = build_extensions(&args.include_ext);
 
-    let alias_lookup = AliasLookup::load(args.alias_file.as_deref())?;
+    let cache_dir = args
+        .bangumi_cache
+        .clone()
+        .unwrap_or_else(std::env::temp_dir);
+    let db_path = cache_dir.join("bangumi.db");
+    let alias_lookup = AliasLookup::load(&db_path)?;
     if args.verbose {
         eprintln!("已加载 {} 条别名", alias_lookup.len());
     }
@@ -1021,7 +1069,8 @@ fn run_match(args: MatchArgs) -> Result<(), AppError> {
     let scraped: Vec<ScrapedAnime> = serde_json::from_str(&input)
         .map_err(|e| AppError::MetadataFetchError(format!("解析刮削输入失败: {e}")))?;
 
-    let aliases = AliasLookup::load(args.aliases.as_deref())?;
+    let db_path = PathBuf::from("./bangumi.db");
+    let aliases = AliasLookup::load(&db_path)?;
     let result = match_aliases(&scraped, aliases.entries());
 
     match args.format {
@@ -1167,11 +1216,152 @@ fn run_extract_aliases(args: ExtractAliasesArgs) -> Result<(), AppError> {
 }
 
 #[cfg(feature = "scraper")]
+fn run_merge_aliases(args: MergeAliasesArgs) -> Result<(), AppError> {
+    use rusqlite::Connection;
+
+    let db_path = PathBuf::from("bangumi.db");
+    if !db_path.exists() {
+        return Err(AppError::AliasLoadError(
+            "数据库不存在，请先运行 build-db".to_string(),
+        ));
+    }
+
+    let conn = Connection::open(&db_path)
+        .map_err(|e| AppError::AliasLoadError(format!("打开数据库失败: {e}")))?;
+
+    let content = std::fs::read_to_string(&args.input)
+        .map_err(|e| AppError::AliasLoadError(format!("读取输入文件失败: {e}")))?;
+    let aliases: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&content)
+        .map_err(|e| AppError::AliasLoadError(format!("解析输入文件失败: {e}")))?;
+
+    let mut new_count = 0;
+    for (alias, value) in aliases {
+        if alias.is_empty() {
+            continue;
+        }
+        let bangumi_id = value
+            .get("bangumi_id")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        if bangumi_id == 0 {
+            continue;
+        }
+        let result = conn.execute(
+            "INSERT OR IGNORE INTO aliases (subject_id, alias) VALUES (?1, ?2)",
+            rusqlite::params![bangumi_id, alias],
+        );
+        if result.is_ok() {
+            new_count += 1;
+        }
+    }
+
+    println!("新增 {} 个别名到数据库", new_count);
+    Ok(())
+}
+
+#[cfg(feature = "scraper")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AliasEntry {
     bangumi_id: u32,
     name: String,
     name_cn: Option<String>,
+}
+
+#[cfg(feature = "scraper")]
+fn run_apply_matches(args: ApplyMatchesArgs) -> Result<(), AppError> {
+    use anime_organizer::scraper::matcher::Proposal;
+    use rusqlite::Connection;
+
+    let db_path = PathBuf::from("bangumi.db");
+    if !db_path.exists() {
+        return Err(AppError::AliasLoadError(
+            "数据库不存在，请先运行 build-db".to_string(),
+        ));
+    }
+
+    let conn = Connection::open(&db_path)
+        .map_err(|e| AppError::AliasLoadError(format!("打开数据库失败: {e}")))?;
+
+    let content = std::fs::read_to_string(&args.input)
+        .map_err(|e| AppError::AliasLoadError(format!("读取提案文件失败: {e}")))?;
+    let proposals: Vec<Proposal> = serde_json::from_str(&content)
+        .map_err(|e| AppError::AliasLoadError(format!("解析提案文件失败: {e}")))?;
+
+    let mut new_count = 0;
+    for proposal in proposals {
+        let alias = proposal.fan_translation;
+        if alias.is_empty() {
+            continue;
+        }
+        let subject_id = proposal.alias_entry.bangumi_id;
+        let result = conn.execute(
+            "INSERT OR IGNORE INTO aliases (subject_id, alias) VALUES (?1, ?2)",
+            rusqlite::params![subject_id, alias],
+        );
+        if result.is_ok() {
+            new_count += 1;
+        }
+    }
+
+    println!("新增 {} 个别名到数据库", new_count);
+    Ok(())
+}
+
+#[cfg(feature = "scraper")]
+fn run_create_alias_issues(args: CreateAliasIssuesArgs) -> Result<(), AppError> {
+    use anime_organizer::scraper::matcher::Proposal;
+    use std::process::Command;
+
+    let content = std::fs::read_to_string(&args.input)
+        .map_err(|e| AppError::AliasLoadError(format!("读取提案文件失败: {e}")))?;
+    let proposals: Vec<Proposal> = serde_json::from_str(&content)
+        .map_err(|e| AppError::AliasLoadError(format!("解析提案文件失败: {e}")))?;
+
+    let repo = args.repo.unwrap_or_else(|| {
+        std::env::var("GITHUB_REPOSITORY")
+            .unwrap_or_else(|_| "ModerRAS/anime-organizer".to_string())
+    });
+
+    let mut created = 0;
+    for proposal in proposals {
+        let fan = &proposal.fan_translation;
+        if fan.is_empty() {
+            continue;
+        }
+        let bgm_id = proposal.alias_entry.bangumi_id;
+        let name = &proposal.alias_entry.name;
+        let confidence = proposal.confidence.to_string();
+        let reasoning = &proposal.reasoning;
+
+        let title = format!("[Alias Request] {} -> {} (bgm:{})", fan, name, bgm_id);
+        let body = format!(
+            "## Anime Information\n\n- **Bangumi ID**: {}\n- **Bangumi Name**: {}\n- **Fan Translation**: {}\n\n## LLM Analysis\n\n- **Confidence**: {}\n- **Reasoning**: {}\n\n## User Action Required\n\nReply with:\n- `confirm` - approve as-is\n- `correct: {{...}}` - provide correction\n- `reject` - discard",
+            bgm_id, name, fan, confidence, reasoning
+        );
+
+        let output = Command::new("gh")
+            .args([
+                "issue",
+                "create",
+                "--repo",
+                &repo,
+                "--title",
+                &title,
+                "--body",
+                &body,
+                "--label",
+                "alias-request",
+            ])
+            .output()
+            .map_err(|e| AppError::AliasLoadError(format!("执行 gh 命令失败: {e}")))?;
+
+        if output.status.success() {
+            created += 1;
+        }
+    }
+
+    println!("创建了 {} 个 issue", created);
+    Ok(())
 }
 
 #[cfg(feature = "clouddrive")]

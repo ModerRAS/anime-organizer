@@ -9,11 +9,104 @@ use anime_organizer::nfo::{NfoWriter, TvShowNfo};
 #[cfg(feature = "metadata")]
 use anime_organizer::metadata::AliasLookup;
 
+#[cfg(feature = "metadata")]
+fn create_test_db() -> tempfile::TempDir {
+    use rusqlite::Connection;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let conn = Connection::open(&db_path).unwrap();
+
+    conn.execute_batch(
+        r#"
+        CREATE TABLE subjects (
+            id INTEGER PRIMARY KEY,
+            type INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            name_cn TEXT
+        );
+        CREATE TABLE aliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            subject_id INTEGER REFERENCES subjects(id) ON DELETE CASCADE,
+            alias TEXT NOT NULL,
+            UNIQUE(subject_id, alias)
+        );
+        "#,
+    )
+    .unwrap();
+
+    conn.execute(
+        "INSERT INTO subjects (id, type, name, name_cn) VALUES (?1, 2, ?2, ?3)",
+        rusqlite::params![1, "進撃の巨人", "进击的巨人"],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO aliases (subject_id, alias) VALUES (1, '进击的巨人')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO subjects (id, type, name, name_cn) VALUES (?1, 2, ?2, ?3)",
+        rusqlite::params![2, "鬼滅の刃", "鬼灭之刃"],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO aliases (subject_id, alias) VALUES (2, '鬼灭之刃')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO subjects (id, type, name, name_cn) VALUES (?1, 2, ?2, ?3)",
+        rusqlite::params![3, "スパイファミリー", "间谍过家家"],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO aliases (subject_id, alias) VALUES (3, '间谍过家家')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO subjects (id, type, name, name_cn) VALUES (?1, 2, ?2, ?3)",
+        rusqlite::params![4, "呪術廻戦", "咒术回战"],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO aliases (subject_id, alias) VALUES (4, '咒术回战')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO subjects (id, type, name, name_cn) VALUES (?1, 2, ?2, ?3)",
+        rusqlite::params![5, "チェーンソーマン", "电锯人"],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO aliases (subject_id, alias) VALUES (5, '电锯人')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO subjects (id, type, name, name_cn) VALUES (?1, 2, ?2, ?3)",
+        rusqlite::params![6, "ぼっち・ざ・ろっく！", "孤独摇滚"],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO aliases (subject_id, alias) VALUES (6, '孤独摇滚')",
+        [],
+    )
+    .unwrap();
+
+    dir
+}
+
 /// 测试完整流程：别名查找 → 模拟元数据 → NFO 生成
 #[test]
 fn test_alias_to_nfo_flow() {
+    let dir = create_test_db();
+    let db_path = dir.path().join("test.db");
+
     // 1. 加载别名库
-    let lookup = AliasLookup::load(None).unwrap();
+    let lookup = AliasLookup::load(&db_path).unwrap();
     assert!(!lookup.is_empty(), "别名库不应为空");
 
     // 2. 查找已知动画
@@ -118,7 +211,9 @@ fn test_wiki_parse_to_metadata_conversion() {
 /// 测试别名模糊匹配 + NFO 生成
 #[test]
 fn test_fuzzy_alias_to_nfo() {
-    let lookup = AliasLookup::load(None).unwrap();
+    let dir = create_test_db();
+    let db_path = dir.path().join("test.db");
+    let lookup = AliasLookup::load(&db_path).unwrap();
 
     // 测试多个已知别名
     let test_cases = vec!["鬼灭之刃", "间谍过家家", "咒术回战", "电锯人"];
@@ -215,13 +310,15 @@ fn test_parser_to_organizer_path() {
     }
 }
 
-/// 验证别名库数据质量：所有条目结构正确且数量 >= 500
+/// 验证别名库数据质量：所有条目结构正确
 #[test]
 fn test_alias_library_data_quality() {
-    let lookup = AliasLookup::load(None).unwrap();
+    let dir = create_test_db();
+    let db_path = dir.path().join("test.db");
+    let lookup = AliasLookup::load(&db_path).unwrap();
     assert!(
-        lookup.len() >= 500,
-        "别名库条目应 >= 500，实际: {}",
+        lookup.len() >= 6,
+        "测试数据库应有 >= 6 个别名，实际: {}",
         lookup.len()
     );
 
@@ -238,10 +335,12 @@ fn test_alias_library_data_quality() {
 fn test_full_pipeline_parse_to_nfo_files() {
     use anime_organizer::FilenameParser;
 
-    let lookup = AliasLookup::load(None).unwrap();
-    let dir = tempfile::tempdir().unwrap();
+    let db_dir = create_test_db();
+    let db_path = db_dir.path().join("test.db");
+    let lookup = AliasLookup::load(&db_path).unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
 
-    let filename = "[ANi] Bocchi the Rock - 05 [1080P].mkv";
+    let filename = "[ANi] Bocci the Rock - 05 [1080P].mkv";
     let path = std::path::PathBuf::from(filename);
     let info = FilenameParser::parse(&path).expect("应能解析文件名");
 
@@ -262,7 +361,7 @@ fn test_full_pipeline_parse_to_nfo_files() {
 
     // 生成 tvshow.nfo
     let nfo = TvShowNfo::from(&meta);
-    let anime_dir = dir.path().join(&info.anime_name);
+    let anime_dir = work_dir.path().join(&info.anime_name);
     std::fs::create_dir_all(&anime_dir).unwrap();
     NfoWriter::write_tvshow(&anime_dir, &nfo).unwrap();
 
