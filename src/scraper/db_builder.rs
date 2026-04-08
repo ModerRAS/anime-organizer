@@ -24,9 +24,8 @@ where
 {
     let value = serde_json::Value::deserialize(deserializer)?;
     match value {
-        serde_json::Value::String(s) => Ok(Some(s)),
-        serde_json::Value::Object(_) => Ok(Some(serde_json::to_string(&value).unwrap_or_default())),
-        _ => Ok(None),
+        serde_json::Value::Null => Ok(None),
+        _ => Ok(Some(serde_json::to_string(&value).unwrap_or_default())),
     }
 }
 
@@ -709,18 +708,18 @@ fn insert_episodes_batch(batch: &[EpisodeRecord], conn: &Connection) -> Result<(
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| AppError::BangumiParseError(format!("开启事务失败: {e}")))?;
-    let placeholders: Vec<&str> = vec!["?"; 11];
-    // Use composite primary key (subject_id, sort, disc, type) for proper multi-disc/SP handling
+    let placeholders: Vec<&str> = vec!["?"; 10];
+    // Use episode id as primary key for proper deduplication
     // Use DO NOTHING to avoid overwriting existing records on conflict
     let sql = format!(
-        "INSERT INTO episodes (id, subject_id, sort, name, name_cn, airdate, type, disc, duration, description) VALUES {} ON CONFLICT(subject_id, sort, disc, type) DO NOTHING",
+        "INSERT INTO episodes (id, subject_id, sort, name, name_cn, airdate, type, disc, duration, description) VALUES {} ON CONFLICT(id) DO NOTHING",
         batch.iter()
             .map(|_| format!("({})", placeholders.join(", ")))
             .collect::<Vec<_>>()
             .join(", ")
     );
 
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(batch.len() * 11);
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(batch.len() * 10);
     for e in batch {
         let ep_type = match &e.ep_type {
             serde_json::Value::Number(n) => n.as_i64().unwrap_or(0) as i32,
@@ -1241,7 +1240,7 @@ fn get_or_create_db(db_path: &Path) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_aliases_subject ON aliases(subject_id);
 
         CREATE TABLE IF NOT EXISTS episodes (
-            id INTEGER,
+            id INTEGER PRIMARY KEY,
             subject_id INTEGER REFERENCES subjects(id) ON DELETE CASCADE,
             sort INTEGER NOT NULL,
             name TEXT,
@@ -1250,8 +1249,7 @@ fn get_or_create_db(db_path: &Path) -> Result<Connection> {
             type INTEGER DEFAULT 0,
             disc INTEGER DEFAULT 0,
             duration TEXT,
-            description TEXT,
-            PRIMARY KEY (subject_id, sort, disc, type)
+            description TEXT
         );
 
         CREATE TABLE IF NOT EXISTS subject_characters (

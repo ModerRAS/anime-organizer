@@ -20,9 +20,11 @@ use anime_organizer::{
 #[cfg(any(feature = "scraper", feature = "clouddrive"))]
 use clap::Subcommand;
 use clap::{Args, Parser, ValueEnum};
+#[cfg(feature = "scraper")]
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
+#[cfg(feature = "scraper")]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -154,6 +156,12 @@ enum Commands {
     #[cfg(feature = "clouddrive")]
     /// RSS 订阅管理
     Rss(RssArgs),
+    #[cfg(feature = "clouddrive")]
+    /// 直接提交 magnet/torrent URL 到 115 网盘离线下载
+    AddOffline(AddOfflineArgs),
+    #[cfg(feature = "clouddrive")]
+    /// 列出云盘目录内容
+    ListFolder(ListFolderArgs),
 }
 
 #[cfg(feature = "scraper")]
@@ -315,6 +323,42 @@ struct RssArgs {
     list_subscriptions: bool,
 }
 
+#[cfg(feature = "clouddrive")]
+#[derive(Args, Debug, Clone)]
+struct AddOfflineArgs {
+    /// magnet 链接或 .torrent 文件 URL
+    #[arg(value_name = "MAGNET_OR_URL")]
+    url: String,
+
+    /// 115网盘目标目录
+    #[arg(long, short = 't', value_name = "PATH")]
+    target: String,
+
+    /// CloudDrive2 服务地址
+    #[arg(long, value_name = "URL")]
+    clouddrive_url: String,
+
+    /// CloudDrive2 JWT 令牌
+    #[arg(long, value_name = "TOKEN")]
+    clouddrive_token: String,
+}
+
+#[cfg(feature = "clouddrive")]
+#[derive(Args, Debug, Clone)]
+struct ListFolderArgs {
+    /// CloudDrive2 服务地址
+    #[arg(long, value_name = "URL")]
+    clouddrive_url: String,
+
+    /// CloudDrive2 JWT 令牌
+    #[arg(long, value_name = "TOKEN")]
+    clouddrive_token: String,
+
+    /// 要浏览的目录路径（默认根目录）
+    #[arg(value_name = "PATH", default_value = "/")]
+    path: String,
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("错误: {error}");
@@ -384,6 +428,10 @@ fn run_command(command: Commands) -> Result<(), AppError> {
         Commands::CreateAliasIssues(args) => run_create_alias_issues(args),
         #[cfg(feature = "clouddrive")]
         Commands::Rss(args) => run_rss(args),
+        #[cfg(feature = "clouddrive")]
+        Commands::AddOffline(args) => run_add_offline(args),
+        #[cfg(feature = "clouddrive")]
+        Commands::ListFolder(args) => run_list_folder(args),
     }
 }
 
@@ -1492,4 +1540,96 @@ fn run_rss(args: RssArgs) -> Result<(), AppError> {
             }
         }
     })
+}
+
+#[cfg(feature = "clouddrive")]
+fn run_add_offline(args: AddOfflineArgs) -> Result<(), AppError> {
+    use anime_organizer::rss::client::{CloudDriveClient, CloudDriveClientTrait};
+
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| AppError::MetadataFetchError(format!("创建异步运行时失败: {e}")))?;
+
+    runtime.block_on(async {
+        let client = CloudDriveClient::new(&args.clouddrive_url, Some(args.clouddrive_token))?;
+
+        println!("提交离线下载...");
+        println!("  目标: {}", args.target);
+        println!("  URL: {}...", &args.url[..args.url.len().min(60)]);
+
+        client
+            .add_offline_files(vec![args.url], &args.target)
+            .await?;
+
+        println!("✅ 离线下载提交成功！");
+        Ok(())
+    })
+}
+
+#[cfg(feature = "clouddrive")]
+fn run_list_folder(args: ListFolderArgs) -> Result<(), AppError> {
+    use anime_organizer::rss::client::{CloudDriveClient, CloudDriveClientTrait};
+
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| AppError::MetadataFetchError(format!("创建异步运行时失败: {e}")))?;
+
+    runtime.block_on(async {
+        let client = CloudDriveClient::new(&args.clouddrive_url, Some(args.clouddrive_token))?;
+
+        println!("浏览目录: {}", args.path);
+        println!("{}", "=".repeat(80));
+
+        let files = client.list_folder(&args.path).await?;
+
+        if files.is_empty() {
+            println!("(空目录)");
+            return Ok(());
+        }
+
+        println!("{:<6} {:<50} {:>12}  云盘", "类型", "名称", "大小");
+        println!("{}", "-".repeat(80));
+
+        for file in &files {
+            let file_type = if file.is_directory {
+                "[目录]"
+            } else {
+                "[文件]"
+            };
+            let size = if file.is_directory {
+                "-".to_string()
+            } else {
+                format_size(file.size)
+            };
+            let name = if file.name.is_empty() {
+                file.full_path_name.clone()
+            } else {
+                file.name.clone()
+            };
+            let cloud = file
+                .cloud_api
+                .as_ref()
+                .map(|c| c.name.as_str())
+                .unwrap_or("-");
+            println!("{:<6} {:<50} {:>12}  {}", file_type, name, size, cloud);
+        }
+
+        println!("{}", "-".repeat(80));
+        println!("共 {} 项", files.len());
+        Ok(())
+    })
+}
+
+fn format_size(bytes: i64) -> String {
+    const KB: i64 = 1024;
+    const MB: i64 = KB * 1024;
+    const GB: i64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
 }

@@ -1,108 +1,74 @@
-# 项目开发记录（Rust 重写版）
+# anime-organizer 项目知识库
 
-## 项目要求
-- 保持仓库整洁：不提交临时/构建产物，`.gitignore` 已涵盖 `target/` 等目录。
-- 文档与脚本：核心文档放置于仓库根目录（本文件、README、LICENSE）；CI/CD workflow 位于 `.github/workflows/`。
-- 许可证：GNU Affero General Public License v3.0 (`AGPL-3.0`)，Cargo.toml 与 README 已同步。
-- 任务完成后和提交前请执行 `cargo fmt`（格式化）与必要检查；推送后务必查看 GitHub Actions 状态，确保 CI 全绿。
+**Generated:** 2026-04-08
+**Commit:** dd4c4f8
+**Branch:** master
 
-## 技术决策（Rust 版）
-- 语言/版本：Rust stable，二进制名称 `aniorg`。
-- 依赖：
-  - 核心：`clap`（CLI）、`regex`（文件名解析）、`walkdir`（递归遍历）、`thiserror`（错误处理）、`tracing`（日志）
-  - 元数据：`reqwest`（HTTP）、`serde`/`serde_json`（序列化）、`quick-xml`（NFO）、`tokio`（异步运行时）
-  - 数据库：`rusqlite`（SQLite）
-  - 压缩：`flate2`、`zip`
-  - 云盘/远程：`tonic`/`prost`（gRPC）、`prost-types`、`bt_bencode`（种子解析）、`tower`、`tracing-subscriber`、`url`
-  - 可选依赖（通过 features 启用）：
-    - `tempfile`（测试）
-    - `sha1`、`async-trait`
-- 架构：
-  - `parser` 负责文件名解析，产出 `AnimeFileInfo`。
-  - `organizer` 负责文件移动/复制/硬链接及覆盖策略。
-  - `error` 统一错误类型。
-  - `metadata` 负责 Bangumi/TMDB 元数据获取与别名匹配。
-  - `nfo` 负责生成 Kodi 兼容的 NFO 文件。
-  - `scraper` 负责从 RSS/页面刮削动画数据（需 `scraper` feature）。
-  - `rss` 负责 RSS 订阅管理与云盘同步（需 `clouddrive` feature）。
-  - `main` 仅做 CLI 解析、遍历与调度。
-- 注释规范：遵循 `docs.rs` 风格的文档注释，示例可 `cargo test` 运行。
+## OVERVIEW
+Rust CLI工具，批量整理动漫视频文件（硬链接/移动/复制），支持Kodi元数据刮削。核心栈：clap + regex + rusqlite + reqwest + tonic。
 
-## 功能特性（Feature Flags）
-
-| Feature | 默认启用 | 说明 |
-|---------|---------|------|
-| `metadata` | ✅ | 元数据刮削（Bangumi/TMDB/NFO 生成） |
-| `scraper` | ❌ | 刮削子命令：scrape/match/build-db/extract-aliases 等 |
-| `llm-api` | ❌ | LLM API 集成（OpenCode/MiniMax） |
-| `clouddrive` | ❌ | 云盘集成（115网盘/RSS 订阅管理） |
-
-## 构建与发布
-- CI：`.github/workflows/ci.yml` 覆盖 fmt、clippy、测试与文档构建，运行平台含 Ubuntu/Windows/macOS。
-- Release：`.github/workflows/release.yml` 在推送 `v*` 标签时构建多平台二进制并上传 Release，同时尝试 `cargo publish`（需要 `CARGO_REGISTRY_TOKEN`）。
-- Nightly：`.github/workflows/nightly.yml` 每日构建，启用所有 features。
-- 别名更新：`.github/workflows/alias-update.yml` 自动处理别名请求 issue。
-- 数据库构建：`.github/workflows/bangumi-db.yml` 从 Bangumi Archive 构建 SQLite 别名库。
-- 安装方式：
-  - 从 GitHub Releases 下载预编译二进制
-  - 从源码构建：`cargo build --release`（默认启用 metadata feature）
-  - 全功能构建：`cargo build --release --features "scraper clouddrive"`
-
-## 使用要点
-- 支持模式：`link`（默认，硬链接，需同一文件系统）、`move`、`copy`。
-- 默认扩展名：`.mp4,.mkv,.avi,.mov,.wmv,.flv,.rmvb`，可通过 `--include-ext` 覆盖。
-- 预览：`--dry-run`；详细日志：`--verbose`。
-- 可选回退：仅在指定 `--fallback-on-link-failure=move|copy` 时，硬链接失败会按所选模式回退；未指定则失败即报错并跳过。
-- 元数据刮削：启用 `--scrape-metadata` 后自动生成 NFO 文件并下载封面图片。
-
-## CLI 子命令（需相应 feature）
-
-### 刮削相关（`--features scraper`）
-```bash
-# 刮削近期更新
-cargo run --features scraper -- scrape --days 7 --format json
-
-# 匹配别名提案
-cargo run --features scraper -- match --input scraped.json --format github
-
-# 构建 SQLite 别名库
-cargo run --features scraper -- build-db --output bangumi.db
-
-# 从 dump 提取别名
-cargo run --features scraper -- extract-aliases --download
-
-# 合并新别名到数据库
-cargo run --features scraper -- merge-aliases --input new_aliases.json
-
-# 应用匹配的别名提案
-cargo run --features scraper -- apply-matches --input proposals.json
-
-# 创建别名请求 issue
-cargo run --features scraper -- create-alias-issues --input uncertain.json --repo ModerRAS/anime-organizer
+## STRUCTURE
+```
+./
+├── src/                    # 源码（含lib.rs + main.rs双入口）
+│   ├── parser.rs          # 文件名解析（正则）
+│   ├── organizer.rs        # 文件操作（Move/Copy/Link）
+│   ├── error.rs           # 统一错误类型
+│   ├── nfo.rs             # Kodi NFO生成
+│   ├── metadata/           # 元数据（Bangumi/TMDB/别名）
+│   ├── scraper/           # 刮削子命令（LLM辅助）
+│   └── rss/               # RSS/CloudDrive同步
+├── proto/                  # gRPC协议定义（clouddrive feature）
+├── tests/                  # 集成测试
+└── .github/workflows/      # CI/CD（5个workflow）
 ```
 
-### RSS 订阅管理（`--features clouddrive`）
+## WHERE TO LOOK
+| Task | Location | Notes |
+|------|----------|-------|
+| 添加新CLI参数 | src/main.rs | clap derive，`OrganizeArgs`/`Commands` |
+| 修改文件名解析规则 | src/parser.rs | `ANIME_FILE_REGEX` |
+| 文件操作逻辑 | src/organizer.rs | `FileOrganizer::organize_to_dir` |
+| 新增错误类型 | src/error.rs | thiserror枚举 |
+| NFO格式修改 | src/nfo.rs | Kodi规范兼容性 |
+| API客户端 | src/metadata/*.rs | bangumi/tmdb客户端 |
+| RSS功能 | src/rss/*.rs | CloudDrive2 gRPC |
+| 刮削功能 | src/scraper/*.rs | LLM匹配逻辑 |
+
+## CI/CD RULES（强制）
 ```bash
-# 列出订阅
-aniorg rss --list-subscriptions
+cargo fmt --all -- --check  # 必须格式化
+cargo clippy --all-features -- -D warnings  # 禁止警告
+cargo doc --no-deps --document-private-items  # 文档完整
+```
+- PR需Ubuntu/Windows/macOS三平台测试通过
+- 推送前检查GitHub Actions状态
 
-# 添加订阅
-aniorg rss --add-subscription --rss-url "https://example.com/rss" --rss-target "/anime" --rss-filter "720p"
+## ANTI-PATTERNS (THIS PROJECT)
+- ❌ 跨文件系统硬链接（会返回`CrossDeviceLink`错误）
+- ❌ 忽略`#[must_use]`返回值（parser模块）
+- ❌ 未启用`--fallback-on-link-failure`时硬链接失败不处理
 
-# 单次执行
-aniorg rss --clouddrive-url http://localhost:19798 --rss-url "https://example.com/rss" --rss-target "/anime"
+## UNIQUE STYLES
+- Feature-gated模块：`#[cfg(feature = "...")]`
+- 静态正则：`LazyLock`预编译
+- 批量SQL：1000条/批，事务提交
+- 异步运行时：`tokio`（metadata/clouddrive features）
 
-# Daemon 模式
-aniorg rss --daemon --clouddrive-url http://localhost:19798 --rss-interval 300
+## COMMANDS
+```bash
+cargo build --release              # 默认（含metadata）
+cargo build --release --features "scraper clouddrive"  # 全功能
+cargo test                         # 单元+集成测试
+cargo doc --no-deps               # 文档生成
 ```
 
-## 兼容性与注意事项
-- 硬链接：跨设备会返回 `硬链接失败：源文件和目标必须在同一文件系统`；无自动回退，除非显式使用 `--fallback-on-link-failure`。
-- 覆盖策略：目标文件存在时直接覆盖（先删除后写）。
-- 行结束符：仓库以 LF 为主，Windows 提交会由 Git 自动转换 CRLF；如需统一可在本地配置 `core.autocrlf`。
-- SQLite 别名库：首次使用 `--scrape-metadata` 时会自动下载/构建，也可手动通过 `build-db` 子命令构建。
+## NOTES
+- 硬链接默认，需同文件系统；跨设备需`--fallback-on-link-failure=copy`
+- SQLite别名库：首次自动下载/构建
+- 临时文件用`tmp/`（已gitignore）
+- `.sisyphus/`为任务管理数据，已gitignore
 
-## 未来改进（可选）
-- 增加并行处理以提升大批量文件性能。
-- 提供可配置的目标命名模板。
-- 为发布流程添加签名和校验和产物。
+## SUBMODULE LOCATIONS
+- `src/scraper/` → `./src/scraper/AGENTS.md` (LLM匹配、数据库构建)
+- `src/rss/` → `./src/rss/AGENTS.md` (gRPC客户端、RSS调度)

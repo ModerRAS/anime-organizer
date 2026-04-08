@@ -4,6 +4,7 @@
 
 use async_trait::async_trait;
 use std::time::Duration;
+use tokio_stream::StreamExt;
 use tonic::transport::{Channel, Endpoint};
 
 use crate::error::{AppError, Result};
@@ -27,6 +28,9 @@ pub trait CloudDriveClientTrait: Send + Sync {
 
     /// 添加离线下载任务
     async fn add_offline_files(&self, urls: Vec<String>, to_folder: &str) -> Result<()>;
+
+    /// 列出目录下的文件和子目录
+    async fn list_folder(&self, path: &str) -> Result<Vec<proto::CloudDriveFile>>;
 }
 
 /// CloudDrive2 gRPC 客户端
@@ -181,6 +185,52 @@ impl CloudDriveClientTrait for CloudDriveClient {
 
         Ok(())
     }
+
+    async fn list_folder(&self, path: &str) -> Result<Vec<proto::CloudDriveFile>> {
+        let token = self.token.clone().ok_or_else(|| {
+            AppError::MetadataFetchError("Not authenticated. Call login() first.".to_string())
+        })?;
+
+        let channel = self.build_channel().await?;
+
+        let mut client =
+            proto::cloud_drive_file_srv_client::CloudDriveFileSrvClient::with_interceptor(
+                channel,
+                move |mut req: tonic::Request<()>| {
+                    let header_value = format!("Bearer {}", token);
+                    let metadata_value: tonic::metadata::MetadataValue<_> =
+                        header_value.parse().map_err(|_| {
+                            tonic::Status::invalid_argument("Invalid authorization token")
+                        })?;
+                    req.metadata_mut().insert("authorization", metadata_value);
+                    Ok(req)
+                },
+            );
+
+        let request = tonic::Request::new(proto::ListSubFileRequest {
+            path: path.to_string(),
+            force_refresh: false,
+            check_expires: None,
+        });
+
+        let mut stream = client
+            .get_sub_files(request)
+            .await
+            .map_err(|e| AppError::MetadataFetchError(format!("GetSubFiles failed: {}", e)))?
+            .into_inner();
+
+        let mut files = Vec::new();
+        while let Some(reply) = stream
+            .next()
+            .await
+            .transpose()
+            .map_err(|e| AppError::MetadataFetchError(format!("Stream read failed: {e}")))?
+        {
+            files.extend(reply.sub_files);
+        }
+
+        Ok(files)
+    }
 }
 
 #[cfg(test)]
@@ -225,5 +275,49 @@ mod tests {
 
         client.set_token("new_token".to_string());
         assert_eq!(client.get_token_value(), Some("new_token"));
+    }
+
+    /// Integration test for CloudDrive2 offline download
+    /// Run with: CLOUDDRIVE_URL=http://... CLOUDDRIVE_TOKEN=... cargo test --features clouddrive clouddrive_offline_integration -- --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn test_clouddrive_offline_integration() {
+        let url = std::env::var("CLOUDDRIVE_URL").expect("CLOUDDRIVE_URL env var required");
+        let token = std::env::var("CLOUDDRIVE_TOKEN").expect("CLOUDDRIVE_TOKEN env var required");
+
+        let client =
+            CloudDriveClient::new(&url, Some(token)).expect("Failed to create CloudDriveClient");
+
+        let magnet = "magnet:?xt=urn:btih:47A7OI47YGU3GSDZFXHX4E6BBJKF4YAX";
+        let target_folder = "/downloads/Ani";
+
+        println!("Submitting magnet to CloudDrive2...");
+        println!("  Target: {}", target_folder);
+
+        client
+            .add_offline_files(vec![magnet.to_string()], target_folder)
+            .await
+            .expect("CloudDrive2 offline download failed");
+        println!("✅ Successfully submitted offline download!");
+    }
+
+    /// Test CloudDrive2 server connectivity
+    /// Run with: CLOUDDRIVE_URL=http://... CLOUDDRIVE_TOKEN=... cargo test --features clouddrive clouddrive_connectivity -- --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn test_clouddrive_connectivity() {
+        let url = std::env::var("CLOUDDRIVE_URL").expect("CLOUDDRIVE_URL env var required");
+        let token = std::env::var("CLOUDDRIVE_TOKEN").expect("CLOUDDRIVE_TOKEN env var required");
+
+        let client =
+            CloudDriveClient::new(&url, Some(token)).expect("Failed to create CloudDriveClient");
+
+        let test_magnet = "magnet:?xt=urn:btih:d41d8cd98f00b204e9800998ecf8427e";
+
+        client
+            .add_offline_files(vec![test_magnet.to_string()], "/")
+            .await
+            .expect("CloudDrive2 connectivity test failed");
+        println!("✅ CloudDrive2 server is reachable and authenticated!");
     }
 }

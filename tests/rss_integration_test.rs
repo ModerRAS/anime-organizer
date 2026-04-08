@@ -60,6 +60,13 @@ impl CloudDriveClientTrait for MockCloudDriveClient {
         }
         Ok(())
     }
+
+    async fn list_folder(
+        &self,
+        _path: &str,
+    ) -> Result<Vec<anime_organizer::rss::client::proto::CloudDriveFile>> {
+        Ok(vec![])
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -147,6 +147,17 @@ pub fn parse_rss(xml: &str) -> Result<Vec<RssItem>> {
                 }
             }
 
+            Ok(Event::CData(e)) => {
+                if in_item {
+                    if let Some(ref mut builder) = current_item {
+                        if let Some(ref tag) = current_tag {
+                            let text = String::from_utf8_lossy(e.as_ref()).trim().to_string();
+                            builder.collect_text(tag, text);
+                        }
+                    }
+                }
+            }
+
             Ok(Event::Empty(e)) => {
                 let name = e.name();
                 if name == QName(b"enclosure") && in_item {
@@ -434,6 +445,34 @@ mod tests {
         assert_eq!(
             items[0].torrent_url,
             Some("https://example.com/download.torrent".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_rss_with_cdata_title() {
+        let rss = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title><![CDATA[动漫花园 RSS]]></title>
+    <item>
+      <title><![CDATA[[jibaketa合成&音頻壓制] 测试动画 - 01 [1080P][WEB-DL][AAC AVC][CHT][MP4]]]></title>
+      <link>https://dmhy.org/topics/view/123456.html</link>
+      <guid isPermaLink="false">dmhy-cdata-001</guid>
+      <pubDate>Wed, 08 Apr 2026 12:00:00 +0800</pubDate>
+      <enclosure url="magnet:?xt=urn:btih:ABCDEF1234567890" type="application/x-bittorrent"/>
+    </item>
+  </channel>
+</rss>"#;
+
+        let items = parse_rss(rss).expect("Failed to parse CDATA RSS");
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].title,
+            "[jibaketa合成&音頻壓制] 测试动画 - 01 [1080P][WEB-DL][AAC AVC][CHT][MP4]"
+        );
+        assert_eq!(
+            items[0].magnet,
+            Some("magnet:?xt=urn:btih:ABCDEF1234567890".to_string())
         );
     }
 }
