@@ -46,7 +46,7 @@ struct SubjectRecord {
     #[serde(default)]
     infobox: Option<String>,
     #[serde(default)]
-    nsfw: Option<u32>,
+    nsfw: Option<serde_json::Value>,
     #[serde(default)]
     series: Option<u32>,
     #[serde(default)]
@@ -384,7 +384,11 @@ fn insert_subjects_batch(batch: &[SubjectRecord], conn: &Connection) -> Result<(
 
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(batch.len() * 13);
     for s in batch {
-        let nsfw = s.nsfw.unwrap_or(0);
+        let nsfw = match &s.nsfw {
+            Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0) as i32,
+            Some(serde_json::Value::Bool(b)) => if *b { 1 } else { 0 },
+            _ => 0,
+        };
         let series = s.series.unwrap_or(0);
         let platform = match &s.platform {
             Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0) as i32,
