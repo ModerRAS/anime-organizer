@@ -38,7 +38,7 @@ jobs:
       - name: Build SQLite database from Bangumi Archive
         run: |
           echo "Building SQLite database from Bangumi Archive..."
-          cargo run --release --features scraper -- build-db --output /tmp/bangumi.db
+          cargo run --release --features scraper -- build-db --output /tmp/bangumi.db --verbose
 
       - name: Upload as Release asset
         run: |
