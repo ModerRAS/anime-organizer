@@ -141,6 +141,9 @@ aniorg --source="/path/to/downloads" --dry-run --verbose
 
 推荐先生成别名库：
 
+> [!TIP]
+> 下面的 `cargo run --features "scraper clouddrive" -- ...` 会按指定 feature 自动编译并运行，无需手动先执行一次 `cargo build`。
+
 ```bash
 # 需要先以完整功能构建（见上方说明）
 cargo run --features "scraper clouddrive" -- build-db --output ./bangumi-cache/bangumi.db
@@ -220,6 +223,9 @@ aniorg \
 - 使用移动模式 (`--mode=move`)，或通过 `--fallback-on-link-failure=move` 自动回退
 
 ### 🔧 刮削子命令（当前建议以 `--features "scraper clouddrive"` 构建）
+
+> [!TIP]
+> 以下示例直接使用 `cargo run --features "scraper clouddrive" -- ...`，命令会自动完成构建并运行。
 
 ```bash
 # 刮削近期更新
@@ -436,6 +442,9 @@ Prepare a dedicated cache directory such as `./bangumi-cache/` before using `--s
 
 Generate the alias database first:
 
+> [!TIP]
+> The `cargo run --features "scraper clouddrive" -- ...` commands below compile and run with the required features in one step.
+
 ```bash
 cargo run --features "scraper clouddrive" -- build-db --output ./bangumi-cache/bangumi.db
 ```
@@ -475,6 +484,9 @@ If hard linking fails due to cross-filesystem layouts or lack of support, you ca
 3. Write permission required for both directories
 
 ### 🔧 Scraper Subcommands (currently recommended with `--features "scraper clouddrive"`)
+
+> [!TIP]
+> The examples below use `cargo run --features "scraper clouddrive" -- ...`, which builds and runs the command in one step.
 
 ```bash
 # Scrape recent updates
