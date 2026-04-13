@@ -72,16 +72,10 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: brew install protobuf
 
-      - name: Install protoc (Windows)
-        if: matrix.os == 'windows-latest'
-        run: |
-          Invoke-WebRequest -Uri https://github.com/protocolbuffers/protobuf/releases/download/v25.1/protoc-25.1-win64.zip -OutFile protoc.zip
-          Expand-Archive -Path protoc.zip -DestinationPath "$env:TEMP\protoc" -Force
-          Move-Item -Path "$env:TEMP\protoc\bin\protoc.exe" -Destination "$env:TEMP\protoc\" -Force
-          Remove-Item -Path "$env:TEMP\protoc\bin" -Recurse -Force
-          Move-Item -Path "$env:TEMP\protoc" -Destination "$env:USERPROFILE/.cargo/bin" -Force
-          Remove-Item -Path protoc.zip -Force
-        shell: powershell
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '25.x'
 
       - name: Build release binary
         run: cargo build --release --features "scraper clouddrive" --target ${{ matrix.target }}
