@@ -5,9 +5,8 @@
 //! ## 功能特性
 //!
 //! - **智能解析**: 自动识别 `[发布组] 动漫名 - 集数 [标签].ext` 格式
-//! - **灵活整理**: 重构为 `动漫名/Season N/集数 [标签].ext` 结构
+//! - **灵活整理**: 重构为 `动漫名/集数 [标签].ext` 结构
 //! - **多种模式**: 支持移动、复制、硬链接三种操作模式
-//! - **元数据刮削**: 支持生成 Kodi 兼容 NFO，并可选下载海报
 //! - **跨平台**: 支持 Windows、Linux、macOS
 //! - **零依赖运行**: 单文件部署，无需外部配置
 //!
@@ -23,9 +22,6 @@
 //! # 启用硬链接失败时的回退
 //! aniorg --source="/path/to/downloads" --fallback-on-link-failure=copy
 //!
-//! # 生成 NFO（不下载图片）
-//! aniorg --source="/path/to/downloads" --scrape-metadata --no-images
-//!
 //! # 预览模式
 //! aniorg --source="/path/to/downloads" --dry-run --verbose
 //! ```
@@ -35,9 +31,9 @@
 //! - [`parser`] - 文件名解析模块
 //! - [`organizer`] - 文件整理模块
 //! - [`error`] - 错误处理模块
-//! - [`metadata`] - 元数据模块（Bangumi Archive / TMDB）
-//! - [`nfo`] - NFO 文件生成模块
-//! - `scraper` - 数据源刮削模块（需 `scraper` feature）
+/// - [`metadata`] - 元数据模块（Bangumi Archive / TMDB）
+/// - [`nfo`] - NFO 文件生成模块
+/// - `scraper` - 数据源刮削模块（需 `scraper` feature，参考 `cargo doc --features scraper`）
 pub mod error;
 pub mod metadata;
 pub mod nfo;

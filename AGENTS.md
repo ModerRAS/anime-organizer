@@ -1,7 +1,7 @@
 # anime-organizer 项目知识库
 
-**Generated:** 2026-04-08
-**Commit:** dd4c4f8
+**Generated:** 2026-04-13
+**Commit:** a3530dc
 **Branch:** master
 
 ## OVERVIEW
