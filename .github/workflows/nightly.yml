@@ -87,7 +87,6 @@ jobs:
         run: cargo build --release --features "scraper clouddrive" --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          PROTOC: "$env:USERPROFILE/.cargo/bin/protoc.exe"
 
       - name: Prepare archive (Unix)
         if: matrix.os != 'windows-latest'
