@@ -314,14 +314,10 @@ async fn download_zip(url: &str, temp_dir: &Path) -> Result<PathBuf> {
         .build()
         .map_err(|e| AppError::MetadataFetchError(format!("创建 HTTP 客户端失败: {e}")))?;
 
-    let downloader = HttpDownloader::with_client(
-            url.to_string(),
-            temp_dir.to_path_buf(),
-            client,
-            true,
-        )
-        .with_output_path(zip_path.clone())
-        .with_chunk_count(16);
+    let downloader =
+        HttpDownloader::with_client(url.to_string(), temp_dir.to_path_buf(), client, true)
+            .with_output_path(zip_path.clone())
+            .with_chunk_count(16);
 
     downloader
         .download_with_progress()
