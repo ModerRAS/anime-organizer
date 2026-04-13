@@ -24,3 +24,5 @@ tmp/
 bangumi-archive
 .sisyphus
 *.db
+
+.playwright-mcp/
