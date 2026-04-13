@@ -10593,4 +10593,1330 @@ mod tests {
         assert_eq!(info.anime_name, "Little Busters");
         assert_eq!(info.episode, "10");
     }
+
+    // =====================================================
+    // VCB-Studio tests (NEW publisher - 10 tests)
+    // =====================================================
+    #[test]
+    fn test_parse_vcb_某科学的超电磁炮_01() {
+        let path = PathBuf::from("[VCB-Studio] 某科学的超电磁炮 - 01 [1080p][HEVC].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [VCB-Studio] 某科学的超电磁炮 format");
+        assert_eq!(info.publisher, "VCB-Studio");
+        assert_eq!(info.anime_name, "某科学的超电磁炮");
+        assert_eq!(info.episode, "01");
+    }
+
+    #[test]
+    fn test_parse_vcb_某科学的超电磁炮_02() {
+        let path = PathBuf::from("[VCB-Studio] 某科学的超电磁炮 - 02 [1080p][HEVC].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [VCB-Studio] 某科学的超电磁炮 format");
+        assert_eq!(info.publisher, "VCB-Studio");
+        assert_eq!(info.anime_name, "某科学的超电磁炮");
+        assert_eq!(info.episode, "02");
+    }
+
+    #[test]
+    fn test_parse_vcb_某科学的超电磁炮_03() {
+        let path = PathBuf::from("[VCB-Studio] 某科学的超电磁炮 - 03 [1080p][HEVC].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [VCB-Studio] 某科学的超电磁炮 format");
+        assert_eq!(info.publisher, "VCB-Studio");
+        assert_eq!(info.anime_name, "某科学的超电磁炮");
+        assert_eq!(info.episode, "03");
+    }
+
+    #[test]
+    fn test_parse_vcb_某科学的超电磁炮_04() {
+        let path = PathBuf::from("[VCB-Studio] 某科学的超电磁炮 - 04 [1080p][HEVC].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [VCB-Studio] 某科学的超电磁炮 format");
+        assert_eq!(info.publisher, "VCB-Studio");
+        assert_eq!(info.anime_name, "某科学的超电磁炮");
+        assert_eq!(info.episode, "04");
+    }
+
+    #[test]
+    fn test_parse_vcb_某科学的超电磁炮_05() {
+        let path = PathBuf::from("[VCB-Studio] 某科学的超电磁炮 - 05 [1080p][HEVC].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [VCB-Studio] 某科学的超电磁炮 format");
+        assert_eq!(info.publisher, "VCB-Studio");
+        assert_eq!(info.anime_name, "某科学的超电磁炮");
+        assert_eq!(info.episode, "05");
+    }
+
+    #[test]
+    fn test_parse_vcb_某科学的超电磁炮_06() {
+        let path = PathBuf::from("[VCB-Studio] 某科学的超电磁炮 - 06 [1080p][HEVC].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [VCB-Studio] 某科学的超电磁炮 format");
+        assert_eq!(info.publisher, "VCB-Studio");
+        assert_eq!(info.anime_name, "某科学的超电磁炮");
+        assert_eq!(info.episode, "06");
+    }
+
+    #[test]
+    fn test_parse_vcb_某科学的超电磁炮_07() {
+        let path = PathBuf::from("[VCB-Studio] 某科学的超电磁炮 - 07 [1080p][HEVC].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [VCB-Studio] 某科学的超电磁炮 format");
+        assert_eq!(info.publisher, "VCB-Studio");
+        assert_eq!(info.anime_name, "某科学的超电磁炮");
+        assert_eq!(info.episode, "07");
+    }
+
+    #[test]
+    fn test_parse_vcb_某科学的超电磁炮_08() {
+        let path = PathBuf::from("[VCB-Studio] 某科学的超电磁炮 - 08 [1080p][HEVC].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [VCB-Studio] 某科学的超电磁炮 format");
+        assert_eq!(info.publisher, "VCB-Studio");
+        assert_eq!(info.anime_name, "某科学的超电磁炮");
+        assert_eq!(info.episode, "08");
+    }
+
+    #[test]
+    fn test_parse_vcb_某科学的超电磁炮_09() {
+        let path = PathBuf::from("[VCB-Studio] 某科学的超电磁炮 - 09 [1080p][HEVC].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [VCB-Studio] 某科学的超电磁炮 format");
+        assert_eq!(info.publisher, "VCB-Studio");
+        assert_eq!(info.anime_name, "某科学的超电磁炮");
+        assert_eq!(info.episode, "09");
+    }
+
+    #[test]
+    fn test_parse_vcb_某科学的超电磁炮_10() {
+        let path = PathBuf::from("[VCB-Studio] 某科学的超电磁炮 - 10 [1080p][HEVC].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [VCB-Studio] 某科学的超电磁炮 format");
+        assert_eq!(info.publisher, "VCB-Studio");
+        assert_eq!(info.anime_name, "某科学的超电磁炮");
+        assert_eq!(info.episode, "10");
+    }
+
+    // =====================================================
+    // 极影字幕+轻之国度 tests (NEW publisher - 10 tests)
+    // =====================================================
+    #[test]
+    fn test_parse_jijian_笨蛋测验召唤兽_01() {
+        let path = PathBuf::from("[极影字幕+轻之国度] 笨蛋测验召唤兽2 - 01 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [极影字幕+轻之国度]笨蛋测验召唤兽2 format");
+        assert_eq!(info.publisher, "极影字幕+轻之国度");
+        assert_eq!(info.anime_name, "笨蛋测验召唤兽2");
+        assert_eq!(info.episode, "01");
+    }
+
+    #[test]
+    fn test_parse_jijian_笨蛋测验召唤兽_02() {
+        let path = PathBuf::from("[极影字幕+轻之国度] 笨蛋测验召唤兽2 - 02 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [极影字幕+轻之国度]笨蛋测验召唤兽2 format");
+        assert_eq!(info.publisher, "极影字幕+轻之国度");
+        assert_eq!(info.anime_name, "笨蛋测验召唤兽2");
+        assert_eq!(info.episode, "02");
+    }
+
+    #[test]
+    fn test_parse_jijian_笨蛋测验召唤兽_03() {
+        let path = PathBuf::from("[极影字幕+轻之国度] 笨蛋测验召唤兽2 - 03 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [极影字幕+轻之国度]笨蛋测验召唤兽2 format");
+        assert_eq!(info.publisher, "极影字幕+轻之国度");
+        assert_eq!(info.anime_name, "笨蛋测验召唤兽2");
+        assert_eq!(info.episode, "03");
+    }
+
+    #[test]
+    fn test_parse_jijian_笨蛋测验召唤兽_04() {
+        let path = PathBuf::from("[极影字幕+轻之国度] 笨蛋测验召唤兽2 - 04 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [极影字幕+轻之国度]笨蛋测验召唤兽2 format");
+        assert_eq!(info.publisher, "极影字幕+轻之国度");
+        assert_eq!(info.anime_name, "笨蛋测验召唤兽2");
+        assert_eq!(info.episode, "04");
+    }
+
+    #[test]
+    fn test_parse_jijian_笨蛋测验召唤兽_05() {
+        let path = PathBuf::from("[极影字幕+轻之国度] 笨蛋测验召唤兽2 - 05 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [极影字幕+轻之国度]笨蛋测验召唤兽2 format");
+        assert_eq!(info.publisher, "极影字幕+轻之国度");
+        assert_eq!(info.anime_name, "笨蛋测验召唤兽2");
+        assert_eq!(info.episode, "05");
+    }
+
+    #[test]
+    fn test_parse_jijian_笨蛋测验召唤兽_06() {
+        let path = PathBuf::from("[极影字幕+轻之国度] 笨蛋测验召唤兽2 - 06 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [极影字幕+轻之国度]笨蛋测验召唤兽2 format");
+        assert_eq!(info.publisher, "极影字幕+轻之国度");
+        assert_eq!(info.anime_name, "笨蛋测验召唤兽2");
+        assert_eq!(info.episode, "06");
+    }
+
+    #[test]
+    fn test_parse_jijian_笨蛋测验召唤兽_07() {
+        let path = PathBuf::from("[极影字幕+轻之国度] 笨蛋测验召唤兽2 - 07 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [极影字幕+轻之国度]笨蛋测验召唤兽2 format");
+        assert_eq!(info.publisher, "极影字幕+轻之国度");
+        assert_eq!(info.anime_name, "笨蛋测验召唤兽2");
+        assert_eq!(info.episode, "07");
+    }
+
+    #[test]
+    fn test_parse_jijian_笨蛋测验召唤兽_08() {
+        let path = PathBuf::from("[极影字幕+轻之国度] 笨蛋测验召唤兽2 - 08 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [极影字幕+轻之国度]笨蛋测验召唤兽2 format");
+        assert_eq!(info.publisher, "极影字幕+轻之国度");
+        assert_eq!(info.anime_name, "笨蛋测验召唤兽2");
+        assert_eq!(info.episode, "08");
+    }
+
+    #[test]
+    fn test_parse_jijian_笨蛋测验召唤兽_09() {
+        let path = PathBuf::from("[极影字幕+轻之国度] 笨蛋测验召唤兽2 - 09 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [极影字幕+轻之国度]笨蛋测验召唤兽2 format");
+        assert_eq!(info.publisher, "极影字幕+轻之国度");
+        assert_eq!(info.anime_name, "笨蛋测验召唤兽2");
+        assert_eq!(info.episode, "09");
+    }
+
+    #[test]
+    fn test_parse_jijian_笨蛋测验召唤兽_10() {
+        let path = PathBuf::from("[极影字幕+轻之国度] 笨蛋测验召唤兽2 - 10 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [极影字幕+轻之国度]笨蛋测验召唤兽2 format");
+        assert_eq!(info.publisher, "极影字幕+轻之国度");
+        assert_eq!(info.anime_name, "笨蛋测验召唤兽2");
+        assert_eq!(info.episode, "10");
+    }
+
+    // =====================================================
+    // jibaketa tests (NEW publisher - 10 tests)
+    #[test]
+    fn test_parse_jibaketa_夏日大作战2_01() {
+        let path = PathBuf::from("[jibaketa] 夏日大作战2 - 01 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [jibaketa] 夏日大作战2 format");
+        assert_eq!(info.publisher, "jibaketa");
+        assert_eq!(info.anime_name, "夏日大作战2");
+        assert_eq!(info.episode, "01");
+    }
+
+    #[test]
+    fn test_parse_jibaketa_夏日大作战2_02() {
+        let path = PathBuf::from("[jibaketa] 夏日大作战2 - 02 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [jibaketa] 夏日大作战2 format");
+        assert_eq!(info.publisher, "jibaketa");
+        assert_eq!(info.anime_name, "夏日大作战2");
+        assert_eq!(info.episode, "02");
+    }
+
+    #[test]
+    fn test_parse_jibaketa_夏日大作战2_03() {
+        let path = PathBuf::from("[jibaketa] 夏日大作战2 - 03 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [jibaketa] 夏日大作战2 format");
+        assert_eq!(info.publisher, "jibaketa");
+        assert_eq!(info.anime_name, "夏日大作战2");
+        assert_eq!(info.episode, "03");
+    }
+
+    #[test]
+    fn test_parse_jibaketa_夏日大作战2_04() {
+        let path = PathBuf::from("[jibaketa] 夏日大作战2 - 04 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [jibaketa] 夏日大作战2 format");
+        assert_eq!(info.publisher, "jibaketa");
+        assert_eq!(info.anime_name, "夏日大作战2");
+        assert_eq!(info.episode, "04");
+    }
+
+    #[test]
+    fn test_parse_jibaketa_夏日大作战2_05() {
+        let path = PathBuf::from("[jibaketa] 夏日大作战2 - 05 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [jibaketa] 夏日大作战2 format");
+        assert_eq!(info.publisher, "jibaketa");
+        assert_eq!(info.anime_name, "夏日大作战2");
+        assert_eq!(info.episode, "05");
+    }
+
+    #[test]
+    fn test_parse_jibaketa_夏日大作战2_06() {
+        let path = PathBuf::from("[jibaketa] 夏日大作战2 - 06 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [jibaketa] 夏日大作战2 format");
+        assert_eq!(info.publisher, "jibaketa");
+        assert_eq!(info.anime_name, "夏日大作战2");
+        assert_eq!(info.episode, "06");
+    }
+
+    #[test]
+    fn test_parse_jibaketa_夏日大作战2_07() {
+        let path = PathBuf::from("[jibaketa] 夏日大作战2 - 07 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [jibaketa] 夏日大作战2 format");
+        assert_eq!(info.publisher, "jibaketa");
+        assert_eq!(info.anime_name, "夏日大作战2");
+        assert_eq!(info.episode, "07");
+    }
+
+    #[test]
+    fn test_parse_jibaketa_夏日大作战2_08() {
+        let path = PathBuf::from("[jibaketa] 夏日大作战2 - 08 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [jibaketa] 夏日大作战2 format");
+        assert_eq!(info.publisher, "jibaketa");
+        assert_eq!(info.anime_name, "夏日大作战2");
+        assert_eq!(info.episode, "08");
+    }
+
+    #[test]
+    fn test_parse_jibaketa_夏日大作战2_09() {
+        let path = PathBuf::from("[jibaketa] 夏日大作战2 - 09 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [jibaketa] 夏日大作战2 format");
+        assert_eq!(info.publisher, "jibaketa");
+        assert_eq!(info.anime_name, "夏日大作战2");
+        assert_eq!(info.episode, "09");
+    }
+
+    #[test]
+    fn test_parse_jibaketa_夏日大作战2_10() {
+        let path = PathBuf::from("[jibaketa] 夏日大作战2 - 10 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [jibaketa] 夏日大作战2 format");
+        assert_eq!(info.publisher, "jibaketa");
+        assert_eq!(info.anime_name, "夏日大作战2");
+        assert_eq!(info.episode, "10");
+    }
+
+    #[test]
+    fn test_parse_jibaketa_某科学的超电磁炮S_02() {
+        let path = PathBuf::from("[jibaketa] 某科学的超电磁炮S - 02 [1080P].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [jibaketa] 某科学的超电磁炮S format");
+        assert_eq!(info.publisher, "jibaketa");
+        assert_eq!(info.anime_name, "某科学的超电磁炮S");
+        assert_eq!(info.episode, "02");
+    }
+
+    #[test]
+    fn test_parse_jibaketa_某科学的超电磁炮S_03() {
+        let path = PathBuf::from("[jibaketa] 某科学的超电磁炮S - 03 [1080P].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [jibaketa] 某科学的超电磁炮S format");
+        assert_eq!(info.publisher, "jibaketa");
+        assert_eq!(info.anime_name, "某科学的超电磁炮S");
+        assert_eq!(info.episode, "03");
+    }
+
+    #[test]
+    fn test_parse_jibaketa_某科学的超电磁炮S_04() {
+        let path = PathBuf::from("[jibaketa] 某科学的超电磁炮S - 04 [1080P].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [jibaketa] 某科学的超电磁炮S format");
+        assert_eq!(info.publisher, "jibaketa");
+        assert_eq!(info.anime_name, "某科学的超电磁炮S");
+        assert_eq!(info.episode, "04");
+    }
+
+    #[test]
+    fn test_parse_jibaketa_某科学的超电磁炮S_05() {
+        let path = PathBuf::from("[jibaketa] 某科学的超电磁炮S - 05 [1080P].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [jibaketa] 某科学的超电磁炮S format");
+        assert_eq!(info.publisher, "jibaketa");
+        assert_eq!(info.anime_name, "某科学的超电磁炮S");
+        assert_eq!(info.episode, "05");
+    }
+
+    #[test]
+    fn test_parse_jibaketa_某科学的超电磁炮S_06() {
+        let path = PathBuf::from("[jibaketa] 某科学的超电磁炮S - 06 [1080P].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [jibaketa] 某科学的超电磁炮S format");
+        assert_eq!(info.publisher, "jibaketa");
+        assert_eq!(info.anime_name, "某科学的超电磁炮S");
+        assert_eq!(info.episode, "06");
+    }
+
+    #[test]
+    fn test_parse_jibaketa_某科学的超电磁炮S_07() {
+        let path = PathBuf::from("[jibaketa] 某科学的超电磁炮S - 07 [1080P].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [jibaketa] 某科学的超电磁炮S format");
+        assert_eq!(info.publisher, "jibaketa");
+        assert_eq!(info.anime_name, "某科学的超电磁炮S");
+        assert_eq!(info.episode, "07");
+    }
+
+    #[test]
+    fn test_parse_jibaketa_某科学的超电磁炮S_08() {
+        let path = PathBuf::from("[jibaketa] 某科学的超电磁炮S - 08 [1080P].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [jibaketa] 某科学的超电磁炮S format");
+        assert_eq!(info.publisher, "jibaketa");
+        assert_eq!(info.anime_name, "某科学的超电磁炮S");
+        assert_eq!(info.episode, "08");
+    }
+
+    #[test]
+    fn test_parse_jibaketa_某科学的超电磁炮S_09() {
+        let path = PathBuf::from("[jibaketa] 某科学的超电磁炮S - 09 [1080P].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [jibaketa] 某科学的超电磁炮S format");
+        assert_eq!(info.publisher, "jibaketa");
+        assert_eq!(info.anime_name, "某科学的超电磁炮S");
+        assert_eq!(info.episode, "09");
+    }
+
+    #[test]
+    fn test_parse_jibaketa_某科学的超电磁炮S_10() {
+        let path = PathBuf::from("[jibaketa] 某科学的超电磁炮S - 10 [1080P].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [jibaketa] 某科学的超电磁炮S format");
+        assert_eq!(info.publisher, "jibaketa");
+        assert_eq!(info.anime_name, "某科学的超电磁炮S");
+        assert_eq!(info.episode, "10");
+    }
+
+    // =====================================================
+    // MagicStar tests (NEW publisher - 10 tests)
+    // =====================================================
+    #[test]
+    fn test_parse_magicstar_异修罗_01() {
+        let path = PathBuf::from("[MagicStar] 异修罗 - 01 [WebRip 1080p].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [MagicStar] 异修罗 format");
+        assert_eq!(info.publisher, "MagicStar");
+        assert_eq!(info.anime_name, "异修罗");
+        assert_eq!(info.episode, "01");
+    }
+
+    #[test]
+    fn test_parse_magicstar_异修罗_02() {
+        let path = PathBuf::from("[MagicStar] 异修罗 - 02 [WebRip 1080p].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [MagicStar] 异修罗 format");
+        assert_eq!(info.publisher, "MagicStar");
+        assert_eq!(info.anime_name, "异修罗");
+        assert_eq!(info.episode, "02");
+    }
+
+    #[test]
+    fn test_parse_magicstar_异修罗_03() {
+        let path = PathBuf::from("[MagicStar] 异修罗 - 03 [WebRip 1080p].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [MagicStar] 异修罗 format");
+        assert_eq!(info.publisher, "MagicStar");
+        assert_eq!(info.anime_name, "异修罗");
+        assert_eq!(info.episode, "03");
+    }
+
+    #[test]
+    fn test_parse_magicstar_异修罗_04() {
+        let path = PathBuf::from("[MagicStar] 异修罗 - 04 [WebRip 1080p].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [MagicStar] 异修罗 format");
+        assert_eq!(info.publisher, "MagicStar");
+        assert_eq!(info.anime_name, "异修罗");
+        assert_eq!(info.episode, "04");
+    }
+
+    #[test]
+    fn test_parse_magicstar_异修罗_05() {
+        let path = PathBuf::from("[MagicStar] 异修罗 - 05 [WebRip 1080p].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [MagicStar] 异修罗 format");
+        assert_eq!(info.publisher, "MagicStar");
+        assert_eq!(info.anime_name, "异修罗");
+        assert_eq!(info.episode, "05");
+    }
+
+    #[test]
+    fn test_parse_magicstar_异修罗_06() {
+        let path = PathBuf::from("[MagicStar] 异修罗 - 06 [WebRip 1080p].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [MagicStar] 异修罗 format");
+        assert_eq!(info.publisher, "MagicStar");
+        assert_eq!(info.anime_name, "异修罗");
+        assert_eq!(info.episode, "06");
+    }
+
+    #[test]
+    fn test_parse_magicstar_异修罗_07() {
+        let path = PathBuf::from("[MagicStar] 异修罗 - 07 [WebRip 1080p].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [MagicStar] 异修罗 format");
+        assert_eq!(info.publisher, "MagicStar");
+        assert_eq!(info.anime_name, "异修罗");
+        assert_eq!(info.episode, "07");
+    }
+
+    #[test]
+    fn test_parse_magicstar_异修罗_08() {
+        let path = PathBuf::from("[MagicStar] 异修罗 - 08 [WebRip 1080p].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [MagicStar] 异修罗 format");
+        assert_eq!(info.publisher, "MagicStar");
+        assert_eq!(info.anime_name, "异修罗");
+        assert_eq!(info.episode, "08");
+    }
+
+    #[test]
+    fn test_parse_magicstar_异修罗_09() {
+        let path = PathBuf::from("[MagicStar] 异修罗 - 09 [WebRip 1080p].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [MagicStar] 异修罗 format");
+        assert_eq!(info.publisher, "MagicStar");
+        assert_eq!(info.anime_name, "异修罗");
+        assert_eq!(info.episode, "09");
+    }
+
+    #[test]
+    fn test_parse_magicstar_异修罗_10() {
+        let path = PathBuf::from("[MagicStar] 异修罗 - 10 [WebRip 1080p].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [MagicStar] 异修罗 format");
+        assert_eq!(info.publisher, "MagicStar");
+        assert_eq!(info.anime_name, "异修罗");
+        assert_eq!(info.episode, "10");
+    }
+
+    // =====================================================
+    // 雪飘工作室 tests (NEW publisher - 10 tests)
+    // =====================================================
+    #[test]
+    fn test_parse_xuepiao_冰果_01() {
+        let path = PathBuf::from("[雪飘工作室] 冰果 - 01 [简繁外挂].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [雪飘工作室] 冰果 format");
+        assert_eq!(info.publisher, "雪飘工作室");
+        assert_eq!(info.anime_name, "冰果");
+        assert_eq!(info.episode, "01");
+    }
+
+    #[test]
+    fn test_parse_xuepiao_冰果_02() {
+        let path = PathBuf::from("[雪飘工作室] 冰果 - 02 [简繁外挂].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [雪飘工作室] 冰果 format");
+        assert_eq!(info.publisher, "雪飘工作室");
+        assert_eq!(info.anime_name, "冰果");
+        assert_eq!(info.episode, "02");
+    }
+
+    #[test]
+    fn test_parse_xuepiao_冰果_03() {
+        let path = PathBuf::from("[雪飘工作室] 冰果 - 03 [简繁外挂].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [雪飘工作室] 冰果 format");
+        assert_eq!(info.publisher, "雪飘工作室");
+        assert_eq!(info.anime_name, "冰果");
+        assert_eq!(info.episode, "03");
+    }
+
+    #[test]
+    fn test_parse_xuepiao_冰果_04() {
+        let path = PathBuf::from("[雪飘工作室] 冰果 - 04 [简繁外挂].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [雪飘工作室] 冰果 format");
+        assert_eq!(info.publisher, "雪飘工作室");
+        assert_eq!(info.anime_name, "冰果");
+        assert_eq!(info.episode, "04");
+    }
+
+    #[test]
+    fn test_parse_xuepiao_冰果_05() {
+        let path = PathBuf::from("[雪飘工作室] 冰果 - 05 [简繁外挂].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [雪飘工作室] 冰果 format");
+        assert_eq!(info.publisher, "雪飘工作室");
+        assert_eq!(info.anime_name, "冰果");
+        assert_eq!(info.episode, "05");
+    }
+
+    #[test]
+    fn test_parse_xuepiao_冰果_06() {
+        let path = PathBuf::from("[雪飘工作室] 冰果 - 06 [简繁外挂].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [雪飘工作室] 冰果 format");
+        assert_eq!(info.publisher, "雪飘工作室");
+        assert_eq!(info.anime_name, "冰果");
+        assert_eq!(info.episode, "06");
+    }
+
+    #[test]
+    fn test_parse_xuepiao_冰果_07() {
+        let path = PathBuf::from("[雪飘工作室] 冰果 - 07 [简繁外挂].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [雪飘工作室] 冰果 format");
+        assert_eq!(info.publisher, "雪飘工作室");
+        assert_eq!(info.anime_name, "冰果");
+        assert_eq!(info.episode, "07");
+    }
+
+    #[test]
+    fn test_parse_xuepiao_冰果_08() {
+        let path = PathBuf::from("[雪飘工作室] 冰果 - 08 [简繁外挂].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [雪飘工作室] 冰果 format");
+        assert_eq!(info.publisher, "雪飘工作室");
+        assert_eq!(info.anime_name, "冰果");
+        assert_eq!(info.episode, "08");
+    }
+
+    #[test]
+    fn test_parse_xuepiao_冰果_09() {
+        let path = PathBuf::from("[雪飘工作室] 冰果 - 09 [简繁外挂].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [雪飘工作室] 冰果 format");
+        assert_eq!(info.publisher, "雪飘工作室");
+        assert_eq!(info.anime_name, "冰果");
+        assert_eq!(info.episode, "09");
+    }
+
+    #[test]
+    fn test_parse_xuepiao_冰果_10() {
+        let path = PathBuf::from("[雪飘工作室] 冰果 - 10 [简繁外挂].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [雪飘工作室] 冰果 format");
+        assert_eq!(info.publisher, "雪飘工作室");
+        assert_eq!(info.anime_name, "冰果");
+        assert_eq!(info.episode, "10");
+    }
+
+    // =====================================================
+    // 沸班亚马制作组 tests (NEW publisher - 10 tests)
+    // =====================================================
+    #[test]
+    fn test_parse_feiban_异世界自杀小队_01() {
+        let path =
+            PathBuf::from("[沸班亚马制作组] 异世界自杀小队 - 01 [WebRip 1080p HEVC-10bit AAC].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [沸班亚马制作组] 异世界自杀小队 format");
+        assert_eq!(info.publisher, "沸班亚马制作组");
+        assert_eq!(info.anime_name, "异世界自杀小队");
+        assert_eq!(info.episode, "01");
+    }
+
+    #[test]
+    fn test_parse_feiban_异世界自杀小队_02() {
+        let path =
+            PathBuf::from("[沸班亚马制作组] 异世界自杀小队 - 02 [WebRip 1080p HEVC-10bit AAC].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [沸班亚马制作组] 异世界自杀小队 format");
+        assert_eq!(info.publisher, "沸班亚马制作组");
+        assert_eq!(info.anime_name, "异世界自杀小队");
+        assert_eq!(info.episode, "02");
+    }
+
+    #[test]
+    fn test_parse_feiban_异世界自杀小队_03() {
+        let path =
+            PathBuf::from("[沸班亚马制作组] 异世界自杀小队 - 03 [WebRip 1080p HEVC-10bit AAC].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [沸班亚马制作组] 异世界自杀小队 format");
+        assert_eq!(info.publisher, "沸班亚马制作组");
+        assert_eq!(info.anime_name, "异世界自杀小队");
+        assert_eq!(info.episode, "03");
+    }
+
+    #[test]
+    fn test_parse_feiban_异世界自杀小队_04() {
+        let path =
+            PathBuf::from("[沸班亚马制作组] 异世界自杀小队 - 04 [WebRip 1080p HEVC-10bit AAC].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [沸班亚马制作组] 异世界自杀小队 format");
+        assert_eq!(info.publisher, "沸班亚马制作组");
+        assert_eq!(info.anime_name, "异世界自杀小队");
+        assert_eq!(info.episode, "04");
+    }
+
+    #[test]
+    fn test_parse_feiban_异世界自杀小队_05() {
+        let path =
+            PathBuf::from("[沸班亚马制作组] 异世界自杀小队 - 05 [WebRip 1080p HEVC-10bit AAC].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [沸班亚马制作组] 异世界自杀小队 format");
+        assert_eq!(info.publisher, "沸班亚马制作组");
+        assert_eq!(info.anime_name, "异世界自杀小队");
+        assert_eq!(info.episode, "05");
+    }
+
+    #[test]
+    fn test_parse_feiban_异世界自杀小队_06() {
+        let path =
+            PathBuf::from("[沸班亚马制作组] 异世界自杀小队 - 06 [WebRip 1080p HEVC-10bit AAC].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [沸班亚马制作组] 异世界自杀小队 format");
+        assert_eq!(info.publisher, "沸班亚马制作组");
+        assert_eq!(info.anime_name, "异世界自杀小队");
+        assert_eq!(info.episode, "06");
+    }
+
+    #[test]
+    fn test_parse_feiban_异世界自杀小队_07() {
+        let path =
+            PathBuf::from("[沸班亚马制作组] 异世界自杀小队 - 07 [WebRip 1080p HEVC-10bit AAC].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [沸班亚马制作组] 异世界自杀小队 format");
+        assert_eq!(info.publisher, "沸班亚马制作组");
+        assert_eq!(info.anime_name, "异世界自杀小队");
+        assert_eq!(info.episode, "07");
+    }
+
+    #[test]
+    fn test_parse_feiban_异世界自杀小队_08() {
+        let path =
+            PathBuf::from("[沸班亚马制作组] 异世界自杀小队 - 08 [WebRip 1080p HEVC-10bit AAC].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [沸班亚马制作组] 异世界自杀小队 format");
+        assert_eq!(info.publisher, "沸班亚马制作组");
+        assert_eq!(info.anime_name, "异世界自杀小队");
+        assert_eq!(info.episode, "08");
+    }
+
+    #[test]
+    fn test_parse_feiban_异世界自杀小队_09() {
+        let path =
+            PathBuf::from("[沸班亚马制作组] 异世界自杀小队 - 09 [WebRip 1080p HEVC-10bit AAC].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [沸班亚马制作组] 异世界自杀小队 format");
+        assert_eq!(info.publisher, "沸班亚马制作组");
+        assert_eq!(info.anime_name, "异世界自杀小队");
+        assert_eq!(info.episode, "09");
+    }
+
+    #[test]
+    fn test_parse_feiban_异世界自杀小队_10() {
+        let path =
+            PathBuf::from("[沸班亚马制作组] 异世界自杀小队 - 10 [WebRip 1080p HEVC-10bit AAC].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [沸班亚马制作组] 异世界自杀小队 format");
+        assert_eq!(info.publisher, "沸班亚马制作组");
+        assert_eq!(info.anime_name, "异世界自杀小队");
+        assert_eq!(info.episode, "10");
+    }
+
+    // =====================================================
+    // 猎户压制部 tests (NEW publisher - 10 tests)
+    // =====================================================
+    #[test]
+    fn test_parse_liehu_葬送的芙莉莲_01() {
+        let path = PathBuf::from("[猎户压制部] 葬送的芙莉莲 - 01 [BDRip 1080p].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [猎户压制部] 葬送的芙莉莲 format");
+        assert_eq!(info.publisher, "猎户压制部");
+        assert_eq!(info.anime_name, "葬送的芙莉莲");
+        assert_eq!(info.episode, "01");
+    }
+
+    #[test]
+    fn test_parse_liehu_葬送的芙莉莲_02() {
+        let path = PathBuf::from("[猎户压制部] 葬送的芙莉莲 - 02 [BDRip 1080p].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [猎户压制部] 葬送的芙莉莲 format");
+        assert_eq!(info.publisher, "猎户压制部");
+        assert_eq!(info.anime_name, "葬送的芙莉莲");
+        assert_eq!(info.episode, "02");
+    }
+
+    #[test]
+    fn test_parse_liehu_葬送的芙莉莲_03() {
+        let path = PathBuf::from("[猎户压制部] 葬送的芙莉莲 - 03 [BDRip 1080p].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [猎户压制部] 葬送的芙莉莲 format");
+        assert_eq!(info.publisher, "猎户压制部");
+        assert_eq!(info.anime_name, "葬送的芙莉莲");
+        assert_eq!(info.episode, "03");
+    }
+
+    #[test]
+    fn test_parse_liehu_葬送的芙莉莲_04() {
+        let path = PathBuf::from("[猎户压制部] 葬送的芙莉莲 - 04 [BDRip 1080p].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [猎户压制部] 葬送的芙莉莲 format");
+        assert_eq!(info.publisher, "猎户压制部");
+        assert_eq!(info.anime_name, "葬送的芙莉莲");
+        assert_eq!(info.episode, "04");
+    }
+
+    #[test]
+    fn test_parse_liehu_葬送的芙莉莲_05() {
+        let path = PathBuf::from("[猎户压制部] 葬送的芙莉莲 - 05 [BDRip 1080p].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [猎户压制部] 葬送的芙莉莲 format");
+        assert_eq!(info.publisher, "猎户压制部");
+        assert_eq!(info.anime_name, "葬送的芙莉莲");
+        assert_eq!(info.episode, "05");
+    }
+
+    #[test]
+    fn test_parse_liehu_葬送的芙莉莲_06() {
+        let path = PathBuf::from("[猎户压制部] 葬送的芙莉莲 - 06 [BDRip 1080p].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [猎户压制部] 葬送的芙莉莲 format");
+        assert_eq!(info.publisher, "猎户压制部");
+        assert_eq!(info.anime_name, "葬送的芙莉莲");
+        assert_eq!(info.episode, "06");
+    }
+
+    #[test]
+    fn test_parse_liehu_葬送的芙莉莲_07() {
+        let path = PathBuf::from("[猎户压制部] 葬送的芙莉莲 - 07 [BDRip 1080p].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [猎户压制部] 葬送的芙莉莲 format");
+        assert_eq!(info.publisher, "猎户压制部");
+        assert_eq!(info.anime_name, "葬送的芙莉莲");
+        assert_eq!(info.episode, "07");
+    }
+
+    #[test]
+    fn test_parse_liehu_葬送的芙莉莲_08() {
+        let path = PathBuf::from("[猎户压制部] 葬送的芙莉莲 - 08 [BDRip 1080p].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [猎户压制部] 葬送的芙莉莲 format");
+        assert_eq!(info.publisher, "猎户压制部");
+        assert_eq!(info.anime_name, "葬送的芙莉莲");
+        assert_eq!(info.episode, "08");
+    }
+
+    #[test]
+    fn test_parse_liehu_葬送的芙莉莲_09() {
+        let path = PathBuf::from("[猎户压制部] 葬送的芙莉莲 - 09 [BDRip 1080p].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [猎户压制部] 葬送的芙莉莲 format");
+        assert_eq!(info.publisher, "猎户压制部");
+        assert_eq!(info.anime_name, "葬送的芙莉莲");
+        assert_eq!(info.episode, "09");
+    }
+
+    #[test]
+    fn test_parse_liehu_葬送的芙莉莲_10() {
+        let path = PathBuf::from("[猎户压制部] 葬送的芙莉莲 - 10 [BDRip 1080p].mkv");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [猎户压制部] 葬送的芙莉莲 format");
+        assert_eq!(info.publisher, "猎户压制部");
+        assert_eq!(info.anime_name, "葬送的芙莉莲");
+        assert_eq!(info.episode, "10");
+    }
+
+    // =====================================================
+    // TSDM字幕组 tests (NEW publisher - 10 tests)
+    // =====================================================
+    #[test]
+    fn test_parse_tsdm_以死亡游戏为生_01() {
+        let path = PathBuf::from("[TSDM字幕组] 以死亡游戏为生 - 01 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [TSDM字幕组] 以死亡游戏为生 format");
+        assert_eq!(info.publisher, "TSDM字幕组");
+        assert_eq!(info.anime_name, "以死亡游戏为生");
+        assert_eq!(info.episode, "01");
+    }
+
+    #[test]
+    fn test_parse_tsdm_以死亡游戏为生_02() {
+        let path = PathBuf::from("[TSDM字幕组] 以死亡游戏为生 - 02 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [TSDM字幕组] 以死亡游戏为生 format");
+        assert_eq!(info.publisher, "TSDM字幕组");
+        assert_eq!(info.anime_name, "以死亡游戏为生");
+        assert_eq!(info.episode, "02");
+    }
+
+    #[test]
+    fn test_parse_tsdm_以死亡游戏为生_03() {
+        let path = PathBuf::from("[TSDM字幕组] 以死亡游戏为生 - 03 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [TSDM字幕组] 以死亡游戏为生 format");
+        assert_eq!(info.publisher, "TSDM字幕组");
+        assert_eq!(info.anime_name, "以死亡游戏为生");
+        assert_eq!(info.episode, "03");
+    }
+
+    #[test]
+    fn test_parse_tsdm_以死亡游戏为生_04() {
+        let path = PathBuf::from("[TSDM字幕组] 以死亡游戏为生 - 04 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [TSDM字幕组] 以死亡游戏为生 format");
+        assert_eq!(info.publisher, "TSDM字幕组");
+        assert_eq!(info.anime_name, "以死亡游戏为生");
+        assert_eq!(info.episode, "04");
+    }
+
+    #[test]
+    fn test_parse_tsdm_以死亡游戏为生_05() {
+        let path = PathBuf::from("[TSDM字幕组] 以死亡游戏为生 - 05 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [TSDM字幕组] 以死亡游戏为生 format");
+        assert_eq!(info.publisher, "TSDM字幕组");
+        assert_eq!(info.anime_name, "以死亡游戏为生");
+        assert_eq!(info.episode, "05");
+    }
+
+    #[test]
+    fn test_parse_tsdm_以死亡游戏为生_06() {
+        let path = PathBuf::from("[TSDM字幕组] 以死亡游戏为生 - 06 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [TSDM字幕组] 以死亡游戏为生 format");
+        assert_eq!(info.publisher, "TSDM字幕组");
+        assert_eq!(info.anime_name, "以死亡游戏为生");
+        assert_eq!(info.episode, "06");
+    }
+
+    #[test]
+    fn test_parse_tsdm_以死亡游戏为生_07() {
+        let path = PathBuf::from("[TSDM字幕组] 以死亡游戏为生 - 07 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [TSDM字幕组] 以死亡游戏为生 format");
+        assert_eq!(info.publisher, "TSDM字幕组");
+        assert_eq!(info.anime_name, "以死亡游戏为生");
+        assert_eq!(info.episode, "07");
+    }
+
+    #[test]
+    fn test_parse_tsdm_以死亡游戏为生_08() {
+        let path = PathBuf::from("[TSDM字幕组] 以死亡游戏为生 - 08 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [TSDM字幕组] 以死亡游戏为生 format");
+        assert_eq!(info.publisher, "TSDM字幕组");
+        assert_eq!(info.anime_name, "以死亡游戏为生");
+        assert_eq!(info.episode, "08");
+    }
+
+    #[test]
+    fn test_parse_tsdm_以死亡游戏为生_09() {
+        let path = PathBuf::from("[TSDM字幕组] 以死亡游戏为生 - 09 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [TSDM字幕组] 以死亡游戏为生 format");
+        assert_eq!(info.publisher, "TSDM字幕组");
+        assert_eq!(info.anime_name, "以死亡游戏为生");
+        assert_eq!(info.episode, "09");
+    }
+
+    #[test]
+    fn test_parse_tsdm_以死亡游戏为生_10() {
+        let path = PathBuf::from("[TSDM字幕组] 以死亡游戏为生 - 10 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [TSDM字幕组] 以死亡游戏为生 format");
+        assert_eq!(info.publisher, "TSDM字幕组");
+        assert_eq!(info.anime_name, "以死亡游戏为生");
+        assert_eq!(info.episode, "10");
+    }
+
+    // =====================================================
+    // 夜莺家族&YYQ字幕组 tests (NEW publisher - 10 tests)
+    // =====================================================
+    #[test]
+    fn test_parse_yyq_魔法少女小圆_01() {
+        let path = PathBuf::from("[夜莺家族&YYQ字幕组] 魔法少女小圆 - 01 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [夜莺家族&YYQ字幕组] 魔法少女小圆 format");
+        assert_eq!(info.publisher, "夜莺家族&YYQ字幕组");
+        assert_eq!(info.anime_name, "魔法少女小圆");
+        assert_eq!(info.episode, "01");
+    }
+
+    #[test]
+    fn test_parse_yyq_魔法少女小圆_02() {
+        let path = PathBuf::from("[夜莺家族&YYQ字幕组] 魔法少女小圆 - 02 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [夜莺家族&YYQ字幕组] 魔法少女小圆 format");
+        assert_eq!(info.publisher, "夜莺家族&YYQ字幕组");
+        assert_eq!(info.anime_name, "魔法少女小圆");
+        assert_eq!(info.episode, "02");
+    }
+
+    #[test]
+    fn test_parse_yyq_魔法少女小圆_03() {
+        let path = PathBuf::from("[夜莺家族&YYQ字幕组] 魔法少女小圆 - 03 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [夜莺家族&YYQ字幕组] 魔法少女小圆 format");
+        assert_eq!(info.publisher, "夜莺家族&YYQ字幕组");
+        assert_eq!(info.anime_name, "魔法少女小圆");
+        assert_eq!(info.episode, "03");
+    }
+
+    #[test]
+    fn test_parse_yyq_魔法少女小圆_04() {
+        let path = PathBuf::from("[夜莺家族&YYQ字幕组] 魔法少女小圆 - 04 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [夜莺家族&YYQ字幕组] 魔法少女小圆 format");
+        assert_eq!(info.publisher, "夜莺家族&YYQ字幕组");
+        assert_eq!(info.anime_name, "魔法少女小圆");
+        assert_eq!(info.episode, "04");
+    }
+
+    #[test]
+    fn test_parse_yyq_魔法少女小圆_05() {
+        let path = PathBuf::from("[夜莺家族&YYQ字幕组] 魔法少女小圆 - 05 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [夜莺家族&YYQ字幕组] 魔法少女小圆 format");
+        assert_eq!(info.publisher, "夜莺家族&YYQ字幕组");
+        assert_eq!(info.anime_name, "魔法少女小圆");
+        assert_eq!(info.episode, "05");
+    }
+
+    #[test]
+    fn test_parse_yyq_魔法少女小圆_06() {
+        let path = PathBuf::from("[夜莺家族&YYQ字幕组] 魔法少女小圆 - 06 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [夜莺家族&YYQ字幕组] 魔法少女小圆 format");
+        assert_eq!(info.publisher, "夜莺家族&YYQ字幕组");
+        assert_eq!(info.anime_name, "魔法少女小圆");
+        assert_eq!(info.episode, "06");
+    }
+
+    #[test]
+    fn test_parse_yyq_魔法少女小圆_07() {
+        let path = PathBuf::from("[夜莺家族&YYQ字幕组] 魔法少女小圆 - 07 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [夜莺家族&YYQ字幕组] 魔法少女小圆 format");
+        assert_eq!(info.publisher, "夜莺家族&YYQ字幕组");
+        assert_eq!(info.anime_name, "魔法少女小圆");
+        assert_eq!(info.episode, "07");
+    }
+
+    #[test]
+    fn test_parse_yyq_魔法少女小圆_08() {
+        let path = PathBuf::from("[夜莺家族&YYQ字幕组] 魔法少女小圆 - 08 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [夜莺家族&YYQ字幕组] 魔法少女小圆 format");
+        assert_eq!(info.publisher, "夜莺家族&YYQ字幕组");
+        assert_eq!(info.anime_name, "魔法少女小圆");
+        assert_eq!(info.episode, "08");
+    }
+
+    #[test]
+    fn test_parse_yyq_魔法少女小圆_09() {
+        let path = PathBuf::from("[夜莺家族&YYQ字幕组] 魔法少女小圆 - 09 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [夜莺家族&YYQ字幕组] 魔法少女小圆 format");
+        assert_eq!(info.publisher, "夜莺家族&YYQ字幕组");
+        assert_eq!(info.anime_name, "魔法少女小圆");
+        assert_eq!(info.episode, "09");
+    }
+
+    #[test]
+    fn test_parse_yyq_魔法少女小圆_10() {
+        let path = PathBuf::from("[夜莺家族&YYQ字幕组] 魔法少女小圆 - 10 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [夜莺家族&YYQ字幕组] 魔法少女小圆 format");
+        assert_eq!(info.publisher, "夜莺家族&YYQ字幕组");
+        assert_eq!(info.anime_name, "魔法少女小圆");
+        assert_eq!(info.episode, "10");
+    }
+
+    #[test]
+    fn test_parse_樱花字幕组_我的青春恋爱物语_01() {
+        let path = PathBuf::from("[樱花字幕组] 我的青春恋爱物语 - 01 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [樱花字幕组] format");
+        assert_eq!(info.publisher, "樱花字幕组");
+        assert_eq!(info.anime_name, "我的青春恋爱物语");
+        assert_eq!(info.episode, "01");
+    }
+
+    #[test]
+    fn test_parse_樱花字幕组_我的青春恋爱物语_02() {
+        let path = PathBuf::from("[樱花字幕组] 我的青春恋爱物语 - 02 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [樱花字幕组] format");
+        assert_eq!(info.publisher, "樱花字幕组");
+        assert_eq!(info.anime_name, "我的青春恋爱物语");
+        assert_eq!(info.episode, "02");
+    }
+
+    #[test]
+    fn test_parse_樱花字幕组_我的青春恋爱物语_03() {
+        let path = PathBuf::from("[樱花字幕组] 我的青春恋爱物语 - 03 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [樱花字幕组] format");
+        assert_eq!(info.publisher, "樱花字幕组");
+        assert_eq!(info.anime_name, "我的青春恋爱物语");
+        assert_eq!(info.episode, "03");
+    }
+
+    #[test]
+    fn test_parse_樱花字幕组_我的青春恋爱物语_04() {
+        let path = PathBuf::from("[樱花字幕组] 我的青春恋爱物语 - 04 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [樱花字幕组] format");
+        assert_eq!(info.publisher, "樱花字幕组");
+        assert_eq!(info.anime_name, "我的青春恋爱物语");
+        assert_eq!(info.episode, "04");
+    }
+
+    #[test]
+    fn test_parse_樱花字幕组_我的青春恋爱物语_05() {
+        let path = PathBuf::from("[樱花字幕组] 我的青春恋爱物语 - 05 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [樱花字幕组] format");
+        assert_eq!(info.publisher, "樱花字幕组");
+        assert_eq!(info.anime_name, "我的青春恋爱物语");
+        assert_eq!(info.episode, "05");
+    }
+
+    #[test]
+    fn test_parse_樱花字幕组_我的青春恋爱物语_06() {
+        let path = PathBuf::from("[樱花字幕组] 我的青春恋爱物语 - 06 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [樱花字幕组] format");
+        assert_eq!(info.publisher, "樱花字幕组");
+        assert_eq!(info.anime_name, "我的青春恋爱物语");
+        assert_eq!(info.episode, "06");
+    }
+
+    #[test]
+    fn test_parse_樱花字幕组_我的青春恋爱物语_07() {
+        let path = PathBuf::from("[樱花字幕组] 我的青春恋爱物语 - 07 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [樱花字幕组] format");
+        assert_eq!(info.publisher, "樱花字幕组");
+        assert_eq!(info.anime_name, "我的青春恋爱物语");
+        assert_eq!(info.episode, "07");
+    }
+
+    #[test]
+    fn test_parse_樱花字幕组_我的青春恋爱物语_08() {
+        let path = PathBuf::from("[樱花字幕组] 我的青春恋爱物语 - 08 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [樱花字幕组] format");
+        assert_eq!(info.publisher, "樱花字幕组");
+        assert_eq!(info.anime_name, "我的青春恋爱物语");
+        assert_eq!(info.episode, "08");
+    }
+
+    #[test]
+    fn test_parse_樱花字幕组_我的青春恋爱物语_09() {
+        let path = PathBuf::from("[樱花字幕组] 我的青春恋爱物语 - 09 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [樱花字幕组] format");
+        assert_eq!(info.publisher, "樱花字幕组");
+        assert_eq!(info.anime_name, "我的青春恋爱物语");
+        assert_eq!(info.episode, "09");
+    }
+
+    #[test]
+    fn test_parse_樱花字幕组_我的青春恋爱物语_10() {
+        let path = PathBuf::from("[樱花字幕组] 我的青春恋爱物语 - 10 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [樱花字幕组] format");
+        assert_eq!(info.publisher, "樱花字幕组");
+        assert_eq!(info.anime_name, "我的青春恋爱物语");
+        assert_eq!(info.episode, "10");
+    }
+
+    #[test]
+    fn test_parse_萌菇字幕组_路人超能100_01() {
+        let path = PathBuf::from("[萌菇字幕组] 路人超能100 - 01 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [萌菇字幕组] format");
+        assert_eq!(info.publisher, "萌菇字幕组");
+        assert_eq!(info.anime_name, "路人超能100");
+        assert_eq!(info.episode, "01");
+    }
+
+    #[test]
+    fn test_parse_萌菇字幕组_路人超能100_02() {
+        let path = PathBuf::from("[萌菇字幕组] 路人超能100 - 02 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [萌菇字幕组] format");
+        assert_eq!(info.publisher, "萌菇字幕组");
+        assert_eq!(info.anime_name, "路人超能100");
+        assert_eq!(info.episode, "02");
+    }
+
+    #[test]
+    fn test_parse_萌菇字幕组_路人超能100_03() {
+        let path = PathBuf::from("[萌菇字幕组] 路人超能100 - 03 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [萌菇字幕组] format");
+        assert_eq!(info.publisher, "萌菇字幕组");
+        assert_eq!(info.anime_name, "路人超能100");
+        assert_eq!(info.episode, "03");
+    }
+
+    #[test]
+    fn test_parse_萌菇字幕组_路人超能100_04() {
+        let path = PathBuf::from("[萌菇字幕组] 路人超能100 - 04 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [萌菇字幕组] format");
+        assert_eq!(info.publisher, "萌菇字幕组");
+        assert_eq!(info.anime_name, "路人超能100");
+        assert_eq!(info.episode, "04");
+    }
+
+    #[test]
+    fn test_parse_萌菇字幕组_路人超能100_05() {
+        let path = PathBuf::from("[萌菇字幕组] 路人超能100 - 05 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [萌菇字幕组] format");
+        assert_eq!(info.publisher, "萌菇字幕组");
+        assert_eq!(info.anime_name, "路人超能100");
+        assert_eq!(info.episode, "05");
+    }
+
+    #[test]
+    fn test_parse_萌菇字幕组_路人超能100_06() {
+        let path = PathBuf::from("[萌菇字幕组] 路人超能100 - 06 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [萌菇字幕组] format");
+        assert_eq!(info.publisher, "萌菇字幕组");
+        assert_eq!(info.anime_name, "路人超能100");
+        assert_eq!(info.episode, "06");
+    }
+
+    #[test]
+    fn test_parse_萌菇字幕组_路人超能100_07() {
+        let path = PathBuf::from("[萌菇字幕组] 路人超能100 - 07 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [萌菇字幕组] format");
+        assert_eq!(info.publisher, "萌菇字幕组");
+        assert_eq!(info.anime_name, "路人超能100");
+        assert_eq!(info.episode, "07");
+    }
+
+    #[test]
+    fn test_parse_萌菇字幕组_路人超能100_08() {
+        let path = PathBuf::from("[萌菇字幕组] 路人超能100 - 08 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [萌菇字幕组] format");
+        assert_eq!(info.publisher, "萌菇字幕组");
+        assert_eq!(info.anime_name, "路人超能100");
+        assert_eq!(info.episode, "08");
+    }
+
+    #[test]
+    fn test_parse_萌菇字幕组_路人超能100_09() {
+        let path = PathBuf::from("[萌菇字幕组] 路人超能100 - 09 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [萌菇字幕组] format");
+        assert_eq!(info.publisher, "萌菇字幕组");
+        assert_eq!(info.anime_name, "路人超能100");
+        assert_eq!(info.episode, "09");
+    }
+
+    #[test]
+    fn test_parse_萌菇字幕组_路人超能100_10() {
+        let path = PathBuf::from("[萌菇字幕组] 路人超能100 - 10 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [萌菇字幕组] format");
+        assert_eq!(info.publisher, "萌菇字幕组");
+        assert_eq!(info.anime_name, "路人超能100");
+        assert_eq!(info.episode, "10");
+    }
+
+    #[test]
+    fn test_parse_肥宅字幕组_银魂_01() {
+        let path = PathBuf::from("[肥宅字幕组] 银魂 - 01 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [肥宅字幕组] format");
+        assert_eq!(info.publisher, "肥宅字幕组");
+        assert_eq!(info.anime_name, "银魂");
+        assert_eq!(info.episode, "01");
+    }
+
+    #[test]
+    fn test_parse_肥宅字幕组_银魂_02() {
+        let path = PathBuf::from("[肥宅字幕组] 银魂 - 02 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [肥宅字幕组] format");
+        assert_eq!(info.publisher, "肥宅字幕组");
+        assert_eq!(info.anime_name, "银魂");
+        assert_eq!(info.episode, "02");
+    }
+
+    #[test]
+    fn test_parse_肥宅字幕组_银魂_03() {
+        let path = PathBuf::from("[肥宅字幕组] 银魂 - 03 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [肥宅字幕组] format");
+        assert_eq!(info.publisher, "肥宅字幕组");
+        assert_eq!(info.anime_name, "银魂");
+        assert_eq!(info.episode, "03");
+    }
+
+    #[test]
+    fn test_parse_肥宅字幕组_银魂_04() {
+        let path = PathBuf::from("[肥宅字幕组] 银魂 - 04 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [肥宅字幕组] format");
+        assert_eq!(info.publisher, "肥宅字幕组");
+        assert_eq!(info.anime_name, "银魂");
+        assert_eq!(info.episode, "04");
+    }
+
+    #[test]
+    fn test_parse_肥宅字幕组_银魂_05() {
+        let path = PathBuf::from("[肥宅字幕组] 银魂 - 05 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [肥宅字幕组] format");
+        assert_eq!(info.publisher, "肥宅字幕组");
+        assert_eq!(info.anime_name, "银魂");
+        assert_eq!(info.episode, "05");
+    }
+
+    #[test]
+    fn test_parse_肥宅字幕组_银魂_06() {
+        let path = PathBuf::from("[肥宅字幕组] 银魂 - 06 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [肥宅字幕组] format");
+        assert_eq!(info.publisher, "肥宅字幕组");
+        assert_eq!(info.anime_name, "银魂");
+        assert_eq!(info.episode, "06");
+    }
+
+    #[test]
+    fn test_parse_肥宅字幕组_银魂_07() {
+        let path = PathBuf::from("[肥宅字幕组] 银魂 - 07 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [肥宅字幕组] format");
+        assert_eq!(info.publisher, "肥宅字幕组");
+        assert_eq!(info.anime_name, "银魂");
+        assert_eq!(info.episode, "07");
+    }
+
+    #[test]
+    fn test_parse_肥宅字幕组_银魂_08() {
+        let path = PathBuf::from("[肥宅字幕组] 银魂 - 08 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [肥宅字幕组] format");
+        assert_eq!(info.publisher, "肥宅字幕组");
+        assert_eq!(info.anime_name, "银魂");
+        assert_eq!(info.episode, "08");
+    }
+
+    #[test]
+    fn test_parse_肥宅字幕组_银魂_09() {
+        let path = PathBuf::from("[肥宅字幕组] 银魂 - 09 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [肥宅字幕组] format");
+        assert_eq!(info.publisher, "肥宅字幕组");
+        assert_eq!(info.anime_name, "银魂");
+        assert_eq!(info.episode, "09");
+    }
+
+    #[test]
+    fn test_parse_肥宅字幕组_银魂_10() {
+        let path = PathBuf::from("[肥宅字幕组] 银魂 - 10 [1080P].mp4");
+        let result = FilenameParser::parse(&path);
+        let info = result.expect("Parser should handle [肥宅字幕组] format");
+        assert_eq!(info.publisher, "肥宅字幕组");
+        assert_eq!(info.anime_name, "银魂");
+        assert_eq!(info.episode, "10");
+    }
 }
