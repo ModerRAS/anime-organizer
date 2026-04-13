@@ -51,8 +51,9 @@ tokio = { version = "1", features = ["full"] }
 default = ["metadata"]
 metadata = ["dep:reqwest", "dep:tokio", "dep:flate2"]
 scraper = ["metadata", "dep:zip", "dep:tempfile"]
-llm-api = []  # LLM API integration (OpenCode/MiniMax)
+llm-api = []
 clouddrive = ["dep:tonic", "dep:prost", "dep:prost-types", "dep:sha1", "dep:bt_bencode", "dep:tower", "dep:tracing-subscriber", "dep:url", "dep:reqwest", "dep:tokio", "dep:tokio-stream", "dep:async-trait"]
+scraper-clouddrive = ["scraper", "clouddrive"]
 
 [profile.release]
 lto = true

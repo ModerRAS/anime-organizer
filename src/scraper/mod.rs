@@ -20,7 +20,7 @@ pub mod matcher;
 pub mod sources;
 pub mod wiki_parser;
 
-#[cfg(feature = "clouddrive")]
+#[cfg(feature = "scraper")]
 pub mod download;
 
 pub use db_builder::{build_bangumi_db, BuildDbStats};

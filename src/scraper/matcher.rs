@@ -148,96 +148,96 @@ pub fn match_aliases(
 }
 
 /// 调用 LLM API (OpenCode/MiniMax/Anthropic) 进行别名匹配分析
+#[cfg(feature = "llm-api")]
 fn call_llm_api(
     scraped: &[ScrapedAnime],
     existing_aliases: &HashMap<String, AliasEntry>,
 ) -> Result<MatchResult> {
+    use reqwest::Client;
+    use tokio::runtime::Runtime;
+
     let prompt = build_prompt(scraped, existing_aliases);
 
-    #[cfg(feature = "llm-api")]
-    {
-        use reqwest::Client;
-        use tokio::runtime::Runtime;
+    let client = Client::new();
 
-        let client = Client::new();
+    let api_key = std::env::var("LLM_API_KEY")
+        .ok()
+        .unwrap_or_else(|| "fallback".to_string());
 
-        let api_key = std::env::var("LLM_API_KEY")
-            .ok()
-            .unwrap_or_else(|| "fallback".to_string());
+    let base_url = std::env::var("LLM_BASE_URL")
+        .ok()
+        .unwrap_or_else(|| "https://api.opencode.ai".to_string());
 
-        let base_url = std::env::var("LLM_BASE_URL")
-            .ok()
-            .unwrap_or_else(|| "https://api.opencode.ai".to_string());
+    let model = std::env::var("LLM_MODEL")
+        .ok()
+        .unwrap_or_else(|| "llama-3.2-3b-preview".to_string());
 
-        let model = std::env::var("LLM_MODEL")
-            .ok()
-            .unwrap_or_else(|| "llama-3.2-3b-preview".to_string());
+    let is_anthropic = model.starts_with("claude");
 
-        // Detect API type based on model name: Claude models use Anthropic API
-        let is_anthropic = model.starts_with("claude");
+    let rt = Runtime::new()
+        .map_err(|e| AppError::MetadataFetchError(format!("创建 tokio runtime 失败：{}", e)))?;
 
-        let rt = Runtime::new()
-            .map_err(|e| AppError::MetadataFetchError(format!("创建 tokio runtime 失败：{}", e)))?;
+    let response_result = if is_anthropic {
+        rt.block_on(
+            client
+                .post(format!("{}/v1/messages", base_url.trim_end_matches('/')))
+                .header("x-api-key", &api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("Content-Type", "application/json")
+                .json(&serde_json::json!({
+                    "model": model,
+                    "messages": [{
+                        "role": "user",
+                        "content": prompt
+                    }],
+                    "max_tokens": 1024
+                }))
+                .send(),
+        )
+    } else {
+        rt.block_on(
+            client
+                .post(format!(
+                    "{}/v1/chat/completions",
+                    base_url.trim_end_matches('/')
+                ))
+                .header("Authorization", format!("Bearer {}", api_key))
+                .header("Content-Type", "application/json")
+                .json(&serde_json::json!({
+                    "model": model,
+                    "messages": [{
+                        "role": "user",
+                        "content": prompt
+                    }],
+                    "temperature": 0.7,
+                    "max_tokens": 1024
+                }))
+                .send(),
+        )
+    };
 
-        let response_result = if is_anthropic {
-            rt.block_on(
-                client
-                    .post(format!("{}/v1/messages", base_url.trim_end_matches('/')))
-                    .header("x-api-key", &api_key)
-                    .header("anthropic-version", "2023-06-01")
-                    .header("Content-Type", "application/json")
-                    .json(&serde_json::json!({
-                        "model": model,
-                        "messages": [{
-                            "role": "user",
-                            "content": prompt
-                        }],
-                        "max_tokens": 1024
-                    }))
-                    .send(),
-            )
-        } else {
-            rt.block_on(
-                client
-                    .post(format!(
-                        "{}/v1/chat/completions",
-                        base_url.trim_end_matches('/')
-                    ))
-                    .header("Authorization", format!("Bearer {}", api_key))
-                    .header("Content-Type", "application/json")
-                    .json(&serde_json::json!({
-                        "model": model,
-                        "messages": [{
-                            "role": "user",
-                            "content": prompt
-                        }],
-                        "temperature": 0.7,
-                        "max_tokens": 1024
-                    }))
-                    .send(),
-            )
-        };
+    let response = response_result
+        .map_err(|e| AppError::MetadataFetchError(format!("LLM API 请求失败：{}", e)))?;
 
-        let response = response_result
-            .map_err(|e| AppError::MetadataFetchError(format!("LLM API 请求失败：{}", e)))?;
+    let text_result = rt.block_on(response.text());
+    let text = text_result
+        .map_err(|e| AppError::MetadataFetchError(format!("LLM API 响应解析失败：{}", e)))?;
 
-        let text_result = rt.block_on(response.text());
-        let text = text_result
-            .map_err(|e| AppError::MetadataFetchError(format!("LLM API 响应解析失败：{}", e)))?;
-
-        if is_anthropic {
-            parse_anthropic_response(&text)
-        } else {
-            parse_llm_response(&text)
-        }
+    if is_anthropic {
+        parse_anthropic_response(&text)
+    } else {
+        parse_llm_response(&text)
     }
+}
 
-    #[cfg(not(feature = "llm-api"))]
-    {
-        Err(AppError::MetadataFetchError(
-            "未启用 LLM API 功能 (--features llm-api)".to_string(),
-        ))
-    }
+#[cfg(not(feature = "llm-api"))]
+fn call_llm_api(
+    _scraped: &[ScrapedAnime],
+    _existing_aliases: &HashMap<String, AliasEntry>,
+) -> Result<MatchResult> {
+    Err(AppError::MetadataFetchError(
+        "未启用 LLM API 功能 (--features llm-api)".to_string(),
+    ))
 }
 
 /// 构建 LLM prompt
@@ -356,6 +356,7 @@ pub fn parse_llm_response(response: &str) -> Result<MatchResult> {
 }
 
 /// 解析 Anthropic API 返回的响应
+#[cfg(feature = "llm-api")]
 fn parse_anthropic_response(response: &str) -> Result<MatchResult> {
     #[derive(Deserialize)]
     struct AnthropicResponse {
@@ -550,6 +551,7 @@ mod tests {
         assert!(result.is_empty());
     }
 
+    #[cfg(feature = "llm-api")]
     #[test]
     fn test_parse_anthropic_response() {
         // Anthropic API returns: {"content": [{"text": "..."}]}
@@ -559,6 +561,7 @@ mod tests {
         assert_eq!(result.confident.len(), 1);
     }
 
+    #[cfg(feature = "llm-api")]
     #[test]
     fn test_parse_anthropic_response_empty() {
         let response = r#"{"content": [{"text": "[]"}]}"#;
