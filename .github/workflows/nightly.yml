@@ -67,6 +67,10 @@ jobs:
             sudo apt-get install -y gcc-aarch64-linux-gnu
           fi
 
+      - name: Install protoc (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install protobuf
+
       - name: Build release binary
         run: cargo build --release --features "scraper clouddrive" --target ${{ matrix.target }}
         env:
