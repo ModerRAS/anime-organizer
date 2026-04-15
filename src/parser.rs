@@ -31,13 +31,8 @@ use regex::Regex;
 use std::path::Path;
 use std::sync::LazyLock;
 
-/// 预编译的正则表达式
-static ANIME_FILE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"^\[(?P<publisher>[^\]]+)\]\s+(?P<anime>.+?)\s+-\s+(?P<episode>\d+)\s+(?P<tags>\[.+\])(?P<ext>\.\w+)$",
-    )
-    .expect("正则表达式编译失败")
-});
+static ANIME_FILE_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\[(?P<publisher>[^\]]+)\]").expect("正则表达式编译失败"));
 
 static SEASON_SUFFIX_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
@@ -192,15 +187,25 @@ impl FilenameParser {
     #[must_use]
     pub fn parse<P: AsRef<Path>>(file_path: P) -> Option<AnimeFileInfo> {
         let path = file_path.as_ref();
-        let filename = path.file_name()?.to_str()?;
+        let filename = path.to_str()?;
 
-        let caps = ANIME_FILE_REGEX.captures(filename)?;
+        let filename = if filename.starts_with('[') {
+            filename.to_string()
+        } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            name.to_string()
+        } else {
+            filename.to_string()
+        };
+
+        let caps = ANIME_FILE_REGEX.captures(&filename)?;
         let publisher = caps.name("publisher")?.as_str().trim().to_string();
-        let anime_name = caps.name("anime")?.as_str().trim().to_string();
-        let episode_raw = caps.name("episode")?.as_str();
-        let episode = format!("{:0>2}", episode_raw);
-        let tags = caps.name("tags")?.as_str().trim().to_string();
-        let extension = caps.name("ext")?.as_str().to_lowercase();
+        let publisher_end = caps.get(0)?.end();
+
+        let after_publisher = &filename[publisher_end..];
+
+        let (anime_name, episode, after_episode) = Self::parse_anime_episode(after_publisher)?;
+
+        let (tags, extension) = Self::parse_tags_and_ext(after_episode)?;
 
         Some(AnimeFileInfo {
             publisher,
@@ -210,5 +215,200 @@ impl FilenameParser {
             extension,
             original_path: path.to_string_lossy().to_string(),
         })
+    }
+
+    fn parse_anime_episode(input: &str) -> Option<(String, String, &str)> {
+        let input = input.trim_start();
+        let bytes = input.as_bytes();
+
+        let mut episode_info: Option<(usize, usize, usize)> = None;
+
+        for i in 0..bytes.len() {
+            if bytes[i] == b'-' && i > 0 {
+                let before = bytes[i - 1];
+                if before == b' ' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                    continue;
+                }
+                if before == b' ' && i + 2 < bytes.len() && bytes[i + 1] == b' ' {
+                    let mut num_start = i + 2;
+                    while num_start < bytes.len() && bytes[num_start] == b' ' {
+                        num_start += 1;
+                    }
+                    if num_start < bytes.len()
+                        && (bytes[num_start].is_ascii_digit() || bytes[num_start] == b'.')
+                    {
+                        let mut num_end = num_start;
+                        while num_end < bytes.len()
+                            && (bytes[num_end].is_ascii_digit() || bytes[num_end] == b'.')
+                        {
+                            num_end += 1;
+                        }
+                        let after_digits = if num_end < bytes.len() {
+                            bytes[num_end]
+                        } else {
+                            b' '
+                        };
+
+                        if after_digits == b' '
+                            || after_digits == b'['
+                            || after_digits == b'-'
+                            || num_end >= bytes.len()
+                        {
+                            episode_info = Some((i, num_start, num_end));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some((dash_pos, digit_start, digit_end)) = episode_info {
+            let episode_raw = std::str::from_utf8(&bytes[digit_start..digit_end]).ok()?;
+            let episode = if episode_raw.contains('.') {
+                episode_raw.to_string()
+            } else {
+                format!("{:0>2}", episode_raw)
+            };
+
+            let anime_name = input[..dash_pos].trim().to_string();
+            let after_episode = std::str::from_utf8(&bytes[digit_end..]).ok()?.trim_start();
+
+            return Some((anime_name, episode, after_episode));
+        }
+
+        // Try to find "[XX]" pattern (dmhy.org format with episode in brackets)
+        // Look for last occurrence of "[" followed by digits and "]"
+        for i in (0..bytes.len()).rev() {
+            if bytes[i] == b']' {
+                let mut j = i;
+                while j > 0 && bytes[j - 1] != b'[' {
+                    j -= 1;
+                }
+                if j > 0 && bytes[j - 1] == b'[' {
+                    let content = &bytes[j..i];
+                    if !content.is_empty() && content.iter().all(|&b| b.is_ascii_digit()) {
+                        let episode_str = std::str::from_utf8(content).ok()?;
+                        if let Ok(ep_num) = episode_str.parse::<u32>() {
+                            if (1..=9999).contains(&ep_num) {
+                                let episode = format!("{:0>2}", episode_str);
+                                let anime_name = input[..j - 1].trim().to_string();
+                                let after_episode =
+                                    std::str::from_utf8(&bytes[i + 1..]).ok()?.trim_start();
+                                return Some((anime_name, episode, after_episode));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    fn parse_tags_and_ext(input: &str) -> Option<(String, String)> {
+        let input = input.trim();
+        if input.is_empty() {
+            return None;
+        }
+
+        if input.ends_with(']') {
+            let mut open_stack: Vec<usize> = Vec::new();
+            for (i, c) in input.char_indices() {
+                if c == '[' {
+                    open_stack.push(i);
+                } else if c == ']' {
+                    if let Some(open_pos) = open_stack.pop() {
+                        let bracket_content = &input[open_pos + 1..i];
+                        if Self::looks_like_extension(bracket_content) {
+                            let tags = input[..open_pos].trim().to_string();
+                            return Some((tags, format!(".{}", bracket_content.to_lowercase())));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(dot_pos) = input.rfind('.') {
+            let ext = input[dot_pos + 1..].to_lowercase();
+            if Self::looks_like_extension(&ext) {
+                let tags = input[..dot_pos].trim().to_string();
+                return Some((tags, format!(".{}", ext)));
+            }
+        }
+
+        if input.ends_with(']') && input.contains('.') {
+            if let Some(dot_pos) = input.rfind('.') {
+                let ext = &input[dot_pos + 1..];
+                if Self::looks_like_extension(ext) {
+                    let before_dot = &input[..dot_pos];
+                    if before_dot.ends_with(']') {
+                        let mut bracket_positions: Vec<usize> = Vec::new();
+                        for (i, c) in input.char_indices() {
+                            if c == '[' {
+                                bracket_positions.push(i);
+                            }
+                        }
+                        for &bracket_start in bracket_positions.iter().rev() {
+                            let bracket_end = input[bracket_start..]
+                                .find(']')
+                                .map(|p| bracket_start + p)
+                                .unwrap_or(bracket_start);
+                            let content = &input[bracket_start + 1..bracket_end];
+                            if Self::looks_like_extension(content) {
+                                let tags = input[..bracket_start].trim().to_string();
+                                return Some((tags, format!(".{}", content.to_lowercase())));
+                            }
+                        }
+                    }
+                    let tags = before_dot.trim().to_string();
+                    return Some((tags, format!(".{}", ext.to_lowercase())));
+                }
+            }
+        }
+
+        if input.ends_with(']') && !input.contains('.') {
+            let mut bracket_positions: Vec<usize> = Vec::new();
+            for (i, c) in input.char_indices() {
+                if c == '[' {
+                    bracket_positions.push(i);
+                }
+            }
+            for &bracket_start in bracket_positions.iter().rev() {
+                let bracket_end = input[bracket_start..]
+                    .find(']')
+                    .map(|p| bracket_start + p)
+                    .unwrap_or(bracket_start);
+                let content = &input[bracket_start + 1..bracket_end];
+                if Self::looks_like_extension(content) {
+                    let tags = input[..bracket_start].trim().to_string();
+                    return Some((tags, format!(".{}", content.to_lowercase())));
+                }
+            }
+        }
+
+        None
+    }
+
+    fn looks_like_extension(s: &str) -> bool {
+        let s = s.trim();
+        if s.is_empty() {
+            return false;
+        }
+        let upper = s.to_uppercase();
+        matches!(
+            upper.as_str(),
+            "MP4"
+                | "MKV"
+                | "AVI"
+                | "MOV"
+                | "WMV"
+                | "FLV"
+                | "WEBM"
+                | "MPG"
+                | "MPEG"
+                | "3GP"
+                | "OGG"
+                | "TS"
+                | "M2TS"
+        )
     }
 }

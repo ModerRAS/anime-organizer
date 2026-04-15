@@ -1427,7 +1427,8 @@ fn test_parse_kametsu_your_lie_in_april_10() {
 
 #[test]
 fn test_parse_animeworld_that_time_i_got_reincarnated_as_a_slime_01() {
-    let path = PathBuf::from("[AnimeWorld] That Time I Got Reincarnated as a Slime - 01 [1080p].mkv");
+    let path =
+        PathBuf::from("[AnimeWorld] That Time I Got Reincarnated as a Slime - 01 [1080p].mkv");
     let result = FilenameParser::parse(&path);
     let info = result.expect("Parser should handle AnimeWorld format");
     assert_eq!(info.publisher, "AnimeWorld");
@@ -1437,7 +1438,8 @@ fn test_parse_animeworld_that_time_i_got_reincarnated_as_a_slime_01() {
 
 #[test]
 fn test_parse_animeworld_that_time_i_got_reincarnated_as_a_slime_02() {
-    let path = PathBuf::from("[AnimeWorld] That Time I Got Reincarnated as a Slime - 02 [720p].mkv");
+    let path =
+        PathBuf::from("[AnimeWorld] That Time I Got Reincarnated as a Slime - 02 [720p].mkv");
     let result = FilenameParser::parse(&path);
     let info = result.expect("Should parse episode");
     assert_eq!(info.episode, "02");
@@ -1445,7 +1447,8 @@ fn test_parse_animeworld_that_time_i_got_reincarnated_as_a_slime_02() {
 
 #[test]
 fn test_parse_animeworld_that_time_i_got_reincarnated_as_a_slime_03() {
-    let path = PathBuf::from("[AnimeWorld] That Time I Got Reincarnated as a Slime - 03 [1080p].mp4");
+    let path =
+        PathBuf::from("[AnimeWorld] That Time I Got Reincarnated as a Slime - 03 [1080p].mp4");
     let result = FilenameParser::parse(&path);
     let info = result.expect("Should parse episode");
     assert_eq!(info.episode, "03");
@@ -1453,7 +1456,8 @@ fn test_parse_animeworld_that_time_i_got_reincarnated_as_a_slime_03() {
 
 #[test]
 fn test_parse_animeworld_that_time_i_got_reincarnated_as_a_slime_04() {
-    let path = PathBuf::from("[AnimeWorld] That Time I Got Reincarnated as a Slime - 04 [720p].mkv");
+    let path =
+        PathBuf::from("[AnimeWorld] That Time I Got Reincarnated as a Slime - 04 [720p].mkv");
     let result = FilenameParser::parse(&path);
     let info = result.expect("Should parse episode");
     assert_eq!(info.episode, "04");
@@ -1461,7 +1465,8 @@ fn test_parse_animeworld_that_time_i_got_reincarnated_as_a_slime_04() {
 
 #[test]
 fn test_parse_animeworld_that_time_i_got_reincarnated_as_a_slime_05() {
-    let path = PathBuf::from("[AnimeWorld] That Time I Got Reincarnated as a Slime - 05 [1080p].mkv");
+    let path =
+        PathBuf::from("[AnimeWorld] That Time I Got Reincarnated as a Slime - 05 [1080p].mkv");
     let result = FilenameParser::parse(&path);
     let info = result.expect("Should parse episode");
     assert_eq!(info.episode, "05");
@@ -1469,7 +1474,8 @@ fn test_parse_animeworld_that_time_i_got_reincarnated_as_a_slime_05() {
 
 #[test]
 fn test_parse_animeworld_that_time_i_got_reincarnated_as_a_slime_06() {
-    let path = PathBuf::from("[AnimeWorld] That Time I Got Reincarnated as a Slime - 06 [720p].mp4");
+    let path =
+        PathBuf::from("[AnimeWorld] That Time I Got Reincarnated as a Slime - 06 [720p].mp4");
     let result = FilenameParser::parse(&path);
     let info = result.expect("Should parse episode");
     assert_eq!(info.episode, "06");
@@ -1477,7 +1483,8 @@ fn test_parse_animeworld_that_time_i_got_reincarnated_as_a_slime_06() {
 
 #[test]
 fn test_parse_animeworld_that_time_i_got_reincarnated_as_a_slime_07() {
-    let path = PathBuf::from("[AnimeWorld] That Time I Got Reincarnated as a Slime - 07 [1080p].mkv");
+    let path =
+        PathBuf::from("[AnimeWorld] That Time I Got Reincarnated as a Slime - 07 [1080p].mkv");
     let result = FilenameParser::parse(&path);
     let info = result.expect("Should parse episode");
     assert_eq!(info.episode, "07");
@@ -1485,7 +1492,8 @@ fn test_parse_animeworld_that_time_i_got_reincarnated_as_a_slime_07() {
 
 #[test]
 fn test_parse_animeworld_that_time_i_got_reincarnated_as_a_slime_08() {
-    let path = PathBuf::from("[AnimeWorld] That Time I Got Reincarnated as a Slime - 08 [720p].mkv");
+    let path =
+        PathBuf::from("[AnimeWorld] That Time I Got Reincarnated as a Slime - 08 [720p].mkv");
     let result = FilenameParser::parse(&path);
     let info = result.expect("Should parse episode");
     assert_eq!(info.episode, "08");
@@ -1493,7 +1501,8 @@ fn test_parse_animeworld_that_time_i_got_reincarnated_as_a_slime_08() {
 
 #[test]
 fn test_parse_animeworld_that_time_i_got_reincarnated_as_a_slime_09() {
-    let path = PathBuf::from("[AnimeWorld] That Time I Got Reincarnated as a Slime - 09 [1080p].mp4");
+    let path =
+        PathBuf::from("[AnimeWorld] That Time I Got Reincarnated as a Slime - 09 [1080p].mp4");
     let result = FilenameParser::parse(&path);
     let info = result.expect("Should parse episode");
     assert_eq!(info.episode, "09");
@@ -1501,7 +1510,8 @@ fn test_parse_animeworld_that_time_i_got_reincarnated_as_a_slime_09() {
 
 #[test]
 fn test_parse_animeworld_that_time_i_got_reincarnated_as_a_slime_10() {
-    let path = PathBuf::from("[AnimeWorld] That Time I Got Reincarnated as a Slime - 10 [720p].mkv");
+    let path =
+        PathBuf::from("[AnimeWorld] That Time I Got Reincarnated as a Slime - 10 [720p].mkv");
     let result = FilenameParser::parse(&path);
     let info = result.expect("Should parse episode");
     assert_eq!(info.episode, "10");

@@ -162,6 +162,9 @@ enum Commands {
     #[cfg(feature = "clouddrive")]
     /// 列出云盘目录内容
     ListFolder(ListFolderArgs),
+    #[cfg(feature = "torrent-scraper")]
+    /// 爬取 DMHY/Nyaa 的番剧种子文件名
+    TorrentScrape(TorrentScrapeArgs),
 }
 
 #[cfg(feature = "scraper")]
@@ -359,6 +362,34 @@ struct ListFolderArgs {
     path: String,
 }
 
+#[cfg(feature = "torrent-scraper")]
+#[derive(Args, Debug, Clone)]
+struct TorrentScrapeArgs {
+    /// 数据来源：dmhy、nyaa 或 all
+    #[arg(long, default_value = "all")]
+    source: TorrentSource,
+
+    /// Nyaa 搜索关键词（仅用于 nyaa 源）
+    #[arg(long, value_name = "KEYWORD")]
+    query: Option<String>,
+
+    /// 爬取页数（每页约 75 条）
+    #[arg(long, default_value_t = 1)]
+    pages: u32,
+
+    /// 输出文件路径
+    #[arg(long, short = 'o', value_name = "PATH")]
+    output: Option<PathBuf>,
+}
+
+#[cfg(feature = "torrent-scraper")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum TorrentSource {
+    Dmhy,
+    Nyaa,
+    All,
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("错误: {error}");
@@ -432,6 +463,12 @@ fn run_command(command: Commands) -> Result<(), AppError> {
         Commands::AddOffline(args) => run_add_offline(args),
         #[cfg(feature = "clouddrive")]
         Commands::ListFolder(args) => run_list_folder(args),
+        #[cfg(feature = "torrent-scraper")]
+        Commands::TorrentScrape(args) => {
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|e| AppError::MetadataFetchError(format!("创建异步运行时失败: {e}")))?;
+            runtime.block_on(run_torrent_scrape(args))
+        }
     }
 }
 
@@ -1618,6 +1655,7 @@ fn run_list_folder(args: ListFolderArgs) -> Result<(), AppError> {
     })
 }
 
+#[allow(dead_code)]
 fn format_size(bytes: i64) -> String {
     const KB: i64 = 1024;
     const MB: i64 = KB * 1024;
@@ -1632,4 +1670,57 @@ fn format_size(bytes: i64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+#[cfg(feature = "torrent-scraper")]
+async fn run_torrent_scrape(args: TorrentScrapeArgs) -> Result<(), AppError> {
+    use anime_organizer::torrent::{dmhy, nyaa};
+
+    let pages = args.pages.clamp(1, 10);
+    let mut all_titles = Vec::new();
+
+    match args.source {
+        TorrentSource::Dmhy => {
+            println!("正在从 DMHY 爬取种子文件列表 ({} 页)...", pages);
+            all_titles = dmhy::scrape_dmhy(pages).await?;
+        }
+        TorrentSource::Nyaa => {
+            let query = args.query.as_deref().unwrap_or("anime");
+            println!(
+                "正在从 Nyaa 爬取种子文件列表，关键词: {} ({} 页)...",
+                query, pages
+            );
+            all_titles = nyaa::scrape_search(query, pages).await?;
+        }
+        TorrentSource::All => {
+            println!("正在从 DMHY 爬取 ({} 页)...", pages);
+            if let Ok(dmhy_titles) = dmhy::scrape_dmhy(pages).await {
+                all_titles.extend(dmhy_titles);
+            }
+
+            let query = args.query.as_deref().unwrap_or("anime");
+            println!("正在从 Nyaa 爬取，关键词: {} ({} 页)...", query, pages);
+            if let Ok(nyaa_titles) = nyaa::scrape_search(query, pages).await {
+                all_titles.extend(nyaa_titles);
+            }
+        }
+    }
+
+    if all_titles.is_empty() {
+        println!("未爬取到任何文件");
+        return Ok(());
+    }
+
+    let text = anime_organizer::torrent::dmhy::titles_to_text(&all_titles);
+
+    if let Some(ref output_path) = args.output {
+        std::fs::write(output_path, &text)
+            .map_err(|e| AppError::Io(std::io::Error::other(format!("写入文件失败: {e}"))))?;
+        println!("已保存到: {}", output_path.display());
+    } else {
+        print!("{}", text);
+    }
+
+    println!("\n共爬取 {} 个文件名", all_titles.len());
+    Ok(())
 }

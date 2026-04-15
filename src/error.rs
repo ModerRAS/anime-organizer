@@ -74,6 +74,14 @@ pub enum AppError {
     /// TMDB API 错误
     #[error("TMDB API 错误: {0}")]
     TmdbApiError(String),
+
+    /// Torrent 页面获取失败
+    #[error("Torrent 获取失败: {0}")]
+    TorrentFetchError(String),
+
+    /// Torrent 响应解析失败
+    #[error("Torrent 解析失败: {0}")]
+    TorrentParseError(String),
 }
 
 /// 应用程序结果类型别名

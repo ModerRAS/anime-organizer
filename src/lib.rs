@@ -43,6 +43,8 @@ pub mod parser;
 pub mod rss;
 #[cfg(feature = "scraper")]
 pub mod scraper;
+#[cfg(feature = "torrent-scraper")]
+pub mod torrent;
 
 pub use error::{AppError, Result};
 pub use metadata::AnimeMetadata;
