@@ -1,5 +1,7 @@
 use crate::error::{AppError, Result};
+#[cfg(feature = "clouddrive")]
 use crate::rss::proxy::{build_http_client, ProxyConfig};
+use crate::scraper::download::HttpDownloader;
 use rusqlite::Connection;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
@@ -223,9 +225,9 @@ pub async fn build_bangumi_db(
     if verbose {
         eprintln!("下载 Bangumi Archive: {}", latest_url);
     }
-    let zip_path = tokio::task::spawn_blocking(move || download_zip(&latest_url, &temp_path))
+    let zip_path = download_zip(&latest_url, &temp_path)
         .await
-        .map_err(|e| AppError::MetadataFetchError(format!("下载任务失败: {e}")))??;
+        .map_err(|e| AppError::MetadataFetchError(format!("下载任务失败: {e}")))?;
 
     let download_size = std::fs::metadata(&zip_path).map_err(AppError::Io)?.len();
     if verbose {
@@ -267,8 +269,18 @@ pub async fn build_bangumi_db(
 }
 
 async fn fetch_latest_version_url() -> Result<String> {
-    let proxy_config = ProxyConfig::from_env();
-    let client = build_http_client(&proxy_config)
+    #[cfg(feature = "clouddrive")]
+    let client = {
+        let proxy_config = ProxyConfig::from_env();
+        build_http_client(&proxy_config)
+            .map_err(|e| AppError::MetadataFetchError(format!("创建 HTTP 客户端失败: {e}")))?
+    };
+
+    #[cfg(not(feature = "clouddrive"))]
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
         .map_err(|e| AppError::MetadataFetchError(format!("创建 HTTP 客户端失败: {e}")))?;
 
     let latest_url = "https://raw.githubusercontent.com/bangumi/Archive/master/aux/latest.json";
@@ -293,48 +305,28 @@ async fn fetch_latest_version_url() -> Result<String> {
     Ok(version.download_url)
 }
 
-fn download_zip(url: &str, temp_dir: &Path) -> Result<PathBuf> {
-    let http_proxy = std::env::var("http_proxy")
-        .or_else(|_| std::env::var("HTTP_PROXY"))
-        .ok();
-
+async fn download_zip(url: &str, temp_dir: &Path) -> Result<PathBuf> {
     let zip_path = temp_dir.join("bangumi_dump.zip");
 
-    let mut cmd = std::process::Command::new("aria2c");
-    cmd.arg("-x16")
-        .arg("-s16")
-        .arg("-j1")
-        .arg("-d")
-        .arg(temp_dir.to_string_lossy().as_ref())
-        .arg("-o")
-        .arg("bangumi_dump.zip")
-        .arg("--max-connection-per-server=16")
-        .arg("--max-tries=5")
-        .arg("--retry-wait=10")
-        .arg("--timeout=60")
-        .arg("--connect-timeout=30")
-        .arg("--disk-cache=32M")
-        .args(["--console-log-level=info"])
-        .arg(url);
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .map_err(|e| AppError::MetadataFetchError(format!("创建 HTTP 客户端失败: {e}")))?;
 
-    if let Some(ref proxy) = http_proxy {
-        cmd.arg("--all-proxy").arg(proxy);
-    }
+    let downloader =
+        HttpDownloader::with_client(url.to_string(), temp_dir.to_path_buf(), client, true)
+            .with_output_path(zip_path.clone())
+            .with_chunk_count(16);
 
-    let status = cmd
-        .status()
-        .map_err(|e| AppError::MetadataFetchError(format!("启动 aria2c 失败: {e}")))?;
-
-    if !status.success() {
-        return Err(AppError::MetadataFetchError(format!(
-            "aria2c 下载失败 (exit code {:?})",
-            status.code()
-        )));
-    }
+    downloader
+        .download_with_progress()
+        .await
+        .map_err(|e| AppError::MetadataFetchError(format!("下载失败: {e}")))?;
 
     if !zip_path.exists() {
         return Err(AppError::MetadataFetchError(
-            "aria2c 下载完成但文件不存在".to_string(),
+            "下载完成但文件不存在".to_string(),
         ));
     }
 

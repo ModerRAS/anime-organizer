@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, Result};
+#[cfg(feature = "clouddrive")]
 use crate::rss::proxy::{build_http_client, ProxyConfig};
 
 /// 刮削到的动画条目
@@ -59,8 +60,15 @@ pub struct Scraper {
 impl Scraper {
     /// 创建刮削器实例
     pub fn new() -> Self {
-        let proxy_config = ProxyConfig::from_env();
-        let http = build_http_client(&proxy_config).unwrap_or_else(|_| reqwest::Client::new());
+        #[cfg(feature = "clouddrive")]
+        let http = {
+            let proxy_config = ProxyConfig::from_env();
+            build_http_client(&proxy_config).unwrap_or_else(|_| reqwest::Client::new())
+        };
+
+        #[cfg(not(feature = "clouddrive"))]
+        let http = reqwest::Client::new();
+
         Self { http }
     }
 

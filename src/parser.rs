@@ -1,6 +1,7 @@
 //! 文件名解析模块
 //!
 //! 该模块负责解析符合特定格式的动漫文件名，并提取关键信息。
+#![allow(non_snake_case)]
 //!
 //! # 支持的文件名格式
 //!
@@ -21,6 +22,10 @@
 //!     assert_eq!(info.episode, "07");
 //! }
 //! ```
+//!
+//! # 测试模块
+//!
+//! 测试位于 `tests/parser/` 目录，按发布组分类组织。
 
 use regex::Regex;
 use std::path::Path;
@@ -205,150 +210,5 @@ impl FilenameParser {
             extension,
             original_path: path.to_string_lossy().to_string(),
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    #[test]
-    fn test_parse_valid_filename_ani() {
-        let path = PathBuf::from(
-            "test/[ANi] 妖怪旅館營業中 貳 - 07 [1080P][Baha][WEB-DL][AAC AVC][CHT].mp4",
-        );
-        let result = FilenameParser::parse(&path).unwrap();
-
-        assert_eq!(result.publisher, "ANi");
-        assert_eq!(result.anime_name, "妖怪旅館營業中 貳");
-        assert_eq!(result.episode, "07");
-        assert_eq!(result.tags, "[1080P][Baha][WEB-DL][AAC AVC][CHT]");
-        assert_eq!(result.extension, ".mp4");
-    }
-
-    #[test]
-    fn test_parse_valid_filename_subsplease() {
-        let path = PathBuf::from("test/[SubsPlease] 间谍过家家 - 12 [1080p].mkv");
-        let result = FilenameParser::parse(&path).unwrap();
-
-        assert_eq!(result.publisher, "SubsPlease");
-        assert_eq!(result.anime_name, "间谍过家家");
-        assert_eq!(result.episode, "12");
-        assert_eq!(result.tags, "[1080p]");
-        assert_eq!(result.extension, ".mkv");
-    }
-
-    #[test]
-    fn test_parse_valid_filename_ember() {
-        let path = PathBuf::from(
-            "test/[EMBER] 进击的巨人 The Final Season - 01 [1080p][Multiple Subtitle].avi",
-        );
-        let result = FilenameParser::parse(&path).unwrap();
-
-        assert_eq!(result.publisher, "EMBER");
-        assert_eq!(result.anime_name, "进击的巨人 The Final Season");
-        assert_eq!(result.episode, "01");
-        assert_eq!(result.tags, "[1080p][Multiple Subtitle]");
-        assert_eq!(result.extension, ".avi");
-    }
-
-    #[test]
-    fn test_parse_single_digit_episode_pads_with_zero() {
-        let test_cases = [
-            ("[ANi] 测试 - 1 [Tag].mp4", "01"),
-            ("[ANi] 测试 - 5 [Tag].mp4", "05"),
-            ("[ANi] 测试 - 9 [Tag].mp4", "09"),
-            ("[ANi] 测试 - 10 [Tag].mp4", "10"),
-        ];
-
-        for (filename, expected_episode) in test_cases {
-            let path = PathBuf::from(format!("test/{filename}"));
-            let result = FilenameParser::parse(&path).unwrap();
-            assert_eq!(result.episode, expected_episode, "文件名: {filename}");
-        }
-    }
-
-    #[test]
-    fn test_parse_invalid_filename_returns_none() {
-        let invalid_filenames = [
-            "测试 - 01.mp4",
-            "[ANi] 测试.mp4",
-            "测试 - 01 [Tag].mp4",
-            "[ANi] 测试 - 01 Tag.mp4",
-            "",
-            "random_file.txt",
-        ];
-
-        for filename in invalid_filenames {
-            let path = PathBuf::from(format!("test/{filename}"));
-            let result = FilenameParser::parse(&path);
-            assert!(result.is_none(), "应返回 None: {filename}");
-        }
-    }
-
-    #[test]
-    fn test_parse_extension_normalized_to_lowercase() {
-        let test_cases = [
-            ("[ANi] 测试 - 01 [Tag].MP4", ".mp4"),
-            ("[ANi] 测试 - 01 [Tag].Mp4", ".mp4"),
-            ("[ANi] 测试 - 01 [Tag].MKV", ".mkv"),
-        ];
-
-        for (filename, expected_ext) in test_cases {
-            let path = PathBuf::from(format!("test/{filename}"));
-            let result = FilenameParser::parse(&path).unwrap();
-            assert_eq!(result.extension, expected_ext, "文件名: {filename}");
-        }
-    }
-
-    #[test]
-    fn test_target_filename() {
-        let info = AnimeFileInfo {
-            publisher: "ANi".to_string(),
-            anime_name: "测试".to_string(),
-            episode: "01".to_string(),
-            tags: "[1080P]".to_string(),
-            extension: ".mp4".to_string(),
-            original_path: "/path/to/file".to_string(),
-        };
-
-        assert_eq!(info.target_filename(), "01 [1080P].mp4");
-    }
-
-    #[test]
-    fn test_split_series_and_season() {
-        assert_eq!(
-            split_series_and_season("Test Anime Season 2"),
-            ("Test Anime".to_string(), Some(2))
-        );
-        assert_eq!(
-            split_series_and_season("测试动画 第3季"),
-            ("测试动画".to_string(), Some(3))
-        );
-        assert_eq!(
-            split_series_and_season("妖怪旅館營業中 貳"),
-            ("妖怪旅館營業中".to_string(), Some(2))
-        );
-        assert_eq!(
-            split_series_and_season("進撃の巨人 The Final Season"),
-            ("進撃の巨人 The Final Season".to_string(), None)
-        );
-    }
-
-    #[test]
-    fn test_series_helpers() {
-        let info = AnimeFileInfo {
-            publisher: "ANi".to_string(),
-            anime_name: "测试动画 Season 2".to_string(),
-            episode: "01".to_string(),
-            tags: "[1080P]".to_string(),
-            extension: ".mp4".to_string(),
-            original_path: "test.mp4".to_string(),
-        };
-
-        assert_eq!(info.series_name(), "测试动画");
-        assert_eq!(info.season_number(), Some(2));
-        assert_eq!(info.season_dir_name(), "Season 2");
     }
 }
