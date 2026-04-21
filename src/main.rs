@@ -35,24 +35,25 @@ use walkdir::WalkDir;
 
 /// 默认支持的视频扩展名
 const DEFAULT_EXTENSIONS: &[&str] = &[".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".rmvb"];
+const APP_LONG_ABOUT: &str = concat!(
+    "AnimeOrganizer v",
+    env!("CARGO_PKG_VERSION"),
+    " - 跨平台动漫文件整理工具\n\n",
+    "默认模式用于批量整理动漫文件：\n",
+    "    aniorg --source=\"D:\\Downloads\" --target=\"E:\\Anime\"\n\n",
+    "启用元数据刮削：\n",
+    "    aniorg --source=\"D:\\Downloads\" --scrape-metadata --tmdb-api-key=\"...\"\n\n",
+    "启用 scraper 子命令（需以 --features scraper 编译）：\n",
+    "    aniorg scrape --days 7 --format json\n",
+    "    aniorg match --input scraped.json --format github\n"
+);
 
 /// 跨平台动漫文件整理工具
 #[derive(Parser, Debug)]
 #[command(name = "aniorg")]
-#[command(version = "1.0.0")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "轻量级、跨平台动漫文件整理工具")]
-#[command(long_about = r#"AnimeOrganizer v1.0.0 - 跨平台动漫文件整理工具
-
-默认模式用于批量整理动漫文件：
-    aniorg --source="D:\Downloads" --target="E:\Anime"
-
-启用元数据刮削：
-    aniorg --source="D:\Downloads" --scrape-metadata --tmdb-api-key="..."
-
-启用 scraper 子命令（需以 --features scraper 编译）：
-    aniorg scrape --days 7 --format json
-    aniorg match --input scraped.json --format github
-"#)]
+#[command(long_about = APP_LONG_ABOUT)]
 struct Cli {
     #[cfg(any(
         feature = "scraper",

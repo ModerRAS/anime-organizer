@@ -1,9 +1,10 @@
-name: Nightly
+name: Main Build
 
 on:
-  schedule:
-    # 03:00 UTC daily
-    - cron: '0 3 * * *'
+  push:
+    branches:
+      - master
+      - main
   workflow_dispatch:
 
 env:
@@ -11,9 +12,10 @@ env:
 
 jobs:
   meta:
-    name: Compute nightly version
+    name: Compute branch build version
     runs-on: ubuntu-latest
     outputs:
+      branch_name: ${{ steps.meta.outputs.branch_name }}
       build_version: ${{ steps.meta.outputs.build_version }}
       release_name: ${{ steps.meta.outputs.release_name }}
       release_tag: ${{ steps.meta.outputs.release_tag }}
@@ -24,19 +26,20 @@ jobs:
         shell: bash
         run: |
           base_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-          build_version="${base_version}-nightly.${GITHUB_RUN_NUMBER}"
+          branch_name="${GITHUB_REF_NAME}"
+          build_version="${base_version}-${branch_name}.${GITHUB_RUN_NUMBER}"
+          echo "branch_name=${branch_name}" >> "$GITHUB_OUTPUT"
           echo "build_version=${build_version}" >> "$GITHUB_OUTPUT"
-          echo "release_name=Nightly ${build_version}" >> "$GITHUB_OUTPUT"
-          echo "release_tag=nightly-v${build_version}" >> "$GITHUB_OUTPUT"
+          echo "release_name=Main Build ${build_version}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${branch_name}-v${build_version}" >> "$GITHUB_OUTPUT"
 
   build:
     needs: meta
-    name: Nightly build ${{ matrix.target }}
+    name: Branch build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
-          # Linux
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
@@ -46,16 +49,12 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
-
-          # Windows
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             archive: zip
           - target: aarch64-pc-windows-msvc
             os: windows-latest
             archive: zip
-
-          # macOS
           - target: x86_64-apple-darwin
             os: macos-latest
             archive: tar.gz
@@ -70,7 +69,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply nightly build version
+      - name: Apply branch build version
         shell: pwsh
         run: |
           $path = 'Cargo.toml'
@@ -137,7 +136,7 @@ jobs:
           path: ${{ env.ARCHIVE_NAME }}.${{ matrix.archive }}
 
   release:
-    name: Publish nightly release
+    name: Publish branch release
     needs:
       - meta
       - build
@@ -150,7 +149,7 @@ jobs:
         with:
           path: artifacts
 
-      - name: Create or update nightly versioned release
+      - name: Create or update branch release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ needs.meta.outputs.release_tag }}
@@ -160,7 +159,8 @@ jobs:
           generate_release_notes: false
           files: artifacts/**/*
           body: |
-            Nightly build version: ${{ needs.meta.outputs.build_version }}
+            Branch build version: ${{ needs.meta.outputs.build_version }}
+            Branch: ${{ needs.meta.outputs.branch_name }}
             Commit: ${{ github.sha }}
             Run: ${{ github.run_id }}
         env:
