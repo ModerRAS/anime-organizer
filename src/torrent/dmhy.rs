@@ -205,7 +205,7 @@ mod tests {
 查看評論"#;
 
         let results = parse_file_list_from_html(html).unwrap();
-        assert!(results.len() >= 1);
+        assert!(!results.is_empty());
     }
 
     #[test]

@@ -23,7 +23,7 @@
 //!     original_path: "/downloads/[ANi] 测试 - 01 [1080P].mp4".to_string(),
 //! };
 //!
-//! let result = FileOrganizer::organize(&info, "/anime", OperationMode::Copy, false);
+//! let result = FileOrganizer::organize(&info, "/anime", OperationMode::Copy, false, false);
 //! ```
 
 use crate::error::{AppError, Result};

@@ -41,8 +41,10 @@ static SEASON_SUFFIX_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         Regex::new(r"(?i)^(?P<title>.+?)\s+s(?P<num>\d{1,2})$").expect("季信息正则表达式编译失败"),
         Regex::new(r"(?i)^(?P<title>.+?)\s+(?P<num>\d{1,2})(?:st|nd|rd|th)\s+season$")
             .expect("季信息正则表达式编译失败"),
-        Regex::new(r"^(?P<title>.+?)\s*第(?P<num>\d{1,2}|[一二三四五六七八九十]+)季$")
-            .expect("季信息正则表达式编译失败"),
+        Regex::new(
+            r"^(?P<title>.+?)\s*第(?P<num>\d{1,2}|[一二三四五六七八九十]+)季(?:\s*[~～].+)?$",
+        )
+        .expect("季信息正则表达式编译失败"),
         Regex::new(r"^(?P<title>.+?)\s*(?P<num>\d{1,2}|[一二三四五六七八九十]+)期$")
             .expect("季信息正则表达式编译失败"),
         Regex::new(
@@ -240,10 +242,21 @@ impl FilenameParser {
                         && (bytes[num_start].is_ascii_digit() || bytes[num_start] == b'.')
                     {
                         let mut num_end = num_start;
-                        while num_end < bytes.len()
-                            && (bytes[num_end].is_ascii_digit() || bytes[num_end] == b'.')
-                        {
-                            num_end += 1;
+                        while num_end < bytes.len() {
+                            if bytes[num_end].is_ascii_digit() {
+                                num_end += 1;
+                                continue;
+                            }
+
+                            if bytes[num_end] == b'.'
+                                && num_end + 1 < bytes.len()
+                                && bytes[num_end + 1].is_ascii_digit()
+                            {
+                                num_end += 1;
+                                continue;
+                            }
+
+                            break;
                         }
                         let after_digits = if num_end < bytes.len() {
                             bytes[num_end]
@@ -254,6 +267,7 @@ impl FilenameParser {
                         if after_digits == b' '
                             || after_digits == b'['
                             || after_digits == b'-'
+                            || after_digits == b'.'
                             || num_end >= bytes.len()
                         {
                             episode_info = Some((i, num_start, num_end));

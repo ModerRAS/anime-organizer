@@ -32,7 +32,7 @@ impl std::fmt::Display for TorrentSource {
     }
 }
 
-pub fn sorted_unique_title_lines<'a>(titles: &'a [ScrapedTitle]) -> Vec<&'a str> {
+pub fn sorted_unique_title_lines(titles: &[ScrapedTitle]) -> Vec<&str> {
     titles
         .iter()
         .map(|title| title.title.as_str())

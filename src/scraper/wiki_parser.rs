@@ -70,10 +70,8 @@ fn parse_infobox(text: &str) -> InfoboxFields {
 
             match key {
                 "制作公司" => fields.studio = Some(cleanup_value(value)),
-                "导演" | "监督" => {
-                    if fields.director.is_none() {
-                        fields.director = Some(cleanup_value(value));
-                    }
+                "导演" | "监督" if fields.director.is_none() => {
+                    fields.director = Some(cleanup_value(value));
                 }
                 "动画制作" => fields.animation_production = Some(cleanup_value(value)),
                 "系列构成" => fields.series_composition = Some(cleanup_value(value)),
