@@ -72,6 +72,7 @@ impl FileOrganizer {
     /// * `target_root` - 目标根目录
     /// * `mode` - 操作模式
     /// * `dry_run` - 是否为预览模式
+    /// * `season_mode` - 是否使用 Kodi 两层目录结构（`番名/Season N/`）
     ///
     /// # 返回值
     ///
@@ -98,7 +99,11 @@ impl FileOrganizer {
     ///     original_path: "/downloads/test.mp4".to_string(),
     /// };
     ///
-    /// FileOrganizer::organize(&info, "/anime", OperationMode::Copy, false)?;
+    /// // 常规模式：`/anime/测试/01 [1080P].mp4`
+    /// FileOrganizer::organize(&info, "/anime", OperationMode::Copy, false, false)?;
+    ///
+    /// // Kodi 两层目录模式：`/anime/测试/Season 1/01 [1080P].mp4`
+    /// FileOrganizer::organize(&info, "/anime", OperationMode::Copy, false, true)?;
     /// # Ok::<(), anime_organizer::error::AppError>(())
     /// ```
     pub fn organize<P: AsRef<Path>>(
@@ -106,8 +111,16 @@ impl FileOrganizer {
         target_root: P,
         mode: OperationMode,
         dry_run: bool,
+        season_mode: bool,
     ) -> Result<()> {
-        let target_dir = target_root.as_ref().join(&anime_file.anime_name);
+        let target_dir = if season_mode {
+            target_root
+                .as_ref()
+                .join(anime_file.series_name())
+                .join(anime_file.season_dir_name())
+        } else {
+            target_root.as_ref().join(&anime_file.anime_name)
+        };
         Self::organize_to_dir(anime_file, target_dir, mode, dry_run).map(|_| ())
     }
 
@@ -224,8 +237,13 @@ mod tests {
         let source_file = create_test_file(source_dir.path(), "test.mp4", "test content");
         let anime_info = create_test_anime_info(&source_file);
 
-        let result =
-            FileOrganizer::organize(&anime_info, target_dir.path(), OperationMode::Move, false);
+        let result = FileOrganizer::organize(
+            &anime_info,
+            target_dir.path(),
+            OperationMode::Move,
+            false,
+            false,
+        );
 
         assert!(result.is_ok());
         let expected_path = target_dir.path().join("测试").join("01 [1080P].mp4");
@@ -242,8 +260,13 @@ mod tests {
         let source_file = create_test_file(source_dir.path(), "test.mp4", "test content");
         let anime_info = create_test_anime_info(&source_file);
 
-        let result =
-            FileOrganizer::organize(&anime_info, target_dir.path(), OperationMode::Copy, false);
+        let result = FileOrganizer::organize(
+            &anime_info,
+            target_dir.path(),
+            OperationMode::Copy,
+            false,
+            false,
+        );
 
         assert!(result.is_ok());
         let expected_path = target_dir.path().join("测试").join("01 [1080P].mp4");
@@ -261,8 +284,13 @@ mod tests {
         let source_file = create_test_file(source_dir.path(), "test.mp4", "test content");
         let anime_info = create_test_anime_info(&source_file);
 
-        let result =
-            FileOrganizer::organize(&anime_info, target_dir.path(), OperationMode::Move, true);
+        let result = FileOrganizer::organize(
+            &anime_info,
+            target_dir.path(),
+            OperationMode::Move,
+            true,
+            false,
+        );
 
         assert!(result.is_ok());
         assert!(source_file.exists());
@@ -278,8 +306,13 @@ mod tests {
         let source_file = create_test_file(source_dir.path(), "test.mp4", "test content");
         let anime_info = create_test_anime_info(&source_file);
 
-        let result =
-            FileOrganizer::organize(&anime_info, &nested_target, OperationMode::Copy, false);
+        let result = FileOrganizer::organize(
+            &anime_info,
+            &nested_target,
+            OperationMode::Copy,
+            false,
+            false,
+        );
 
         assert!(result.is_ok());
         assert!(nested_target.join("测试").exists());
@@ -298,8 +331,13 @@ mod tests {
         fs::create_dir_all(&target_anime_dir).unwrap();
         create_test_file(&target_anime_dir, "01 [1080P].mp4", "old content");
 
-        let result =
-            FileOrganizer::organize(&anime_info, target_dir.path(), OperationMode::Copy, false);
+        let result = FileOrganizer::organize(
+            &anime_info,
+            target_dir.path(),
+            OperationMode::Copy,
+            false,
+            false,
+        );
 
         assert!(result.is_ok());
         let expected_path = target_dir.path().join("测试").join("01 [1080P].mp4");
@@ -333,5 +371,100 @@ mod tests {
 
         assert_eq!(target_path, season_dir.join("01 [1080P].mp4"));
         assert!(target_path.exists());
+    }
+
+    #[test]
+    fn test_organize_season_mode_true() {
+        let source_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+
+        let source_file = create_test_file(source_dir.path(), "test.mp4", "test content");
+        let anime_info = AnimeFileInfo {
+            publisher: "ANi".to_string(),
+            anime_name: "Test Anime 第2季".to_string(),
+            episode: "01".to_string(),
+            tags: "[1080P]".to_string(),
+            extension: ".mp4".to_string(),
+            original_path: source_file.to_string_lossy().to_string(),
+        };
+
+        let result = FileOrganizer::organize(
+            &anime_info,
+            target_dir.path(),
+            OperationMode::Copy,
+            false,
+            true,
+        );
+
+        assert!(result.is_ok());
+        let expected_path = target_dir
+            .path()
+            .join("Test Anime")
+            .join("Season 2")
+            .join("01 [1080P].mp4");
+        assert!(expected_path.exists());
+    }
+
+    #[test]
+    fn test_organize_season_mode_false_backward_compatible() {
+        let source_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+
+        let source_file = create_test_file(source_dir.path(), "test.mp4", "test content");
+        let anime_info = AnimeFileInfo {
+            publisher: "ANi".to_string(),
+            anime_name: "Test Anime 第2季".to_string(),
+            episode: "01".to_string(),
+            tags: "[1080P]".to_string(),
+            extension: ".mp4".to_string(),
+            original_path: source_file.to_string_lossy().to_string(),
+        };
+
+        let result = FileOrganizer::organize(
+            &anime_info,
+            target_dir.path(),
+            OperationMode::Copy,
+            false,
+            false,
+        );
+
+        assert!(result.is_ok());
+        let expected_path = target_dir
+            .path()
+            .join("Test Anime 第2季")
+            .join("01 [1080P].mp4");
+        assert!(expected_path.exists());
+    }
+
+    #[test]
+    fn test_organize_season_mode_numeric_suffix() {
+        let source_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+
+        let source_file = create_test_file(source_dir.path(), "test.mp4", "test content");
+        let anime_info = AnimeFileInfo {
+            publisher: "ANi".to_string(),
+            anime_name: "異世界悠閒農家 2".to_string(),
+            episode: "03".to_string(),
+            tags: "[1080P]".to_string(),
+            extension: ".mp4".to_string(),
+            original_path: source_file.to_string_lossy().to_string(),
+        };
+
+        let result = FileOrganizer::organize(
+            &anime_info,
+            target_dir.path(),
+            OperationMode::Copy,
+            false,
+            true,
+        );
+
+        assert!(result.is_ok());
+        let expected_path = target_dir
+            .path()
+            .join("異世界悠閒農家")
+            .join("Season 2")
+            .join("03 [1080P].mp4");
+        assert!(expected_path.exists());
     }
 }

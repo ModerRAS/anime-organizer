@@ -984,6 +984,7 @@ fn create_episode_nfo(file: &AnimeFileInfo, meta: &AnimeMetadata) -> EpisodeNfo 
     }
 }
 
+#[allow(dead_code)]
 fn organize_file(
     anime_file: &AnimeFileInfo,
     target: &Path,
