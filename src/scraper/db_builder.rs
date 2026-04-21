@@ -764,13 +764,8 @@ fn insert_episodes_batch(batch: &[EpisodeRecord], conn: &Connection) -> Result<(
     for e in batch {
         let ep_type = match &e.ep_type {
             serde_json::Value::Number(n) => n.as_i64().unwrap_or(0) as i32,
-            serde_json::Value::Bool(b) => {
-                if *b {
-                    1
-                } else {
-                    0
-                }
-            }
+            serde_json::Value::Bool(b) if *b => 1,
+            serde_json::Value::Bool(_) => 0,
             _ => 0,
         };
         let disc = match &e.disc {

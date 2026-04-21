@@ -133,27 +133,23 @@ pub fn parse_rss(xml: &str) -> Result<Vec<RssItem>> {
                 current_tag = None;
             }
 
-            Ok(Event::Text(e)) => {
-                if in_item {
-                    if let Some(ref mut builder) = current_item {
-                        if let Some(ref tag) = current_tag {
-                            let text = match e.unescape() {
-                                Ok(t) => t.into_owned(),
-                                Err(_) => continue,
-                            };
-                            builder.collect_text(tag, text);
-                        }
+            Ok(Event::Text(e)) if in_item => {
+                if let Some(ref mut builder) = current_item {
+                    if let Some(ref tag) = current_tag {
+                        let text = match e.unescape() {
+                            Ok(t) => t.into_owned(),
+                            Err(_) => continue,
+                        };
+                        builder.collect_text(tag, text);
                     }
                 }
             }
 
-            Ok(Event::CData(e)) => {
-                if in_item {
-                    if let Some(ref mut builder) = current_item {
-                        if let Some(ref tag) = current_tag {
-                            let text = String::from_utf8_lossy(e.as_ref()).trim().to_string();
-                            builder.collect_text(tag, text);
-                        }
+            Ok(Event::CData(e)) if in_item => {
+                if let Some(ref mut builder) = current_item {
+                    if let Some(ref tag) = current_tag {
+                        let text = String::from_utf8_lossy(e.as_ref()).trim().to_string();
+                        builder.collect_text(tag, text);
                     }
                 }
             }
