@@ -49,6 +49,8 @@ static SEASON_SUFFIX_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
             r"^(?P<title>.+?)\s+(?P<num>II|III|IV|V|VI|VII|VIII|IX|X|貳|贰|弐|二期|三期|四期)$",
         )
         .expect("季信息正则表达式编译失败"),
+        // 仅匹配数字 >= 2 的季号，如 "Anime 2"、"Anime 12"
+        Regex::new(r"^(?P<title>.+?)\s+(?P<num>[2-9]\d*)$").expect("季信息正则表达式编译失败"),
     ]
 });
 

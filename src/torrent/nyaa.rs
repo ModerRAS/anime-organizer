@@ -5,16 +5,29 @@ use std::collections::HashSet;
 const NYAA_BASE_URL: &str = "https://nyaa.si";
 
 pub async fn scrape_recent(pages: u32) -> Result<Vec<ScrapedTitle>> {
+    eprintln!("[Nyaa] 正在爬取最新种子 ({} 页)...", pages);
+
     let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| AppError::TorrentFetchError(format!("创建 HTTP 客户端失败: {e}")))?;
 
     let mut all_titles = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
-    for page in 0..pages {
-        let url = format!("{}/?f=0&c=1_2&o=1&p={}", NYAA_BASE_URL, page + 1);
+    for page_num in 1..=pages {
+        eprintln!("[Nyaa] 正在爬取第 {} / {} 页...", page_num, pages);
+
+        let url = format!(
+            "{}/?c=1_2&s=seeders&o=desc{}",
+            NYAA_BASE_URL,
+            if page_num > 1 {
+                format!("&page={}", page_num)
+            } else {
+                String::new()
+            }
+        );
 
         let resp = client
             .get(&url)
@@ -25,60 +38,27 @@ pub async fn scrape_recent(pages: u32) -> Result<Vec<ScrapedTitle>> {
         let html = resp
             .text()
             .await
-            .map_err(|e| AppError::TorrentFetchError(format!("读取 Nyaa 响应失败: {e}")))?;
+            .map_err(|e| AppError::TorrentFetchError(format!("读取 Nyaa 页面失败: {e}")))?;
 
-        let view_urls = extract_view_urls(&html);
+        eprintln!("[Nyaa] HTML 长度: {} 字节", html.len());
 
-        for view_url in view_urls {
-            if let Some(files) = fetch_nyaa_torrent_files(&client, &view_url).await? {
-                for file in files {
-                    if !seen.insert(file.title.clone()) {
-                        continue;
-                    }
-                    all_titles.push(file);
-                }
-            }
-
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        }
-    }
-
-    Ok(all_titles)
-}
-
-pub async fn scrape_search(query: &str, pages: u32) -> Result<Vec<ScrapedTitle>> {
-    let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        .build()
-        .map_err(|e| AppError::TorrentFetchError(format!("创建 HTTP 客户端失败: {e}")))?;
-
-    let encoded = urlencoding::encode(query);
-    let mut all_titles = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-
-    for page in 0..pages {
-        let url = format!(
-            "{}/?f=0&c=1_2&q={}&o=1&p={}",
-            NYAA_BASE_URL,
-            encoded,
-            page + 1
+        let view_urls = extract_view_urls_from_html(&html);
+        eprintln!(
+            "[Nyaa] 第 {} 页找到 {} 个种子链接",
+            page_num,
+            view_urls.len()
         );
 
-        let resp = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| AppError::TorrentFetchError(format!("请求 Nyaa 搜索页面失败: {e}")))?;
+        if view_urls.is_empty() && page_num == 1 {
+            eprintln!("[Nyaa] 前 500 字符: {}", &html[..html.len().min(500)]);
+        }
 
-        let html = resp
-            .text()
-            .await
-            .map_err(|e| AppError::TorrentFetchError(format!("读取 Nyaa 响应失败: {e}")))?;
+        if view_urls.is_empty() && page_num == 1 {
+            eprintln!("[Nyaa] 警告: 未能提取种子链接");
+        }
 
-        let view_urls = extract_view_urls(&html);
-
-        for view_url in view_urls {
-            if let Some(files) = fetch_nyaa_torrent_files(&client, &view_url).await? {
+        for (i, view_url) in view_urls.iter().enumerate() {
+            if let Some(files) = fetch_torrent_details(&client, view_url).await? {
                 for file in files {
                     if !seen.insert(file.title.clone()) {
                         continue;
@@ -87,24 +67,28 @@ pub async fn scrape_search(query: &str, pages: u32) -> Result<Vec<ScrapedTitle>>
                 }
             }
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            if (i + 1) % 10 == 0 {
+                eprintln!(
+                    "[Nyaa] 已处理 {}/{}, 当前累计: {} 个文件名",
+                    i + 1,
+                    view_urls.len(),
+                    all_titles.len()
+                );
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
     }
 
+    eprintln!("[Nyaa] 爬取完成，共获取 {} 个文件名", all_titles.len());
     Ok(all_titles)
 }
 
-async fn fetch_nyaa_torrent_files(
+async fn fetch_torrent_details(
     client: &reqwest::Client,
     view_url: &str,
 ) -> Result<Option<Vec<ScrapedTitle>>> {
-    let full_url = if view_url.starts_with("http") {
-        view_url.to_string()
-    } else if view_url.starts_with('/') {
-        format!("https://nyaa.si{}", view_url)
-    } else {
-        format!("https://nyaa.si/view/{}", view_url)
-    };
+    let full_url = format!("https://nyaa.si{}", view_url);
 
     let resp = match client.get(&full_url).send().await {
         Ok(r) => r,
@@ -120,11 +104,39 @@ async fn fetch_nyaa_torrent_files(
         Err(_) => return Ok(None),
     };
 
-    let files = parse_file_list_from_html(&html)?;
+    let mut files = Vec::new();
+
+    if let Some(file_list_start) = html.find("File list") {
+        let content = &html[file_list_start..];
+
+        if let Some(list_start) = content.find("<ul") {
+            let list_content = &content[list_start..];
+            let list_end = list_content[4..]
+                .find("</ul>")
+                .map(|p| p + 8)
+                .unwrap_or(list_content.len());
+            let list_section = &list_content[..list_end.min(list_content.len())];
+
+            for line in list_section.lines() {
+                if let Some(file_name) = extract_file_name_from_line(line) {
+                    files.push(ScrapedTitle {
+                        title: file_name,
+                        source: TorrentSource::Nyaa,
+                        url: Some(full_url.clone()),
+                    });
+                }
+            }
+        }
+    }
+
+    if files.is_empty() {
+        return Ok(None);
+    }
+
     Ok(Some(files))
 }
 
-fn extract_view_urls(html: &str) -> Vec<String> {
+fn extract_view_urls_from_html(html: &str) -> Vec<String> {
     let mut urls = Vec::new();
 
     for line in html.lines() {
@@ -133,54 +145,13 @@ fn extract_view_urls(html: &str) -> Vec<String> {
                 let after_href = &line[start + 12..];
                 if let Some(end) = after_href.find('"') {
                     let id = &after_href[..end];
-                    urls.push(id.to_string());
+                    urls.push(format!("/view/{}", id));
                 }
             }
         }
     }
 
     urls
-}
-
-fn parse_file_list_from_html(html: &str) -> Result<Vec<ScrapedTitle>> {
-    let mut files = Vec::new();
-
-    let file_list_start = match html.find("File list") {
-        Some(pos) => pos,
-        None => return Ok(files),
-    };
-
-    let content = &html[file_list_start..];
-
-    let list_start = match content.find("<ul") {
-        Some(pos) => pos,
-        None => return Ok(files),
-    };
-    let list_content = &content[list_start..];
-    let list_end = list_content[4..]
-        .find("</ul>")
-        .map(|p| p + 8)
-        .unwrap_or(list_content.len());
-    let list_section = &list_content[..list_end.min(list_content.len())];
-
-    for line in list_section.lines() {
-        if line.contains(".mkv")
-            || line.contains(".mp4")
-            || line.contains(".avi")
-            || line.contains(".wmv")
-            || line.contains(".mov")
-        {
-            if let Some(file_name) = extract_file_name_from_line(line) {
-                files.push(ScrapedTitle {
-                    title: file_name,
-                    source: TorrentSource::Nyaa,
-                    url: None,
-                });
-            }
-        }
-    }
-
-    Ok(files)
 }
 
 fn extract_file_name_from_line(line: &str) -> Option<String> {
@@ -198,7 +169,6 @@ fn extract_file_name_from_line(line: &str) -> Option<String> {
             let name = line[start..end].trim();
 
             if !name.is_empty() && name.contains('.') {
-                // 去掉文件名后的文件大小部分，如 "(569.0 MiB)" 或 " (500 MiB)"
                 let name = if let Some(size_pos) = name.rfind("MiB)") {
                     if size_pos > 0
                         && (name.as_bytes()[size_pos - 1] == b' '
@@ -208,8 +178,15 @@ fn extract_file_name_from_line(line: &str) -> Option<String> {
                     } else {
                         name.to_string()
                     }
-                } else if let Some(size_pos) = name.rfind(" MiB") {
-                    name[..size_pos].trim().to_string()
+                } else if let Some(size_pos) = name.rfind("GiB)") {
+                    if size_pos > 0
+                        && (name.as_bytes()[size_pos - 1] == b' '
+                            || name.as_bytes()[size_pos - 1] == b'(')
+                    {
+                        name[..size_pos - 1].trim().to_string()
+                    } else {
+                        name.to_string()
+                    }
                 } else {
                     name.to_string()
                 };
@@ -221,6 +198,82 @@ fn extract_file_name_from_line(line: &str) -> Option<String> {
         }
     }
     None
+}
+
+pub async fn scrape_search(query: &str, pages: u32) -> Result<Vec<ScrapedTitle>> {
+    eprintln!("[Nyaa] 正在搜索 '{}' ({} 页)...", query, pages);
+
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| AppError::TorrentFetchError(format!("创建 HTTP 客户端失败: {e}")))?;
+
+    let encoded_query = urlencoding::encode(query);
+
+    let mut all_titles = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for page_num in 1..=pages {
+        eprintln!(
+            "[Nyaa] 正在爬取搜索 '{}' 第 {} / {} 页...",
+            query, page_num, pages
+        );
+
+        let url = format!(
+            "{}/?c=1_2&q={}&s=seeders&o=desc{}",
+            NYAA_BASE_URL,
+            encoded_query,
+            if page_num > 1 {
+                format!("&page={}", page_num)
+            } else {
+                String::new()
+            }
+        );
+
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| AppError::TorrentFetchError(format!("请求 Nyaa 搜索页失败: {e}")))?;
+
+        let html = resp
+            .text()
+            .await
+            .map_err(|e| AppError::TorrentFetchError(format!("读取 Nyaa 搜索页失败: {e}")))?;
+
+        let view_urls = extract_view_urls_from_html(&html);
+        eprintln!(
+            "[Nyaa] 第 {} 页找到 {} 个种子链接",
+            page_num,
+            view_urls.len()
+        );
+
+        for (i, view_url) in view_urls.iter().enumerate() {
+            if let Some(files) = fetch_torrent_details(&client, view_url).await? {
+                for file in files {
+                    if !seen.insert(file.title.clone()) {
+                        continue;
+                    }
+                    all_titles.push(file);
+                }
+            }
+
+            if (i + 1) % 10 == 0 {
+                eprintln!(
+                    "[Nyaa] 已处理 {}/{}, 当前累计: {} 个文件名",
+                    i + 1,
+                    view_urls.len(),
+                    all_titles.len()
+                );
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    eprintln!("[Nyaa] 爬取完成，共获取 {} 个文件名", all_titles.len());
+    Ok(all_titles)
 }
 
 #[cfg(test)]
@@ -252,25 +305,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_file_list_from_html() {
-        let html = r#"<h3>File list</h3>
-<ul>
-<li><span></span> Anime - S01E01.mkv (500 MiB)</li>
-<li><span></span> Anime - S01E02.mkv (600 MiB)</li>
-</ul>"#;
-
-        let results = parse_file_list_from_html(html).unwrap();
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].title, "Anime - S01E01.mkv");
-        assert_eq!(results[1].title, "Anime - S01E02.mkv");
-    }
-
-    #[test]
-    fn test_extract_view_urls() {
+    fn test_extract_view_urls_from_html() {
         let html = r#"<a href="/view/123456">Link 1</a>
         <a href="/view/789012">Link 2</a>"#;
-
-        let urls = extract_view_urls(html);
-        assert_eq!(urls, vec!["123456", "789012"]);
+        let urls = extract_view_urls_from_html(html);
+        assert_eq!(urls, vec!["/view/123456", "/view/789012"]);
     }
 }

@@ -1,39 +1,113 @@
 use crate::error::{AppError, Result};
 use crate::torrent::types::{ScrapedTitle, TorrentSource};
+use playwright::Playwright;
 use std::collections::HashSet;
 
 const DMHY_LIST_URL: &str = "https://share.dmhy.org/topics/list/sort_id/2/page/";
 
-pub async fn scrape_dmhy(pages: u32) -> Result<Vec<ScrapedTitle>> {
-    let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        .timeout(std::time::Duration::from_secs(30))
+#[derive(Debug, Clone, Default)]
+pub struct ScrapeOptions {
+    pub headed: bool,
+}
+
+impl ScrapeOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_headed(mut self, headed: bool) -> Self {
+        self.headed = headed;
+        self
+    }
+}
+
+pub async fn scrape_dmhy_with_playwright(pages: u32) -> Result<Vec<ScrapedTitle>> {
+    scrape_dmhy_with_playwright_opts(pages, ScrapeOptions::new()).await
+}
+
+pub async fn scrape_dmhy_with_playwright_opts(
+    pages: u32,
+    opts: ScrapeOptions,
+) -> Result<Vec<ScrapedTitle>> {
+    eprintln!("[DMHY/Playwright] 正在初始化 Playwright...");
+
+    let playwright = Playwright::initialize()
+        .await
+        .map_err(|e| AppError::TorrentFetchError(format!("初始化 Playwright 失败: {e}")))?;
+
+    playwright
+        .prepare()
+        .map_err(|e| AppError::TorrentFetchError(format!("准备 Playwright 失败: {e}")))?;
+
+    let mode_str = if opts.headed {
+        "headed (可见窗口)"
+    } else {
+        "headless (无头)"
+    };
+    eprintln!("[DMHY/Playwright] 启动浏览器 (模式: {})...", mode_str);
+
+    let browser = if opts.headed {
+        playwright.chromium().launcher().launch().await
+    } else {
+        playwright
+            .chromium()
+            .launcher()
+            .headless(true)
+            .launch()
+            .await
+    }
+    .map_err(|e| AppError::TorrentFetchError(format!("启动浏览器失败: {e}")))?;
+
+    let context = browser
+        .context_builder()
         .build()
-        .map_err(|e| AppError::TorrentFetchError(format!("创建 HTTP 客户端失败: {e}")))?;
+        .await
+        .map_err(|e| AppError::TorrentFetchError(format!("创建浏览器上下文失败: {e}")))?;
+
+    let page = context
+        .new_page()
+        .await
+        .map_err(|e| AppError::TorrentFetchError(format!("创建页面失败: {e}")))?;
 
     let mut all_titles = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
-    for page in 1..=pages {
-        eprintln!("[DMHY] 正在爬取第 {} / {} 页...", page, pages);
-        let url = format!("{}{}", DMHY_LIST_URL, page);
+    for page_num in 1..=pages {
+        eprintln!(
+            "[DMHY/Playwright] 正在爬取第 {} / {} 页...",
+            page_num, pages
+        );
 
-        let resp = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| AppError::TorrentFetchError(format!("请求 DMHY 页面失败: {e}")))?;
+        let url = format!("{}{}", DMHY_LIST_URL, page_num);
+        eprintln!("[DMHY/Playwright] 导航到: {}", url);
 
-        let html = resp
-            .text()
+        page.goto_builder(&url)
+            .goto()
             .await
-            .map_err(|e| AppError::TorrentFetchError(format!("读取 DMHY 页面失败: {e}")))?;
+            .map_err(|e| AppError::TorrentFetchError(format!("导航到 DMHY 失败: {e}")))?;
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+        let html = page
+            .content()
+            .await
+            .map_err(|e| AppError::TorrentFetchError(format!("获取页面内容失败: {e}")))?;
+
+        eprintln!("[DMHY/Playwright] HTML 长度: {} 字节", html.len());
+
+        if html.len() < 1000 {
+            eprintln!("[DMHY/Playwright] 警告: HTML 太短，可能是被阻止了");
+        }
 
         let view_links = extract_view_links(&html);
-        eprintln!("[DMHY] 第 {} 页找到 {} 个种子", page, view_links.len());
+        eprintln!(
+            "[DMHY/Playwright] 第 {} 页找到 {} 个种子链接",
+            page_num,
+            view_links.len()
+        );
 
         for (i, link) in view_links.iter().enumerate() {
-            if let Some(files) = fetch_torrent_files(&client, link).await? {
+            if let Some(files) = fetch_torrent_files(&page, link).await? {
                 for file in files {
                     if !seen.insert(file.title.clone()) {
                         continue;
@@ -42,9 +116,9 @@ pub async fn scrape_dmhy(pages: u32) -> Result<Vec<ScrapedTitle>> {
                 }
             }
 
-            if (i + 1) % 10 == 0 || i == view_links.len() - 1 {
+            if (i + 1) % 10 == 0 || i == view_links.len().saturating_sub(1) {
                 eprintln!(
-                    "[DMHY] 已处理 {}/{}, 当前累计: {} 个文件名",
+                    "[DMHY/Playwright] 已处理 {}/{}, 当前累计: {} 个文件名",
                     i + 1,
                     view_links.len(),
                     all_titles.len()
@@ -55,12 +129,17 @@ pub async fn scrape_dmhy(pages: u32) -> Result<Vec<ScrapedTitle>> {
         }
     }
 
-    eprintln!("[DMHY] 爬取完成，共获取 {} 个文件名", all_titles.len());
+    browser.close().await.ok();
+
+    eprintln!(
+        "[DMHY/Playwright] 爬取完成，共获取 {} 个文件名",
+        all_titles.len()
+    );
     Ok(all_titles)
 }
 
 async fn fetch_torrent_files(
-    client: &reqwest::Client,
+    page: &playwright::api::Page,
     link: &str,
 ) -> Result<Option<Vec<ScrapedTitle>>> {
     let detail_url = if link.starts_with("http") {
@@ -71,18 +150,22 @@ async fn fetch_torrent_files(
         format!("https://share.dmhy.org/topics/view/{}", link)
     };
 
-    let resp = match client.get(&detail_url).send().await {
-        Ok(r) => r,
-        Err(_) => return Ok(None),
-    };
-
-    if !resp.status().is_success() {
-        return Ok(None);
+    match page.goto_builder(&detail_url).timeout(60000.0).goto().await {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("[DMHY/Playwright] 详情页加载失败 (继续): {}", e);
+            return Ok(None);
+        }
     }
 
-    let html = match resp.text().await {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    let html = match page.content().await {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("[DMHY/Playwright] 获取页面内容失败 (继续): {}", e);
+            return Ok(None);
+        }
     };
 
     let files = parse_file_list_from_html(&html)?;
@@ -177,23 +260,14 @@ pub fn titles_to_text(titles: &[ScrapedTitle]) -> String {
     crate::torrent::sorted_unique_title_text(titles)
 }
 
-pub fn write_titles_to_file(titles: &[ScrapedTitle], path: &std::path::Path) -> Result<usize> {
-    let text = titles_to_text(titles);
-    std::fs::write(path, text)
-        .map_err(|e| AppError::Io(std::io::Error::other(format!("写入文件失败: {e}"))))?;
-    Ok(titles.len())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_extract_file_name_from_line() {
-        // DMHY format: filename.ext SIZE (e.g., "420.5MB")
         let line = r#"[ANi] 溜掉的大魚比不上自己釣到的魚 - 03 [1080P][Baha][WEB-DL][AAC AVC][CHT].mp4 420.5MB"#;
         let result = extract_file_name_from_line(line).unwrap();
-        // Should extract up to .mp4
         assert!(result.contains(".mp4"));
     }
 

@@ -1,6 +1,7 @@
 //! 爬取到的种子标题类型定义
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// 种子标题数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,5 +29,47 @@ impl std::fmt::Display for TorrentSource {
             Self::Dmhy => write!(f, "DMHY"),
             Self::Nyaa => write!(f, "Nyaa"),
         }
+    }
+}
+
+pub fn sorted_unique_title_lines<'a>(titles: &'a [ScrapedTitle]) -> Vec<&'a str> {
+    titles
+        .iter()
+        .map(|title| title.title.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+pub fn sorted_unique_title_text(titles: &[ScrapedTitle]) -> String {
+    sorted_unique_title_lines(titles).join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sorted_unique_helpers_sort_and_dedup_titles() {
+        let titles = vec![
+            ScrapedTitle {
+                title: "b.mkv".to_string(),
+                source: TorrentSource::Dmhy,
+                url: None,
+            },
+            ScrapedTitle {
+                title: "a.mkv".to_string(),
+                source: TorrentSource::Nyaa,
+                url: Some("https://nyaa.si/view/1".to_string()),
+            },
+            ScrapedTitle {
+                title: "b.mkv".to_string(),
+                source: TorrentSource::Nyaa,
+                url: Some("https://nyaa.si/view/2".to_string()),
+            },
+        ];
+
+        assert_eq!(sorted_unique_title_lines(&titles), vec!["a.mkv", "b.mkv"]);
+        assert_eq!(sorted_unique_title_text(&titles), "a.mkv\nb.mkv");
     }
 }

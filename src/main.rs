@@ -17,7 +17,11 @@ use anime_organizer::{
     nfo::{EpisodeNfo, NfoWriter, TvShowNfo, UniqueId},
     AnimeMetadata,
 };
-#[cfg(any(feature = "scraper", feature = "clouddrive"))]
+#[cfg(any(
+    feature = "scraper",
+    feature = "clouddrive",
+    feature = "torrent-scraper"
+))]
 use clap::Subcommand;
 use clap::{Args, Parser, ValueEnum};
 #[cfg(feature = "scraper")]
@@ -50,7 +54,11 @@ const DEFAULT_EXTENSIONS: &[&str] = &[".mp4", ".mkv", ".avi", ".mov", ".wmv", ".
     aniorg match --input scraped.json --format github
 "#)]
 struct Cli {
-    #[cfg(any(feature = "scraper", feature = "clouddrive"))]
+    #[cfg(any(
+        feature = "scraper",
+        feature = "clouddrive",
+        feature = "torrent-scraper"
+    ))]
     #[command(subcommand)]
     command: Option<Commands>,
 
@@ -111,6 +119,10 @@ struct OrganizeArgs {
     /// Bangumi 元数据源路径（subject.jsonlines 或包含该文件的目录）
     #[arg(long, value_name = "PATH")]
     metadata_source: Option<PathBuf>,
+
+    /// 启用分季模式：按 `番名/Season N/` 结构整理文件
+    #[arg(long = "season-mode", visible_alias = "分季")]
+    season_mode: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -130,7 +142,11 @@ impl FallbackMode {
     }
 }
 
-#[cfg(any(feature = "scraper", feature = "clouddrive"))]
+#[cfg(any(
+    feature = "scraper",
+    feature = "clouddrive",
+    feature = "torrent-scraper"
+))]
 #[derive(Subcommand, Debug)]
 enum Commands {
     #[cfg(feature = "scraper")]
@@ -380,6 +396,10 @@ struct TorrentScrapeArgs {
     /// 输出文件路径
     #[arg(long, short = 'o', value_name = "PATH")]
     output: Option<PathBuf>,
+
+    /// 显示浏览器窗口（用于调试）
+    #[arg(long)]
+    headed: bool,
 }
 
 #[cfg(feature = "torrent-scraper")]
@@ -397,7 +417,11 @@ fn main() {
     }
 }
 
-#[cfg(any(feature = "scraper", feature = "clouddrive"))]
+#[cfg(any(
+    feature = "scraper",
+    feature = "clouddrive",
+    feature = "torrent-scraper"
+))]
 fn run() -> Result<(), AppError> {
     let cli = Cli::parse();
 
@@ -408,7 +432,11 @@ fn run() -> Result<(), AppError> {
     run_organize_entry(cli.organize)
 }
 
-#[cfg(not(any(feature = "scraper", feature = "clouddrive")))]
+#[cfg(not(any(
+    feature = "scraper",
+    feature = "clouddrive",
+    feature = "torrent-scraper"
+)))]
 fn run() -> Result<(), AppError> {
     let cli = Cli::parse();
     run_organize_entry(cli.organize)
@@ -436,7 +464,11 @@ fn run_organize_entry(args: OrganizeArgs) -> Result<(), AppError> {
     run_organize(args)
 }
 
-#[cfg(any(feature = "scraper", feature = "clouddrive"))]
+#[cfg(any(
+    feature = "scraper",
+    feature = "clouddrive",
+    feature = "torrent-scraper"
+))]
 fn run_command(command: Commands) -> Result<(), AppError> {
     match command {
         #[cfg(feature = "scraper")]
@@ -508,15 +540,22 @@ fn run_organize(args: OrganizeArgs) -> Result<(), AppError> {
         };
 
         processed += 1;
-        match organize_file(
+        let target_dir = if args.season_mode {
+            target
+                .join(anime_file.series_name())
+                .join(anime_file.season_dir_name())
+        } else {
+            target.join(&anime_file.anime_name)
+        };
+        match organize_file_to_dir(
             &anime_file,
-            &target,
+            &target_dir,
             args.mode,
             args.dry_run,
             fallback_mode,
             args.verbose,
         ) {
-            Ok(()) => succeeded += 1,
+            Ok(_) => succeeded += 1,
             Err(_) => failed += 1,
         }
     }
@@ -1674,34 +1713,78 @@ fn format_size(bytes: i64) -> String {
 
 #[cfg(feature = "torrent-scraper")]
 async fn run_torrent_scrape(args: TorrentScrapeArgs) -> Result<(), AppError> {
-    use anime_organizer::torrent::{dmhy, nyaa};
+    use anime_organizer::torrent::dmhy;
+    use anime_organizer::torrent::dmhy_playwright;
+    use anime_organizer::torrent::nyaa;
+    use anime_organizer::torrent::nyaa_playwright;
 
-    let pages = args.pages.clamp(1, 10);
+    let pages = args.pages.clamp(1, 2000);
     let mut all_titles = Vec::new();
+
+    let opts = dmhy_playwright::ScrapeOptions::new().with_headed(args.headed);
+    let nyaa_opts = nyaa_playwright::ScrapeOptions::new().with_headed(args.headed);
 
     match args.source {
         TorrentSource::Dmhy => {
-            println!("正在从 DMHY 爬取种子文件列表 ({} 页)...", pages);
-            all_titles = dmhy::scrape_dmhy(pages).await?;
+            println!(
+                "正在从 DMHY (Playwright) 爬取种子文件列表 ({} 页)...",
+                pages
+            );
+            all_titles = match dmhy_playwright::scrape_dmhy_with_playwright_opts(pages, opts).await
+            {
+                Ok(titles) => titles,
+                Err(err) => {
+                    eprintln!("[Torrent] DMHY Playwright 抓取失败，回退到 HTTP 抓取: {err}");
+                    dmhy::scrape_dmhy(pages).await?
+                }
+            };
         }
         TorrentSource::Nyaa => {
-            let query = args.query.as_deref().unwrap_or("anime");
-            println!(
-                "正在从 Nyaa 爬取种子文件列表，关键词: {} ({} 页)...",
-                query, pages
-            );
-            all_titles = nyaa::scrape_search(query, pages).await?;
+            if let Some(query) = args.query.as_deref() {
+                println!(
+                    "正在从 Nyaa 搜索 '{}' 并爬取种子文件列表 ({} 页)...",
+                    query, pages
+                );
+                all_titles = nyaa::scrape_search(query, pages).await?;
+            } else {
+                println!(
+                    "正在从 Nyaa (Playwright) 首页爬取最新种子文件列表 ({} 页)...",
+                    pages
+                );
+                all_titles =
+                    match nyaa_playwright::scrape_recent_with_playwright_opts(pages, nyaa_opts)
+                        .await
+                    {
+                        Ok(titles) => titles,
+                        Err(err) => {
+                            eprintln!(
+                                "[Torrent] Nyaa Playwright 抓取失败，回退到 HTTP 抓取: {err}"
+                            );
+                            nyaa::scrape_recent(pages).await?
+                        }
+                    };
+            }
         }
         TorrentSource::All => {
-            println!("正在从 DMHY 爬取 ({} 页)...", pages);
-            if let Ok(dmhy_titles) = dmhy::scrape_dmhy(pages).await {
-                all_titles.extend(dmhy_titles);
+            println!("正在从 DMHY (Playwright) 爬取 ({} 页)...", pages);
+            match dmhy_playwright::scrape_dmhy_with_playwright_opts(pages, opts.clone()).await {
+                Ok(dmhy_titles) => all_titles.extend(dmhy_titles),
+                Err(err) => {
+                    eprintln!("[Torrent] DMHY Playwright 抓取失败，回退到 HTTP 抓取: {err}");
+                    all_titles.extend(dmhy::scrape_dmhy(pages).await?);
+                }
             }
 
-            let query = args.query.as_deref().unwrap_or("anime");
-            println!("正在从 Nyaa 爬取，关键词: {} ({} 页)...", query, pages);
-            if let Ok(nyaa_titles) = nyaa::scrape_search(query, pages).await {
-                all_titles.extend(nyaa_titles);
+            println!(
+                "正在从 Nyaa (Playwright) 首页爬取最新种子 ({} 页)...",
+                pages
+            );
+            match nyaa_playwright::scrape_recent_with_playwright_opts(pages, nyaa_opts).await {
+                Ok(nyaa_titles) => all_titles.extend(nyaa_titles),
+                Err(err) => {
+                    eprintln!("[Torrent] Nyaa Playwright 抓取失败，回退到 HTTP 抓取: {err}");
+                    all_titles.extend(nyaa::scrape_recent(pages).await?);
+                }
             }
         }
     }
@@ -1711,7 +1794,8 @@ async fn run_torrent_scrape(args: TorrentScrapeArgs) -> Result<(), AppError> {
         return Ok(());
     }
 
-    let text = anime_organizer::torrent::dmhy::titles_to_text(&all_titles);
+    let unique_lines = anime_organizer::torrent::sorted_unique_title_lines(&all_titles);
+    let text = unique_lines.join("\n");
 
     if let Some(ref output_path) = args.output {
         std::fs::write(output_path, &text)
@@ -1721,6 +1805,6 @@ async fn run_torrent_scrape(args: TorrentScrapeArgs) -> Result<(), AppError> {
         print!("{}", text);
     }
 
-    println!("\n共爬取 {} 个文件名", all_titles.len());
+    println!("\n共爬取 {} 个文件名", unique_lines.len());
     Ok(())
 }
