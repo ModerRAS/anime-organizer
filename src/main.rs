@@ -105,6 +105,10 @@ struct OrganizeArgs {
     #[arg(long, value_name = "KEY")]
     tmdb_api_key: Option<String>,
 
+    /// 自定义别名文件（JSON），会覆盖本地别名库中的同名项
+    #[arg(long, value_name = "PATH")]
+    alias_file: Option<PathBuf>,
+
     /// 跳过图片下载
     #[arg(long)]
     no_images: bool,
@@ -573,19 +577,19 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
         .fallback_on_link_failure
         .map(FallbackMode::to_operation_mode);
     let extensions = build_extensions(&args.include_ext);
-
-    let cache_dir = args
-        .bangumi_cache
-        .clone()
-        .unwrap_or_else(std::env::temp_dir);
-    let db_path = cache_dir.join("bangumi.db");
-    let alias_lookup = AliasLookup::load(&db_path)?;
-    if args.verbose {
-        eprintln!("已加载 {} 条别名", alias_lookup.len());
-    }
-
     let bangumi =
         BangumiClient::with_source(args.bangumi_cache.clone(), args.metadata_source.clone());
+    let alias_db_path = resolve_alias_db_path(&bangumi, args.metadata_source.as_deref());
+    let alias_lookup =
+        AliasLookup::load_from_sources(Some(&alias_db_path), args.alias_file.as_deref())?;
+    if args.verbose {
+        if alias_lookup.is_empty() {
+            eprintln!("未找到可用别名库，将仅使用 Bangumi 名称和搜索匹配");
+        } else {
+            eprintln!("已加载 {} 条别名", alias_lookup.len());
+        }
+    }
+
     match bangumi.prepare_index().await {
         Ok(count) => {
             if args.verbose {
@@ -1126,6 +1130,25 @@ fn build_extensions(include_ext: &Option<Vec<String>>) -> HashSet<String> {
             .map(|ext| (*ext).to_string())
             .collect(),
     }
+}
+
+#[cfg(feature = "metadata")]
+fn resolve_alias_db_path(bangumi: &BangumiClient, metadata_source: Option<&Path>) -> PathBuf {
+    if let Some(source) = metadata_source {
+        let candidate = if source.is_dir() {
+            Some(source.join("bangumi.db"))
+        } else {
+            source.parent().map(|parent| parent.join("bangumi.db"))
+        };
+
+        if let Some(candidate) = candidate {
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+
+    bangumi.cache_dir().join("bangumi.db")
 }
 
 fn has_valid_extension(path: &Path, extensions: &HashSet<String>) -> bool {
