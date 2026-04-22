@@ -80,7 +80,7 @@ aniorg torrent-scrape --source all --pages 3 --output all_titles.txt
 
 ## NOTES
 - 硬链接默认，需同文件系统；跨设备需`--fallback-on-link-failure=copy`
-- SQLite别名库：首次自动下载/构建
+- Bangumi dump 会按需下载；若存在 `bangumi.db` 或传入 `--alias-file`，会优先用于别名匹配
 - 临时文件用`tmp/`（已gitignore）
 - `.sisyphus/`为任务管理数据，已gitignore
 

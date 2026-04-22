@@ -64,6 +64,25 @@ pub struct AliasLookup {
 }
 
 impl AliasLookup {
+    /// 从可选的数据源加载别名库。
+    ///
+    /// - `db_path` 存在时，从 SQLite `aliases` 表加载。
+    /// - `alias_file` 存在时，从 JSON 文件加载，并覆盖同名数据库别名。
+    /// - 两者都缺失时，返回空的别名库，供首次运行时回退到名称搜索。
+    pub fn load_from_sources(db_path: Option<&Path>, alias_file: Option<&Path>) -> Result<Self> {
+        let mut aliases = HashMap::new();
+
+        if let Some(path) = db_path.filter(|path| path.is_file()) {
+            Self::load_database_aliases(path, &mut aliases)?;
+        }
+
+        if let Some(path) = alias_file {
+            Self::load_alias_file(path, &mut aliases)?;
+        }
+
+        Ok(Self::from_aliases(aliases))
+    }
+
     /// 从 Bangumi SQLite 数据库加载别名库
     ///
     /// # 参数
@@ -77,10 +96,29 @@ impl AliasLookup {
             )));
         }
 
+        let mut aliases = HashMap::new();
+        Self::load_database_aliases(db_path, &mut aliases)?;
+
+        Ok(Self::from_aliases(aliases))
+    }
+
+    fn from_aliases(mut aliases: HashMap<String, AliasEntry>) -> Self {
+        expand_generated_aliases(&mut aliases);
+
+        let normalized_keys = build_normalized_index(&aliases);
+
+        Self {
+            aliases,
+            normalized_keys,
+        }
+    }
+
+    fn load_database_aliases(
+        db_path: &Path,
+        aliases: &mut HashMap<String, AliasEntry>,
+    ) -> Result<()> {
         let conn = Connection::open(db_path)
             .map_err(|e| AppError::AliasLoadError(format!("打开数据库失败: {e}")))?;
-
-        let mut aliases: HashMap<String, AliasEntry> = HashMap::new();
 
         // 从数据库加载别名：关联 aliases 表和 subjects 表
         let mut stmt = conn
@@ -112,14 +150,34 @@ impl AliasLookup {
             aliases.insert(alias, entry);
         }
 
-        expand_generated_aliases(&mut aliases);
+        Ok(())
+    }
 
-        let normalized_keys = build_normalized_index(&aliases);
+    fn load_alias_file(alias_file: &Path, aliases: &mut HashMap<String, AliasEntry>) -> Result<()> {
+        let content = std::fs::read_to_string(alias_file).map_err(|e| {
+            AppError::AliasLoadError(format!(
+                "读取自定义别名文件失败 {}: {e}",
+                alias_file.display()
+            ))
+        })?;
+        let file_aliases: HashMap<String, AliasEntry> =
+            serde_json::from_str(&content).map_err(|e| {
+                AppError::AliasLoadError(format!(
+                    "解析自定义别名文件失败 {}: {e}",
+                    alias_file.display()
+                ))
+            })?;
 
-        Ok(Self {
-            aliases,
-            normalized_keys,
-        })
+        for (alias, entry) in file_aliases {
+            let trimmed = alias.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            aliases.insert(trimmed.to_string(), entry);
+        }
+
+        Ok(())
     }
 
     /// 根据名称精确查找别名
@@ -465,5 +523,61 @@ mod tests {
         let db_path = dir.path().join("nonexistent.db");
         let result = AliasLookup::load(&db_path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_from_sources_returns_empty_when_nothing_exists() {
+        let lookup = AliasLookup::load_from_sources(None, None).unwrap();
+        assert!(lookup.is_empty());
+    }
+
+    #[test]
+    fn test_load_from_sources_with_custom_alias_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let alias_path = dir.path().join("aliases.json");
+        std::fs::write(
+            &alias_path,
+            r#"{
+  "芙莉莲": {
+    "bangumi_id": 100,
+    "name": "葬送のフリーレン",
+    "tmdb_id": 209867,
+    "anidb_id": 18597
+  }
+}"#,
+        )
+        .unwrap();
+
+        let lookup = AliasLookup::load_from_sources(None, Some(&alias_path)).unwrap();
+        let entry = lookup.find("芙莉莲").unwrap();
+        assert_eq!(entry.bangumi_id, 100);
+        assert_eq!(entry.name, "葬送のフリーレン");
+        assert_eq!(entry.tmdb_id, Some(209867));
+        assert_eq!(entry.anidb_id, Some(18597));
+    }
+
+    #[test]
+    fn test_load_from_sources_alias_file_overrides_database() {
+        let dir = create_test_db();
+        let db_path = dir.path().join("test.db");
+        let alias_path = dir.path().join("aliases.json");
+        std::fs::write(
+            &alias_path,
+            r#"{
+  "进击的巨人": {
+    "bangumi_id": 999,
+    "name": "Attack on Titan Override",
+    "tmdb_id": 12345,
+    "anidb_id": null
+  }
+}"#,
+        )
+        .unwrap();
+
+        let lookup = AliasLookup::load_from_sources(Some(&db_path), Some(&alias_path)).unwrap();
+        let entry = lookup.find("进击的巨人").unwrap();
+        assert_eq!(entry.bangumi_id, 999);
+        assert_eq!(entry.name, "Attack on Titan Override");
+        assert_eq!(entry.tmdb_id, Some(12345));
     }
 }
