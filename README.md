@@ -93,6 +93,12 @@ aniorg --source="/path/to/downloads" --season-mode --target="/path/to/anime"
 
 # 生成 NFO 和海报
 aniorg --source="/path/to/downloads" --scrape-metadata --tmdb-api-key="YOUR_TMDB_KEY"
+
+# 生成/更新目标目录根部的 MLIP 媒体库索引
+aniorg --source="/path/to/downloads" --target="/path/to/anime" --library-index
+
+# 强制重新扫描目标目录并重建媒体库索引
+aniorg --source="/path/to/downloads" --target="/path/to/anime" --library-index --rebuild-library-index
 ```
 
 #### 预览模式
@@ -122,6 +128,8 @@ aniorg --source="/path/to/downloads" --dry-run --verbose
 | `--force-overwrite` | | bool | ❌ | false | 覆盖已有的 NFO 和图片文件 |
 | `--bangumi-cache` | | string | ❌ | 系统临时目录 | Bangumi 缓存目录 |
 | `--metadata-source` | | string | ❌ | - | 指定本地 `subject.jsonlines` 或其所在目录 |
+| `--library-index` | | bool | ❌ | false | 生成/更新目标目录根部的 `library.db` |
+| `--rebuild-library-index` | | bool | ❌ | false | 与 `--library-index` 一起使用，强制全量重扫目标目录并重建索引 |
 | `--help` | `-h` | bool | ❌ | false | 显示帮助 |
 | `--version` | `-V` | bool | ❌ | false | 显示版本 |
 
@@ -146,6 +154,221 @@ aniorg --source="/path/to/downloads" --dry-run --verbose
   }
 }
 ```
+
+### 🗃️ MLIP 媒体库索引
+
+启用 `--library-index` 后，程序会固定管理目标目录根部的 `library.db`：
+
+- 如果 `library.db` 不存在：整理完成后扫描整个 target，初始化建库。
+- 如果 `library.db` 已存在：默认只把本次整理成功的新文件增量更新进去。
+- 如果同时传入 `--rebuild-library-index`：整理完成后重新扫描整个 target 并重建数据库。
+- `--dry-run` 下只打印将执行的模式和统计，不创建或修改数据库。
+
+本数据库是只读协议。任何播放器不得修改本数据库；播放历史、收藏、继续播放等数据必须保存在播放器自己的数据库。
+
+```sql
+-- ============================================================
+-- Media Library Index Protocol (MLIP)
+--
+-- Version : 1
+-- Storage : SQLite 3
+--
+-- 设计原则：
+-- 1. 不扫描目录即可构建媒体库
+-- 2. 不依赖在线刮削
+-- 3. 支持长期扩展
+-- 4. 所有数据均可由整理器重新生成
+-- 5. 不使用 polymorphic association / JSON / EAV
+-- ============================================================
+
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE meta
+(
+    key     TEXT PRIMARY KEY,
+    value   TEXT NOT NULL
+);
+
+-- meta keys:
+-- schema = 1
+-- protocol = MLIP
+-- generator = AnimeOrganizer
+-- generator_version = <cargo package version>
+-- library_uuid = <uuid>
+-- library_root = <canonical target path>
+-- generated_at = <RFC3339 timestamp>
+
+CREATE TABLE series
+(
+    id              INTEGER PRIMARY KEY,
+    uuid            TEXT UNIQUE NOT NULL,
+    title           TEXT NOT NULL,
+    original_title  TEXT,
+    sort_title      TEXT,
+    summary         TEXT,
+    year            INTEGER,
+
+    -- series_type:
+    -- 1 TV
+    -- 2 Movie
+    -- 3 OVA
+    -- 4 ONA
+    -- 5 SP
+    series_type     INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX idx_series_title ON series(title);
+
+CREATE TABLE episode
+(
+    id          INTEGER PRIMARY KEY,
+    uuid        TEXT UNIQUE NOT NULL,
+    series_id   INTEGER NOT NULL,
+    season      INTEGER NOT NULL DEFAULT 1,
+    episode     REAL NOT NULL,
+    sort_order  REAL NOT NULL,
+    title       TEXT,
+    summary     TEXT,
+    runtime     INTEGER,
+
+    FOREIGN KEY(series_id)
+        REFERENCES series(id)
+        ON DELETE CASCADE,
+
+    UNIQUE(series_id, season, episode)
+);
+
+CREATE INDEX idx_episode_series ON episode(series_id);
+
+CREATE TABLE media_file
+(
+    id              INTEGER PRIMARY KEY,
+    episode_id      INTEGER NOT NULL,
+    path            TEXT NOT NULL UNIQUE,
+    size            INTEGER,
+    modified_time   INTEGER,
+
+    FOREIGN KEY(episode_id)
+        REFERENCES episode(id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX idx_media_path ON media_file(path);
+CREATE INDEX idx_media_episode ON media_file(episode_id);
+
+CREATE TABLE series_artwork
+(
+    id              INTEGER PRIMARY KEY,
+    series_id       INTEGER NOT NULL,
+
+    -- artwork_kind:
+    -- 1 poster
+    -- 2 fanart
+    -- 3 banner
+    -- 4 logo
+    -- 5 thumb
+    -- 6 clearart
+    -- 7 season_poster
+    artwork_kind    INTEGER NOT NULL,
+    path            TEXT NOT NULL,
+
+    FOREIGN KEY(series_id)
+        REFERENCES series(id)
+        ON DELETE CASCADE,
+
+    UNIQUE(series_id, artwork_kind, path)
+);
+
+CREATE INDEX idx_series_artwork_series ON series_artwork(series_id);
+
+CREATE TABLE episode_artwork
+(
+    id              INTEGER PRIMARY KEY,
+    episode_id      INTEGER NOT NULL,
+    artwork_kind    INTEGER NOT NULL,
+    path            TEXT NOT NULL,
+
+    FOREIGN KEY(episode_id)
+        REFERENCES episode(id)
+        ON DELETE CASCADE,
+
+    UNIQUE(episode_id, artwork_kind, path)
+);
+
+CREATE INDEX idx_episode_artwork_episode ON episode_artwork(episode_id);
+
+CREATE TABLE genre
+(
+    id      INTEGER PRIMARY KEY,
+    name    TEXT UNIQUE NOT NULL
+);
+
+CREATE TABLE series_genre
+(
+    series_id   INTEGER NOT NULL,
+    genre_id    INTEGER NOT NULL,
+
+    PRIMARY KEY(series_id, genre_id),
+
+    FOREIGN KEY(series_id)
+        REFERENCES series(id)
+        ON DELETE CASCADE,
+
+    FOREIGN KEY(genre_id)
+        REFERENCES genre(id)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE series_external_id
+(
+    series_id   INTEGER NOT NULL,
+
+    -- provider:
+    -- 1 bangumi
+    -- 2 tmdb
+    -- 3 anidb
+    provider    INTEGER NOT NULL,
+    value       TEXT NOT NULL,
+
+    PRIMARY KEY(series_id, provider, value),
+
+    FOREIGN KEY(series_id)
+        REFERENCES series(id)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE episode_external_id
+(
+    episode_id  INTEGER NOT NULL,
+    provider    INTEGER NOT NULL,
+    value       TEXT NOT NULL,
+
+    PRIMARY KEY(episode_id, provider, value),
+
+    FOREIGN KEY(episode_id)
+        REFERENCES episode(id)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE capability
+(
+    name        TEXT PRIMARY KEY,
+    enabled     INTEGER NOT NULL
+);
+
+-- v1 capabilities:
+-- artwork = 1
+-- genre = 1
+-- external_id = 1
+-- people = 0
+-- subtitle = 0
+-- media_technical = 0
+-- multi_file = 1
+
+PRAGMA user_version = 1;
+```
+
+v1 明确不包含 `tag`、`person`、`credit`、字幕、hash、codec、分辨率。以后需要时加新表，不改这些表。
 
 ### 🎨 文件命名格式
 
@@ -366,6 +589,12 @@ aniorg --source="/path/to/downloads" --season-mode --target="/path/to/anime"
 
 # Generate NFO files and artwork
 aniorg --source="/path/to/downloads" --scrape-metadata --tmdb-api-key="YOUR_TMDB_KEY"
+
+# Generate or update the MLIP library index in the target root
+aniorg --source="/path/to/downloads" --target="/path/to/anime" --library-index
+
+# Force a full target rescan and rebuild the library index
+aniorg --source="/path/to/downloads" --target="/path/to/anime" --library-index --rebuild-library-index
 ```
 
 ### 📋 Arguments
@@ -387,6 +616,8 @@ aniorg --source="/path/to/downloads" --scrape-metadata --tmdb-api-key="YOUR_TMDB
 | `--force-overwrite` | | bool | ❌ | false | Overwrite existing NFO and image files |
 | `--bangumi-cache` | | string | ❌ | system temp dir | Bangumi cache directory |
 | `--metadata-source` | | string | ❌ | - | Local `subject.jsonlines` file or containing directory |
+| `--library-index` | | bool | ❌ | false | Generate/update `library.db` in the target root |
+| `--rebuild-library-index` | | bool | ❌ | false | Force a full target rescan and rebuild; requires `--library-index` |
 | `--help` | `-h` | bool | ❌ | false | Show help |
 | `--version` | `-V` | bool | ❌ | false | Show version |
 

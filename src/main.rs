@@ -2,6 +2,8 @@
 //!
 //! 提供默认的文件整理模式，以及用于自动化工作流的 scraper 子命令。
 
+#[cfg(feature = "metadata")]
+use anime_organizer::library_index::{Artwork, ArtworkKind};
 #[cfg(feature = "scraper")]
 use anime_organizer::scraper::{
     db_builder::build_bangumi_db,
@@ -9,7 +11,8 @@ use anime_organizer::scraper::{
     ScrapedAnime, Scraper,
 };
 use anime_organizer::{
-    error::AppError, AnimeFileInfo, FileOrganizer, FilenameParser, OperationMode,
+    error::AppError, AnimeFileInfo, FileOrganizer, FilenameParser, LibraryIndex,
+    LibraryIndexRecord, OperationMode,
 };
 #[cfg(feature = "metadata")]
 use anime_organizer::{
@@ -128,6 +131,14 @@ struct OrganizeArgs {
     /// 启用分季模式：按 `番名/Season N/` 结构整理文件
     #[arg(long = "season-mode", visible_alias = "分季")]
     season_mode: bool,
+
+    /// 生成/更新目标目录根部的 MLIP 媒体库索引 library.db
+    #[arg(long)]
+    library_index: bool,
+
+    /// 强制重新扫描目标目录并重建 MLIP 媒体库索引
+    #[arg(long)]
+    rebuild_library_index: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -511,6 +522,7 @@ fn run_command(command: Commands) -> Result<(), AppError> {
 
 /// 仅文件整理流程（无元数据）
 fn run_organize(args: OrganizeArgs) -> Result<(), AppError> {
+    validate_library_index_args(&args)?;
     let (source, target) = resolve_source_and_target(&args)?;
     let fallback_mode = args
         .fallback_on_link_failure
@@ -520,6 +532,7 @@ fn run_organize(args: OrganizeArgs) -> Result<(), AppError> {
     let mut processed = 0;
     let mut succeeded = 0;
     let mut failed = 0;
+    let mut library_records = Vec::new();
 
     for entry in WalkDir::new(&source)
         .into_iter()
@@ -560,18 +573,29 @@ fn run_organize(args: OrganizeArgs) -> Result<(), AppError> {
             fallback_mode,
             args.verbose,
         ) {
-            Ok(_) => succeeded += 1,
+            Ok(target_path) => {
+                succeeded += 1;
+                if args.library_index {
+                    if let Some(record) =
+                        LibraryIndexRecord::from_target_path(&target, &target_path)?
+                    {
+                        library_records.push(record);
+                    }
+                }
+            }
             Err(_) => failed += 1,
         }
     }
 
     println!("处理完成：总计{processed}个文件，成功{succeeded}个，失败{failed}个");
+    finish_library_index(&args, &target, &extensions, &library_records)?;
     Ok(())
 }
 
 /// 带元数据刮削的流程
 #[cfg(feature = "metadata")]
 async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
+    validate_library_index_args(&args)?;
     let (source, target) = resolve_source_and_target(&args)?;
     let fallback_mode = args
         .fallback_on_link_failure
@@ -613,6 +637,7 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
     let mut succeeded = 0;
     let mut failed = 0;
     let mut metadata_cache: HashMap<String, Option<AnimeMetadata>> = HashMap::new();
+    let mut library_records = Vec::new();
 
     for (anime_name, files) in anime_groups {
         let Some(first_file) = files.first() else {
@@ -683,6 +708,23 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
                 Ok(target_path) => {
                     succeeded += 1;
 
+                    if args.library_index {
+                        if let Some(mut record) =
+                            LibraryIndexRecord::from_target_path(&target, &target_path)?
+                        {
+                            if let Some(ref meta) = metadata {
+                                record.apply_metadata(meta);
+                                add_metadata_artwork(
+                                    &mut record,
+                                    &target,
+                                    &anime_root,
+                                    season_number,
+                                );
+                            }
+                            library_records.push(record);
+                        }
+                    }
+
                     if let Some(ref meta) = metadata {
                         let episode_nfo_path = target_path.with_extension("nfo");
                         if args.force_overwrite || !episode_nfo_path.exists() {
@@ -715,6 +757,21 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
             .count();
         println!("元数据匹配：{matched}/{} 部动画", metadata_cache.len());
     }
+
+    finish_library_index_with_metadata(
+        &args,
+        &target,
+        &extensions,
+        &library_records,
+        MetadataIndexContext {
+            metadata_cache: &mut metadata_cache,
+            alias_lookup: &alias_lookup,
+            bangumi: &bangumi,
+            tmdb: tmdb.as_ref(),
+            verbose: args.verbose,
+        },
+    )
+    .await?;
 
     Ok(())
 }
@@ -1061,6 +1118,280 @@ fn organize_file_to_dir(
             Err(error)
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LibraryIndexWriteMode {
+    Initialize,
+    Incremental,
+    Rebuild,
+}
+
+impl LibraryIndexWriteMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Initialize => "初始化",
+            Self::Incremental => "增量更新",
+            Self::Rebuild => "重建",
+        }
+    }
+}
+
+fn validate_library_index_args(args: &OrganizeArgs) -> Result<(), AppError> {
+    if args.rebuild_library_index && !args.library_index {
+        return Err(AppError::ParseError(
+            "--rebuild-library-index 必须与 --library-index 一起使用".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_library_index_mode(args: &OrganizeArgs, target: &Path) -> Option<LibraryIndexWriteMode> {
+    if !args.library_index {
+        return None;
+    }
+
+    if args.rebuild_library_index {
+        return Some(LibraryIndexWriteMode::Rebuild);
+    }
+
+    if LibraryIndex::database_path(target).exists() {
+        Some(LibraryIndexWriteMode::Incremental)
+    } else {
+        Some(LibraryIndexWriteMode::Initialize)
+    }
+}
+
+fn finish_library_index(
+    args: &OrganizeArgs,
+    target: &Path,
+    extensions: &HashSet<String>,
+    current_records: &[LibraryIndexRecord],
+) -> Result<(), AppError> {
+    let Some(mode) = resolve_library_index_mode(args, target) else {
+        return Ok(());
+    };
+
+    if args.dry_run {
+        let scan_count = if matches!(
+            mode,
+            LibraryIndexWriteMode::Initialize | LibraryIndexWriteMode::Rebuild
+        ) {
+            collect_target_library_records(target, extensions, args.verbose)?.len()
+        } else {
+            current_records.len()
+        };
+        eprintln!(
+            "[dry-run] MLIP {}: {} ({} 条记录)",
+            mode.label(),
+            LibraryIndex::database_path(target).display(),
+            scan_count
+        );
+        return Ok(());
+    }
+
+    let stats = match mode {
+        LibraryIndexWriteMode::Initialize | LibraryIndexWriteMode::Rebuild => {
+            let records = collect_target_library_records(target, extensions, args.verbose)?;
+            LibraryIndex::rebuild(target, &records)?
+        }
+        LibraryIndexWriteMode::Incremental => LibraryIndex::update(target, current_records)?,
+    };
+
+    println!(
+        "媒体库索引{}完成：{} 部作品，{} 集，{} 个文件 ({})",
+        mode.label(),
+        stats.series,
+        stats.episodes,
+        stats.media_files,
+        LibraryIndex::database_path(target).display()
+    );
+    Ok(())
+}
+
+fn collect_target_library_records(
+    target: &Path,
+    extensions: &HashSet<String>,
+    verbose: bool,
+) -> Result<Vec<LibraryIndexRecord>, AppError> {
+    let mut records = Vec::new();
+
+    for entry in WalkDir::new(target)
+        .into_iter()
+        .filter_map(|item| item.ok())
+        .filter(|item| item.file_type().is_file())
+    {
+        let path = entry.path();
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("library.db"))
+        {
+            continue;
+        }
+        if !has_valid_extension(path, extensions) {
+            continue;
+        }
+
+        match LibraryIndexRecord::from_target_path(target, path)? {
+            Some(record) => records.push(record),
+            None if verbose => eprintln!(
+                "跳过：无法加入媒体库索引 {}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ),
+            None => {}
+        }
+    }
+
+    Ok(records)
+}
+
+#[cfg(feature = "metadata")]
+struct MetadataIndexContext<'a> {
+    metadata_cache: &'a mut HashMap<String, Option<AnimeMetadata>>,
+    alias_lookup: &'a AliasLookup,
+    bangumi: &'a BangumiClient,
+    tmdb: Option<&'a TmdbClient>,
+    verbose: bool,
+}
+
+#[cfg(feature = "metadata")]
+async fn finish_library_index_with_metadata(
+    args: &OrganizeArgs,
+    target: &Path,
+    extensions: &HashSet<String>,
+    current_records: &[LibraryIndexRecord],
+    mut context: MetadataIndexContext<'_>,
+) -> Result<(), AppError> {
+    let Some(mode) = resolve_library_index_mode(args, target) else {
+        return Ok(());
+    };
+
+    if args.dry_run {
+        let scan_count = if matches!(
+            mode,
+            LibraryIndexWriteMode::Initialize | LibraryIndexWriteMode::Rebuild
+        ) {
+            collect_target_library_records(target, extensions, args.verbose)?.len()
+        } else {
+            current_records.len()
+        };
+        eprintln!(
+            "[dry-run] MLIP {}: {} ({} 条记录)",
+            mode.label(),
+            LibraryIndex::database_path(target).display(),
+            scan_count
+        );
+        return Ok(());
+    }
+
+    let stats = match mode {
+        LibraryIndexWriteMode::Initialize | LibraryIndexWriteMode::Rebuild => {
+            let mut records = collect_target_library_records(target, extensions, args.verbose)?;
+            enrich_library_index_records(&mut records, target, &mut context).await;
+            LibraryIndex::rebuild(target, &records)?
+        }
+        LibraryIndexWriteMode::Incremental => LibraryIndex::update(target, current_records)?,
+    };
+
+    println!(
+        "媒体库索引{}完成：{} 部作品，{} 集，{} 个文件 ({})",
+        mode.label(),
+        stats.series,
+        stats.episodes,
+        stats.media_files,
+        LibraryIndex::database_path(target).display()
+    );
+    Ok(())
+}
+
+#[cfg(feature = "metadata")]
+async fn enrich_library_index_records(
+    records: &mut [LibraryIndexRecord],
+    target: &Path,
+    context: &mut MetadataIndexContext<'_>,
+) {
+    for record in records {
+        let lookup_title = record.series_title.clone();
+        let season = u32::try_from(record.season).unwrap_or(1);
+        let metadata = if let Some(cached) = context.metadata_cache.get(&lookup_title) {
+            cached.clone()
+        } else {
+            let fetched = fetch_anime_metadata(
+                &lookup_title,
+                &lookup_title,
+                context.alias_lookup,
+                context.bangumi,
+                context.tmdb,
+                context.verbose,
+            )
+            .await;
+            context
+                .metadata_cache
+                .insert(lookup_title.clone(), fetched.clone());
+            fetched
+        };
+
+        if let Some(ref meta) = metadata {
+            record.apply_metadata(meta);
+            let anime_root = target.join(&lookup_title);
+            add_metadata_artwork(record, target, &anime_root, season.max(1));
+        }
+    }
+}
+
+#[cfg(feature = "metadata")]
+fn add_metadata_artwork(
+    record: &mut LibraryIndexRecord,
+    target: &Path,
+    anime_root: &Path,
+    season_number: u32,
+) {
+    add_series_artwork_if_exists(
+        record,
+        target,
+        ArtworkKind::Poster,
+        &anime_root.join("poster.jpg"),
+    );
+    add_series_artwork_if_exists(
+        record,
+        target,
+        ArtworkKind::Fanart,
+        &anime_root.join("fanart.jpg"),
+    );
+    add_series_artwork_if_exists(
+        record,
+        target,
+        ArtworkKind::SeasonPoster,
+        &anime_root.join(format!("season{season_number:02}-poster.jpg")),
+    );
+}
+
+#[cfg(feature = "metadata")]
+fn add_series_artwork_if_exists(
+    record: &mut LibraryIndexRecord,
+    target: &Path,
+    kind: ArtworkKind,
+    path: &Path,
+) {
+    if !path.exists() {
+        return;
+    }
+
+    if let Some(relative) = path.strip_prefix(target).ok().map(normalized_relative_path) {
+        record.series_artwork.push(Artwork::new(kind, relative));
+    }
+}
+
+#[cfg(feature = "metadata")]
+fn normalized_relative_path(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => value.to_str().map(ToOwned::to_owned),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn collect_anime_groups(

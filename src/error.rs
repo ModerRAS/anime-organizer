@@ -51,6 +51,10 @@ pub enum AppError {
     #[error("NFO 生成失败: {0}")]
     NfoGenerationError(String),
 
+    /// 媒体库索引生成失败
+    #[error("媒体库索引生成失败: {0}")]
+    LibraryIndexError(String),
+
     /// 图片下载失败
     #[error("图片下载失败: {0}")]
     ImageDownloadError(String),

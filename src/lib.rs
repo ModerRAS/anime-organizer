@@ -35,6 +35,7 @@
 /// - [`nfo`] - NFO 文件生成模块
 /// - `scraper` - 数据源刮削模块（需 `scraper` feature，参考 `cargo doc --features scraper`）
 pub mod error;
+pub mod library_index;
 pub mod metadata;
 pub mod nfo;
 pub mod organizer;
@@ -47,6 +48,7 @@ pub mod scraper;
 pub mod torrent;
 
 pub use error::{AppError, Result};
+pub use library_index::{LibraryIndex, LibraryIndexRecord};
 pub use metadata::AnimeMetadata;
 pub use nfo::{EpisodeNfo, NfoWriter, TvShowNfo};
 pub use organizer::{FileOrganizer, OperationMode};
