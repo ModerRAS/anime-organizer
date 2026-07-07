@@ -75,9 +75,17 @@ pub fn build_http_client(proxy_config: &Option<ProxyConfig>) -> Result<reqwest::
 mod tests {
     use super::*;
     use std::env;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner())
+    }
 
     #[test]
     fn test_proxy_config_uppercase_fallback() {
+        let _guard = env_lock();
         // 清理所有可能的环境变量
         env::remove_var("http_proxy");
         env::remove_var("HTTP_PROXY");
@@ -103,6 +111,8 @@ mod tests {
 
     #[test]
     fn test_proxy_config_from_env() {
+        let _guard = env_lock();
+
         // 清理所有可能的环境变量
         env::remove_var("http_proxy");
         env::remove_var("HTTP_PROXY");
@@ -131,6 +141,8 @@ mod tests {
 
     #[test]
     fn test_proxy_config_lowercase_priority() {
+        let _guard = env_lock();
+
         // 清理所有可能的环境变量
         env::remove_var("http_proxy");
         env::remove_var("HTTP_PROXY");
@@ -152,6 +164,8 @@ mod tests {
 
     #[test]
     fn test_proxy_config_none_when_unset() {
+        let _guard = env_lock();
+
         // 确保清理所有可能的环境变量
         env::remove_var("http_proxy");
         env::remove_var("HTTP_PROXY");
@@ -170,6 +184,8 @@ mod tests {
 
     #[test]
     fn test_build_http_client_with_proxy() {
+        let _guard = env_lock();
+
         // 清理所有可能的环境变量
         env::remove_var("http_proxy");
         env::remove_var("HTTP_PROXY");
