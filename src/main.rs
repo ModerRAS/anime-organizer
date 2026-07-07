@@ -46,6 +46,8 @@ const APP_LONG_ABOUT: &str = concat!(
     "    aniorg --source=\"D:\\Downloads\" --target=\"E:\\Anime\"\n\n",
     "启用元数据刮削：\n",
     "    aniorg --source=\"D:\\Downloads\" --scrape-metadata --tmdb-api-key=\"...\"\n\n",
+    "生成 MiruPlay MLIP 媒体库：\n",
+    "    aniorg --source=\"D:\\Downloads\" --target=\"E:\\Anime\" --mlip --tmdb-api-key=\"...\"\n\n",
     "启用 scraper 子命令（需以 --features scraper 编译）：\n",
     "    aniorg scrape --days 7 --format json\n",
     "    aniorg match --input scraped.json --format github\n"
@@ -136,6 +138,10 @@ struct OrganizeArgs {
     #[arg(long)]
     library_index: bool,
 
+    /// 生成 MiruPlay 可直接导入的 MLIP 媒体库（含 Bangumi 元数据和 library.db）
+    #[arg(long)]
+    mlip: bool,
+
     /// 强制重新扫描目标目录并重建 MLIP 媒体库索引
     #[arg(long)]
     rebuild_library_index: bool,
@@ -155,6 +161,12 @@ impl FallbackMode {
             Self::Move => OperationMode::Move,
             Self::Copy => OperationMode::Copy,
         }
+    }
+}
+
+impl OrganizeArgs {
+    fn writes_library_index(&self) -> bool {
+        self.library_index || self.mlip
     }
 }
 
@@ -460,7 +472,7 @@ fn run() -> Result<(), AppError> {
 
 #[cfg(feature = "metadata")]
 fn run_organize_entry(args: OrganizeArgs) -> Result<(), AppError> {
-    if args.scrape_metadata {
+    if args.scrape_metadata || args.mlip {
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| AppError::MetadataFetchError(format!("创建异步运行时失败: {e}")))?;
         runtime.block_on(run_with_metadata(args))
@@ -471,7 +483,7 @@ fn run_organize_entry(args: OrganizeArgs) -> Result<(), AppError> {
 
 #[cfg(not(feature = "metadata"))]
 fn run_organize_entry(args: OrganizeArgs) -> Result<(), AppError> {
-    if args.scrape_metadata {
+    if args.scrape_metadata || args.mlip {
         return Err(AppError::MetadataFetchError(
             "元数据功能未启用，请使用 --features metadata 编译".to_string(),
         ));
@@ -575,7 +587,7 @@ fn run_organize(args: OrganizeArgs) -> Result<(), AppError> {
         ) {
             Ok(target_path) => {
                 succeeded += 1;
-                if args.library_index {
+                if args.writes_library_index() {
                     if let Some(record) =
                         LibraryIndexRecord::from_target_path(&target, &target_path)?
                     {
@@ -628,8 +640,8 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
     }
 
     let tmdb = args.tmdb_api_key.clone().map(TmdbClient::new);
-    if args.scrape_metadata && !args.no_images && tmdb.is_none() && args.verbose {
-        eprintln!("未提供 TMDB API Key，将跳过 TMDB 图片下载，仅保留 NFO 生成");
+    if !args.no_images && tmdb.is_none() && args.verbose {
+        eprintln!("未提供 TMDB API Key，将跳过 TMDB 图片下载");
     }
 
     let anime_groups = collect_anime_groups(&source, &extensions, args.verbose);
@@ -665,17 +677,19 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
         };
 
         if let Some(ref meta) = metadata {
-            let tvshow_nfo_path = anime_root.join("tvshow.nfo");
-            if args.force_overwrite || !tvshow_nfo_path.exists() {
-                let nfo = TvShowNfo::from(meta);
-                if args.dry_run {
-                    if args.verbose {
-                        eprintln!("[dry-run] 生成 tvshow.nfo: {}", tvshow_nfo_path.display());
-                    }
-                } else {
-                    NfoWriter::write_tvshow(&anime_root, &nfo)?;
-                    if args.verbose {
-                        eprintln!("已生成 tvshow.nfo: {}", tvshow_nfo_path.display());
+            if args.scrape_metadata {
+                let tvshow_nfo_path = anime_root.join("tvshow.nfo");
+                if args.force_overwrite || !tvshow_nfo_path.exists() {
+                    let nfo = TvShowNfo::from(meta);
+                    if args.dry_run {
+                        if args.verbose {
+                            eprintln!("[dry-run] 生成 tvshow.nfo: {}", tvshow_nfo_path.display());
+                        }
+                    } else {
+                        NfoWriter::write_tvshow(&anime_root, &nfo)?;
+                        if args.verbose {
+                            eprintln!("已生成 tvshow.nfo: {}", tvshow_nfo_path.display());
+                        }
                     }
                 }
             }
@@ -708,7 +722,7 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
                 Ok(target_path) => {
                     succeeded += 1;
 
-                    if args.library_index {
+                    if args.writes_library_index() {
                         if let Some(mut record) =
                             LibraryIndexRecord::from_target_path(&target, &target_path)?
                         {
@@ -725,21 +739,23 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
                         }
                     }
 
-                    if let Some(ref meta) = metadata {
-                        let episode_nfo_path = target_path.with_extension("nfo");
-                        if args.force_overwrite || !episode_nfo_path.exists() {
-                            let episode_nfo = create_episode_nfo(&file, meta);
-                            if args.dry_run {
-                                if args.verbose {
-                                    eprintln!(
-                                        "[dry-run] 生成 episode.nfo: {}",
-                                        episode_nfo_path.display()
-                                    );
+                    if args.scrape_metadata {
+                        if let Some(ref meta) = metadata {
+                            let episode_nfo_path = target_path.with_extension("nfo");
+                            if args.force_overwrite || !episode_nfo_path.exists() {
+                                let episode_nfo = create_episode_nfo(&file, meta);
+                                if args.dry_run {
+                                    if args.verbose {
+                                        eprintln!(
+                                            "[dry-run] 生成 episode.nfo: {}",
+                                            episode_nfo_path.display()
+                                        );
+                                    }
+                                } else if let Err(error) =
+                                    NfoWriter::write_episode(&episode_nfo_path, &episode_nfo)
+                                {
+                                    eprintln!("生成 episode.nfo 失败: {error}");
                                 }
-                            } else if let Err(error) =
-                                NfoWriter::write_episode(&episode_nfo_path, &episode_nfo)
-                            {
-                                eprintln!("生成 episode.nfo 失败: {error}");
                             }
                         }
                     }
@@ -1138,16 +1154,16 @@ impl LibraryIndexWriteMode {
 }
 
 fn validate_library_index_args(args: &OrganizeArgs) -> Result<(), AppError> {
-    if args.rebuild_library_index && !args.library_index {
+    if args.rebuild_library_index && !args.writes_library_index() {
         return Err(AppError::ParseError(
-            "--rebuild-library-index 必须与 --library-index 一起使用".to_string(),
+            "--rebuild-library-index 必须与 --library-index 或 --mlip 一起使用".to_string(),
         ));
     }
     Ok(())
 }
 
 fn resolve_library_index_mode(args: &OrganizeArgs, target: &Path) -> Option<LibraryIndexWriteMode> {
-    if !args.library_index {
+    if !args.writes_library_index() {
         return None;
     }
 

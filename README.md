@@ -97,6 +97,9 @@ aniorg --source="/path/to/downloads" --scrape-metadata --tmdb-api-key="YOUR_TMDB
 # 生成/更新目标目录根部的 MLIP 媒体库索引
 aniorg --source="/path/to/downloads" --target="/path/to/anime" --library-index
 
+# 生成 MiruPlay 可直接导入的 MLIP 媒体库（含 Bangumi 元数据）
+aniorg --source="/path/to/downloads" --target="/path/to/anime" --mlip --tmdb-api-key="YOUR_TMDB_KEY"
+
 # 强制重新扫描目标目录并重建媒体库索引
 aniorg --source="/path/to/downloads" --target="/path/to/anime" --library-index --rebuild-library-index
 ```
@@ -129,7 +132,8 @@ aniorg --source="/path/to/downloads" --dry-run --verbose
 | `--bangumi-cache` | | string | ❌ | 系统临时目录 | Bangumi 缓存目录 |
 | `--metadata-source` | | string | ❌ | - | 指定本地 `subject.jsonlines` 或其所在目录 |
 | `--library-index` | | bool | ❌ | false | 生成/更新目标目录根部的 `library.db` |
-| `--rebuild-library-index` | | bool | ❌ | false | 与 `--library-index` 一起使用，强制全量重扫目标目录并重建索引 |
+| `--mlip` | | bool | ❌ | false | 生成 MiruPlay 可直接导入的 MLIP 媒体库，自动启用 `library.db` 并写入 Bangumi 元数据 |
+| `--rebuild-library-index` | | bool | ❌ | false | 与 `--library-index` 或 `--mlip` 一起使用，强制全量重扫目标目录并重建索引 |
 | `--help` | `-h` | bool | ❌ | false | 显示帮助 |
 | `--version` | `-V` | bool | ❌ | false | 显示版本 |
 
@@ -163,6 +167,8 @@ aniorg --source="/path/to/downloads" --dry-run --verbose
 - 如果 `library.db` 已存在：默认只把本次整理成功的新文件增量更新进去。
 - 如果同时传入 `--rebuild-library-index`：整理完成后重新扫描整个 target 并重建数据库。
 - `--dry-run` 下只打印将执行的模式和统计，不创建或修改数据库。
+
+`--library-index` 只写文件索引，不主动联网补元数据。给 MiruPlay 使用时推荐 `--mlip`：它会自动生成 `library.db`，并把 Bangumi 元数据写入索引；如果提供 TMDB API Key，还会沿用现有图片下载逻辑写入本地封面路径。
 
 本数据库是只读协议。任何播放器不得修改本数据库；播放历史、收藏、继续播放等数据必须保存在播放器自己的数据库。
 
@@ -208,7 +214,17 @@ aniorg \
   --rebuild-library-index
 ```
 
-`--rebuild-library-index` 必须和 `--library-index` 一起使用。重建会在文件整理完成后扫描整个 target，因此本次整理成功的新文件也会包含在新的 `library.db` 里。
+`--rebuild-library-index` 必须和 `--library-index` 或 `--mlip` 一起使用。重建会在文件整理完成后扫描整个 target，因此本次整理成功的新文件也会包含在新的 `library.db` 里。
+
+给 MiruPlay 生成成品库时，使用 `--mlip`；它不会生成 Kodi NFO：
+
+```bash
+aniorg \
+  --source="/path/to/downloads" \
+  --target="/path/to/anime" \
+  --mlip \
+  --tmdb-api-key="YOUR_TMDB_KEY"
+```
 
 如果同时想生成 Kodi NFO、图片和 MLIP 索引，可以一起开启元数据刮削：
 
@@ -661,6 +677,9 @@ aniorg --source="/path/to/downloads" --scrape-metadata --tmdb-api-key="YOUR_TMDB
 # Generate or update the MLIP library index in the target root
 aniorg --source="/path/to/downloads" --target="/path/to/anime" --library-index
 
+# Generate a MiruPlay-ready MLIP library with Bangumi metadata
+aniorg --source="/path/to/downloads" --target="/path/to/anime" --mlip --tmdb-api-key="YOUR_TMDB_KEY"
+
 # Force a full target rescan and rebuild the library index
 aniorg --source="/path/to/downloads" --target="/path/to/anime" --library-index --rebuild-library-index
 ```
@@ -685,7 +704,8 @@ aniorg --source="/path/to/downloads" --target="/path/to/anime" --library-index -
 | `--bangumi-cache` | | string | ❌ | system temp dir | Bangumi cache directory |
 | `--metadata-source` | | string | ❌ | - | Local `subject.jsonlines` file or containing directory |
 | `--library-index` | | bool | ❌ | false | Generate/update `library.db` in the target root |
-| `--rebuild-library-index` | | bool | ❌ | false | Force a full target rescan and rebuild; requires `--library-index` |
+| `--mlip` | | bool | ❌ | false | Generate a MiruPlay-ready MLIP library and write Bangumi metadata into `library.db` |
+| `--rebuild-library-index` | | bool | ❌ | false | Force a full target rescan and rebuild; requires `--library-index` or `--mlip` |
 | `--help` | `-h` | bool | ❌ | false | Show help |
 | `--version` | `-V` | bool | ❌ | false | Show version |
 
@@ -713,7 +733,9 @@ The `--alias-file` JSON can reuse the object output format from `extract-aliases
 
 ### 🗃️ MLIP Library Index
 
-`--library-index` manages a fixed `library.db` in the target root. The first run creates the database by scanning the full target directory after organization finishes:
+`--library-index` manages a fixed `library.db` in the target root. It only writes the file index and does not fetch metadata. For MiruPlay, prefer `--mlip`; it implies `library.db` generation and writes Bangumi metadata, while leaving Kodi NFO generation disabled unless `--scrape-metadata` is also set.
+
+The first run creates the database by scanning the full target directory after organization finishes:
 
 ```bash
 aniorg \
