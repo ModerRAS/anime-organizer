@@ -166,6 +166,74 @@ aniorg --source="/path/to/downloads" --dry-run --verbose
 
 本数据库是只读协议。任何播放器不得修改本数据库；播放历史、收藏、继续播放等数据必须保存在播放器自己的数据库。
 
+#### 使用方式
+
+首次启用时，`library.db` 不存在，程序会先完成本次整理，再扫描整个 target 目录建立索引：
+
+```bash
+aniorg \
+  --source="/path/to/downloads" \
+  --target="/path/to/anime" \
+  --library-index
+```
+
+生成结果固定放在目标目录根部：
+
+```text
+/path/to/anime/
+├── library.db
+├── Bocchi the Rock!/
+│   └── 01 [1080P].mkv
+└── Spy x Family/
+    └── Season 2/
+        └── 01 [1080P].mkv
+```
+
+以后继续整理新下载时，仍然使用同一个命令。只要 `library.db` 已存在，默认就是增量更新：只把本次整理成功的文件写入索引，不会重新扫描整个目标目录。
+
+```bash
+aniorg \
+  --source="/path/to/new-downloads" \
+  --target="/path/to/anime" \
+  --library-index
+```
+
+如果你手动往目标目录添加、删除、移动了文件，或者想重新生成整个索引，使用 `--rebuild-library-index`：
+
+```bash
+aniorg \
+  --source="/path/to/downloads" \
+  --target="/path/to/anime" \
+  --library-index \
+  --rebuild-library-index
+```
+
+`--rebuild-library-index` 必须和 `--library-index` 一起使用。重建会在文件整理完成后扫描整个 target，因此本次整理成功的新文件也会包含在新的 `library.db` 里。
+
+如果同时想生成 Kodi NFO、图片和 MLIP 索引，可以一起开启元数据刮削：
+
+```bash
+aniorg \
+  --source="/path/to/downloads" \
+  --target="/path/to/anime" \
+  --scrape-metadata \
+  --tmdb-api-key="YOUR_TMDB_KEY" \
+  --library-index
+```
+
+预览时可以组合 `--dry-run`。此时不会创建或修改 `library.db`，只会打印将执行初始化、增量更新还是重建：
+
+```bash
+aniorg \
+  --source="/path/to/downloads" \
+  --target="/path/to/anime" \
+  --library-index \
+  --dry-run \
+  --verbose
+```
+
+如果不传 `--target`，目标目录沿用现有规则等于 source，所以索引会写到 `<source>/library.db`。播放器读取时应把 `media_file.path` 当作相对 `library.db` 所在目录的路径处理，路径分隔符统一为 `/`。
+
 ```sql
 -- ============================================================
 -- Media Library Index Protocol (MLIP)
@@ -642,6 +710,38 @@ The `--alias-file` JSON can reuse the object output format from `extract-aliases
   }
 }
 ```
+
+### 🗃️ MLIP Library Index
+
+`--library-index` manages a fixed `library.db` in the target root. The first run creates the database by scanning the full target directory after organization finishes:
+
+```bash
+aniorg \
+  --source="/path/to/downloads" \
+  --target="/path/to/anime" \
+  --library-index
+```
+
+Later runs with the same command are incremental when `library.db` already exists: only files successfully organized in the current run are upserted.
+
+```bash
+aniorg \
+  --source="/path/to/new-downloads" \
+  --target="/path/to/anime" \
+  --library-index
+```
+
+Use `--rebuild-library-index` when files were manually added, removed, or moved in the target directory:
+
+```bash
+aniorg \
+  --source="/path/to/downloads" \
+  --target="/path/to/anime" \
+  --library-index \
+  --rebuild-library-index
+```
+
+`--dry-run --library-index` does not create or modify `library.db`; it only reports whether the command would initialize, incrementally update, or rebuild the index. `media_file.path` values are stored relative to the directory containing `library.db` and always use `/` separators.
 
 ### 🔗 Hard Link Notes
 
