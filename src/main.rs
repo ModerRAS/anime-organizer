@@ -45,9 +45,9 @@ const APP_LONG_ABOUT: &str = concat!(
     "默认模式用于批量整理动漫文件：\n",
     "    aniorg --source=\"D:\\Downloads\" --target=\"E:\\Anime\"\n\n",
     "启用元数据刮削：\n",
-    "    aniorg --source=\"D:\\Downloads\" --scrape-metadata --tmdb-api-key=\"...\"\n\n",
+    "    aniorg --source=\"D:\\Downloads\" --scrape-metadata\n\n",
     "生成 MiruPlay MLIP 媒体库：\n",
-    "    aniorg --source=\"D:\\Downloads\" --target=\"E:\\Anime\" --mlip --tmdb-api-key=\"...\"\n\n",
+    "    aniorg --source=\"D:\\Downloads\" --target=\"E:\\Anime\" --mlip\n\n",
     "启用 scraper 子命令（需以 --features scraper 编译）：\n",
     "    aniorg scrape --days 7 --format json\n",
     "    aniorg match --input scraped.json --format github\n"
@@ -699,6 +699,7 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
                     meta,
                     &anime_root,
                     season_number,
+                    &bangumi,
                     tmdb.as_ref(),
                     args.force_overwrite,
                     args.verbose,
@@ -899,6 +900,7 @@ async fn download_images(
     meta: &AnimeMetadata,
     anime_root: &Path,
     season_number: u32,
+    bangumi: &BangumiClient,
     tmdb: Option<&TmdbClient>,
     force: bool,
     verbose: bool,
@@ -906,60 +908,83 @@ async fn download_images(
     let root_poster_path = anime_root.join("poster.jpg");
     let season_poster_path = anime_root.join(format!("season{season_number:02}-poster.jpg"));
     let fanart_path = anime_root.join("fanart.jpg");
-    let mut poster_written = false;
+    let needs_root = force || !root_poster_path.exists();
+    let needs_season = force || !season_poster_path.exists();
+    let needs_fanart = force || !fanart_path.exists();
+    let mut poster_written = !needs_root && !needs_season;
 
-    if let Some(tmdb_client) = tmdb {
-        if let Some(show) = resolve_tmdb_show(meta, tmdb_client, verbose).await {
-            if let Ok(Some(url)) = tmdb_client.best_poster_url(&show).await {
-                let needs_root = force || !root_poster_path.exists();
-                let needs_season = force || !season_poster_path.exists();
-                if needs_root || needs_season {
-                    match tmdb_client.download_image_bytes(&url).await {
-                        Ok(bytes) => {
-                            if needs_root {
-                                if let Err(error) =
-                                    NfoWriter::write_image(&root_poster_path, &bytes)
-                                {
-                                    eprintln!("海报写入失败: {error}");
-                                } else if verbose {
-                                    eprintln!("已下载海报: {}", root_poster_path.display());
-                                }
-                            }
-
-                            if needs_season {
-                                if let Err(error) =
-                                    NfoWriter::write_image(&season_poster_path, &bytes)
-                                {
-                                    eprintln!("季海报写入失败: {error}");
-                                } else if verbose {
-                                    eprintln!("已下载季海报: {}", season_poster_path.display());
-                                }
-                            }
-
-                            poster_written = true;
-                        }
-                        Err(error) => eprintln!("海报下载失败: {error}"),
-                    }
-                } else {
+    if !poster_written {
+        if let Some(url) = meta
+            .poster_url
+            .as_deref()
+            .filter(|url| !url.trim().is_empty())
+        {
+            match bangumi.download_image_bytes(url).await {
+                Ok(bytes) => {
+                    write_poster_images(
+                        &bytes,
+                        &root_poster_path,
+                        &season_poster_path,
+                        needs_root,
+                        needs_season,
+                        "Bangumi",
+                        verbose,
+                    );
                     poster_written = true;
                 }
-            }
-
-            if force || !fanart_path.exists() {
-                match tmdb_client.best_backdrop_url(&show).await {
-                    Ok(Some(url)) => match tmdb_client.download_image_bytes(&url).await {
-                        Ok(bytes) => {
-                            if let Err(error) = NfoWriter::write_image(&fanart_path, &bytes) {
-                                eprintln!("背景图写入失败: {error}");
-                            } else if verbose {
-                                eprintln!("已下载背景图: {}", fanart_path.display());
-                            }
-                        }
-                        Err(error) => eprintln!("背景图下载失败: {error}"),
-                    },
-                    Ok(None) => {}
-                    Err(error) => eprintln!("背景图获取失败: {error}"),
+                Err(error) => {
+                    if verbose {
+                        eprintln!("Bangumi 海报下载失败: {error}");
+                    }
                 }
+            }
+        }
+    }
+
+    let tmdb_show = match (tmdb, !poster_written || needs_fanart) {
+        (Some(tmdb_client), true) => resolve_tmdb_show(meta, tmdb_client, verbose).await,
+        _ => None,
+    };
+
+    if !poster_written {
+        if let (Some(tmdb_client), Some(show)) = (tmdb, tmdb_show.as_ref()) {
+            match tmdb_client.best_poster_url(show).await {
+                Ok(Some(url)) => match tmdb_client.download_image_bytes(&url).await {
+                    Ok(bytes) => {
+                        write_poster_images(
+                            &bytes,
+                            &root_poster_path,
+                            &season_poster_path,
+                            needs_root,
+                            needs_season,
+                            "TMDB",
+                            verbose,
+                        );
+                        poster_written = true;
+                    }
+                    Err(error) => eprintln!("TMDB 海报下载失败: {error}"),
+                },
+                Ok(None) => {}
+                Err(error) => eprintln!("TMDB 海报获取失败: {error}"),
+            }
+        }
+    }
+
+    if let (Some(tmdb_client), Some(show)) = (tmdb, tmdb_show.as_ref()) {
+        if needs_fanart {
+            match tmdb_client.best_backdrop_url(show).await {
+                Ok(Some(url)) => match tmdb_client.download_image_bytes(&url).await {
+                    Ok(bytes) => {
+                        if let Err(error) = NfoWriter::write_image(&fanart_path, &bytes) {
+                            eprintln!("背景图写入失败: {error}");
+                        } else if verbose {
+                            eprintln!("已下载 TMDB 背景图: {}", fanart_path.display());
+                        }
+                    }
+                    Err(error) => eprintln!("TMDB 背景图下载失败: {error}"),
+                },
+                Ok(None) => {}
+                Err(error) => eprintln!("TMDB 背景图获取失败: {error}"),
             }
         }
     }
@@ -994,6 +1019,33 @@ async fn download_images(
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(feature = "metadata")]
+fn write_poster_images(
+    bytes: &[u8],
+    root_poster_path: &Path,
+    season_poster_path: &Path,
+    needs_root: bool,
+    needs_season: bool,
+    source: &str,
+    verbose: bool,
+) {
+    if needs_root {
+        if let Err(error) = NfoWriter::write_image(root_poster_path, bytes) {
+            eprintln!("海报写入失败: {error}");
+        } else if verbose {
+            eprintln!("已下载 {source} 海报: {}", root_poster_path.display());
+        }
+    }
+
+    if needs_season {
+        if let Err(error) = NfoWriter::write_image(season_poster_path, bytes) {
+            eprintln!("季海报写入失败: {error}");
+        } else if verbose {
+            eprintln!("已下载 {source} 季海报: {}", season_poster_path.display());
         }
     }
 }

@@ -1,11 +1,10 @@
-//! Bangumi Archive 客户端
+//! Bangumi 元数据客户端
 //!
-//! 通过 GitHub 托管的 Bangumi Archive 仓库获取动画元数据，
-//! 无需 API Key，直接访问静态 JSON 文件。
+//! 批量索引优先使用 Bangumi Archive dump；单条在线详情使用 Bangumi v0 API。
 //!
 //! ## 数据源
 //!
-//! - 单条查询：`https://raw.githubusercontent.com/bangumi/archive/master/data/subject/{id}.json`
+//! - 单条查询：`https://api.bgm.tv/v0/subjects/{id}`
 //! - 批量数据：Bangumi Archive Release 中的 `subject.jsonlines`（`type=2` 为动画）
 
 use crate::error::{AppError, Result};
@@ -21,8 +20,8 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "scraper")]
 use rusqlite::Connection;
 
-/// Bangumi Archive 基础 URL
-const BANGUMI_ARCHIVE_BASE: &str = "https://raw.githubusercontent.com/bangumi/archive/master/data";
+/// Bangumi API 基础 URL
+const BANGUMI_API_BASE: &str = "https://api.bgm.tv/v0";
 
 /// Bangumi Archive Release URL
 const BANGUMI_ARCHIVE_RELEASE: &str = "https://github.com/bangumi/archive/releases/latest/download";
@@ -62,11 +61,46 @@ pub struct BangumiSubject {
     /// Wiki Infobox 原始文本
     #[serde(default)]
     pub infobox: Option<String>,
+    /// Bangumi v0 API 返回的封面图集合；Archive dump 中通常不存在。
+    #[serde(default)]
+    pub images: Option<BangumiImages>,
 }
 
-/// Bangumi Archive 客户端
+impl BangumiSubject {
+    fn best_poster_url(&self) -> Option<String> {
+        self.images
+            .as_ref()
+            .and_then(BangumiImages::best_poster_url)
+    }
+}
+
+/// Bangumi 封面图 URL 集合。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BangumiImages {
+    #[serde(default)]
+    pub large: Option<String>,
+    #[serde(default)]
+    pub common: Option<String>,
+    #[serde(default)]
+    pub grid: Option<String>,
+    #[serde(default)]
+    pub medium: Option<String>,
+    #[serde(default)]
+    pub small: Option<String>,
+}
+
+impl BangumiImages {
+    fn best_poster_url(&self) -> Option<String> {
+        self.large
+            .clone()
+            .or_else(|| self.common.clone())
+            .or_else(|| self.grid.clone())
+    }
+}
+
+/// Bangumi 元数据客户端
 ///
-/// 从 Bangumi Archive GitHub 仓库获取动画元数据。
+/// 从 Bangumi Archive dump 和 Bangumi v0 API 获取动画元数据。
 /// 支持单条在线查询和本地缓存的批量数据查询。
 ///
 /// # 示例
@@ -122,14 +156,16 @@ impl BangumiClient {
         }
     }
 
-    /// 从 Bangumi Archive 在线获取单个 Subject 信息
+    /// 从 Bangumi v0 API 在线获取单个 Subject 信息。
     #[cfg(feature = "metadata")]
     pub async fn fetch_subject(&self, bangumi_id: u32) -> Result<BangumiSubject> {
-        let url = format!("{BANGUMI_ARCHIVE_BASE}/subject/{bangumi_id}.json");
-        let resp =
-            self.http.get(&url).send().await.map_err(|e| {
-                AppError::MetadataFetchError(format!("请求 Bangumi Archive 失败: {e}"))
-            })?;
+        let url = format!("{BANGUMI_API_BASE}/subjects/{bangumi_id}");
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| AppError::MetadataFetchError(format!("请求 Bangumi API 失败: {e}")))?;
 
         if !resp.status().is_success() {
             return Err(AppError::AnimeNotFoundError(format!(
@@ -148,13 +184,19 @@ impl BangumiClient {
 
     /// 获取完整的动画元数据
     ///
-    /// 从 Archive 获取 Subject 信息并解析 Wiki Infobox。
+    /// 从 Bangumi 获取 Subject 信息并解析 Wiki Infobox。
     #[cfg(feature = "metadata")]
     pub async fn fetch_metadata(&self, bangumi_id: u32) -> Result<AnimeMetadata> {
         self.prepare_index().await?;
 
         if let Some(subject) = self.find_by_id(bangumi_id)? {
-            return Ok(self.subject_to_metadata(&subject));
+            let mut metadata = self.subject_to_metadata(&subject);
+            if metadata.poster_url.is_none() {
+                if let Ok(online_subject) = self.fetch_subject(bangumi_id).await {
+                    metadata.poster_url = online_subject.best_poster_url();
+                }
+            }
+            return Ok(metadata);
         }
 
         let subject = self.fetch_subject(bangumi_id).await?;
@@ -437,6 +479,31 @@ impl BangumiClient {
         Ok(dump_path)
     }
 
+    /// 下载图片内容为字节。
+    #[cfg(feature = "metadata")]
+    pub async fn download_image_bytes(&self, url: &str) -> Result<Vec<u8>> {
+        let resp = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| AppError::ImageDownloadError(format!("图片下载请求失败: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Err(AppError::ImageDownloadError(format!(
+                "图片下载失败 (HTTP {})",
+                resp.status()
+            )));
+        }
+
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| AppError::ImageDownloadError(format!("读取图片数据失败: {e}")))?;
+
+        Ok(bytes.to_vec())
+    }
+
     /// 获取缓存目录路径
     pub fn cache_dir(&self) -> &Path {
         &self.cache_dir
@@ -457,6 +524,7 @@ impl BangumiClient {
         metadata.air_date = subject.date.clone();
         metadata.rating = subject.score.unwrap_or(0.0);
         metadata.episode_count = subject.eps.unwrap_or(0);
+        metadata.poster_url = subject.best_poster_url();
 
         // 解析 Wiki Infobox 提取额外信息
         if let Some(ref infobox) = subject.infobox {
@@ -472,6 +540,65 @@ impl BangumiClient {
         }
 
         metadata
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_subject(images: Option<BangumiImages>) -> BangumiSubject {
+        BangumiSubject {
+            id: 431767,
+            subject_type: 2,
+            name: "ガールズバンドクライ".to_string(),
+            name_cn: Some("Girls Band Cry".to_string()),
+            summary: Some("summary".to_string()),
+            date: Some("2024-04-06".to_string()),
+            score: Some(8.2),
+            eps: Some(13),
+            infobox: None,
+            images,
+        }
+    }
+
+    #[test]
+    fn bangumi_images_prefer_large_common_then_grid() {
+        let images = BangumiImages {
+            large: None,
+            common: Some("common.jpg".to_string()),
+            grid: Some("grid.jpg".to_string()),
+            medium: Some("medium.jpg".to_string()),
+            small: Some("small.jpg".to_string()),
+        };
+
+        assert_eq!(images.best_poster_url().as_deref(), Some("common.jpg"));
+
+        let images = BangumiImages {
+            large: None,
+            common: None,
+            grid: Some("grid.jpg".to_string()),
+            medium: Some("medium.jpg".to_string()),
+            small: Some("small.jpg".to_string()),
+        };
+
+        assert_eq!(images.best_poster_url().as_deref(), Some("grid.jpg"));
+    }
+
+    #[test]
+    fn subject_to_metadata_keeps_bangumi_poster_url() {
+        let client = BangumiClient::new(None);
+        let subject = sample_subject(Some(BangumiImages {
+            large: Some("large.jpg".to_string()),
+            common: Some("common.jpg".to_string()),
+            grid: Some("grid.jpg".to_string()),
+            medium: None,
+            small: None,
+        }));
+
+        let metadata = client.subject_to_metadata(&subject);
+
+        assert_eq!(metadata.poster_url.as_deref(), Some("large.jpg"));
     }
 }
 

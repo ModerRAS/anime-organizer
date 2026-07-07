@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, Result};
+use crate::metadata::BangumiClient;
 #[cfg(feature = "clouddrive")]
 use crate::rss::proxy::{build_http_client, ProxyConfig};
 
@@ -80,16 +81,8 @@ impl Scraper {
     ///
     /// - `days` - 筛选最近多少天内的条目
     pub async fn scrape_bangumi(&self, days: u32) -> Result<Vec<ScrapedAnime>> {
-        let url = "https://raw.githubusercontent.com/bangumi/archive/master/data/subject.jsonlines";
-
-        let resp =
-            self.http.get(url).send().await.map_err(|e| {
-                AppError::MetadataFetchError(format!("下载 Bangumi dump 失败: {e}"))
-            })?;
-
-        let text = resp
-            .text()
-            .await
+        let dump_path = BangumiClient::new(None).download_dump().await?;
+        let text = std::fs::read_to_string(&dump_path)
             .map_err(|e| AppError::MetadataFetchError(format!("读取 Bangumi dump 失败: {e}")))?;
 
         let cutoff = chrono_cutoff_date(days);

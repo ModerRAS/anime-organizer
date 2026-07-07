@@ -1,12 +1,13 @@
 //! TMDB API 客户端
 //!
-//! 使用 The Movie Database (TMDB) API 获取动画海报和剧照等图片资源。
+//! 使用 The Movie Database (TMDB) API 补充动画海报和背景图。
 //!
 //! ## 图片回退链
 //!
-//! 1. TMDB（主要来源）
-//! 2. AniDB（仅当 alias 中有 anidb_id 时）
-//! 3. 跳过（不报错）
+//! 1. Bangumi（主要番剧来源，见 `BangumiClient`）
+//! 2. TMDB（备选海报和背景图）
+//! 3. AniDB（仅当 alias 中有 anidb_id 时）
+//! 4. 跳过（不报错）
 
 use crate::error::{AppError, Result};
 use regex::Regex;

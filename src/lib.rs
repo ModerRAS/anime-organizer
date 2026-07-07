@@ -31,7 +31,7 @@
 //! - [`parser`] - 文件名解析模块
 //! - [`organizer`] - 文件整理模块
 //! - [`error`] - 错误处理模块
-/// - [`metadata`] - 元数据模块（Bangumi Archive / TMDB）
+/// - [`metadata`] - 元数据模块（Bangumi 元数据，TMDB/AniDB 可选图片补充）
 /// - [`nfo`] - NFO 文件生成模块
 /// - `scraper` - 数据源刮削模块（需 `scraper` feature，参考 `cargo doc --features scraper`）
 pub mod error;

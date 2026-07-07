@@ -130,6 +130,7 @@ fn test_alias_to_nfo_flow() {
         rating: 8.5,
         tmdb_id: entry.tmdb_id,
         anidb_id: entry.anidb_id,
+        poster_url: None,
     };
 
     // 4. 生成 TvShowNfo
@@ -194,6 +195,7 @@ fn test_wiki_parse_to_metadata_conversion() {
         rating: 0.0,
         tmdb_id: None,
         anidb_id: None,
+        poster_url: None,
     };
 
     assert_eq!(meta.title_cn.as_deref(), Some("孤独摇滚！"));

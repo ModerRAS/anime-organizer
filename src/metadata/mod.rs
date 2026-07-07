@@ -52,6 +52,8 @@ pub struct AnimeMetadata {
     pub tmdb_id: Option<u32>,
     /// AniDB ID（用于图片回退）
     pub anidb_id: Option<u32>,
+    /// Bangumi 封面图 URL
+    pub poster_url: Option<String>,
 }
 
 impl AnimeMetadata {
@@ -71,6 +73,7 @@ impl AnimeMetadata {
             rating: 0.0,
             tmdb_id: None,
             anidb_id: None,
+            poster_url: None,
         }
     }
 }
