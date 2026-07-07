@@ -425,7 +425,7 @@ struct TorrentScrapeArgs {
     #[arg(long, short = 'o', value_name = "PATH")]
     output: Option<PathBuf>,
 
-    /// 显示浏览器窗口（用于调试）
+    /// 兼容旧 Playwright 后端的参数；当前 HTTP 抓取模式会忽略
     #[arg(long)]
     headed: bool,
 }
@@ -853,6 +853,29 @@ async fn fetch_anime_metadata(
             }
             if let Ok(meta) = bangumi.fetch_metadata(subject.id).await {
                 metadata = Some(meta);
+            }
+        }
+    }
+
+    if metadata.is_none() {
+        for query in unique_titles(series_name, Some(anime_name), None) {
+            match bangumi.search_subjects(&query, 3).await {
+                Ok(subjects) => {
+                    if let Some(subject) = subjects.into_iter().next() {
+                        if verbose {
+                            eprintln!("Bangumi 在线搜索: {} -> {}", query, subject.name);
+                        }
+                        if let Ok(meta) = bangumi.fetch_metadata(subject.id).await {
+                            metadata = Some(meta);
+                            break;
+                        }
+                    }
+                }
+                Err(error) => {
+                    if verbose {
+                        eprintln!("Bangumi 在线搜索失败 '{}': {error}", query);
+                    }
+                }
             }
         }
     }
@@ -2138,30 +2161,17 @@ fn format_size(bytes: i64) -> String {
 #[cfg(feature = "torrent-scraper")]
 async fn run_torrent_scrape(args: TorrentScrapeArgs) -> Result<(), AppError> {
     use anime_organizer::torrent::dmhy;
-    use anime_organizer::torrent::dmhy_playwright;
     use anime_organizer::torrent::nyaa;
-    use anime_organizer::torrent::nyaa_playwright;
 
     let pages = args.pages.clamp(1, 2000);
-    let mut all_titles = Vec::new();
+    if args.headed {
+        eprintln!("--headed 仅适用于旧 Playwright 后端；当前使用 HTTP 抓取");
+    }
 
-    let opts = dmhy_playwright::ScrapeOptions::new().with_headed(args.headed);
-    let nyaa_opts = nyaa_playwright::ScrapeOptions::new().with_headed(args.headed);
-
-    match args.source {
+    let all_titles = match args.source {
         TorrentSource::Dmhy => {
-            println!(
-                "正在从 DMHY (Playwright) 爬取种子文件列表 ({} 页)...",
-                pages
-            );
-            all_titles = match dmhy_playwright::scrape_dmhy_with_playwright_opts(pages, opts).await
-            {
-                Ok(titles) => titles,
-                Err(err) => {
-                    eprintln!("[Torrent] DMHY Playwright 抓取失败，回退到 HTTP 抓取: {err}");
-                    dmhy::scrape_dmhy(pages).await?
-                }
-            };
+            println!("正在从 DMHY 爬取种子文件列表 ({} 页)...", pages);
+            dmhy::scrape_dmhy(pages).await?
         }
         TorrentSource::Nyaa => {
             if let Some(query) = args.query.as_deref() {
@@ -2169,49 +2179,21 @@ async fn run_torrent_scrape(args: TorrentScrapeArgs) -> Result<(), AppError> {
                     "正在从 Nyaa 搜索 '{}' 并爬取种子文件列表 ({} 页)...",
                     query, pages
                 );
-                all_titles = nyaa::scrape_search(query, pages).await?;
+                nyaa::scrape_search(query, pages).await?
             } else {
-                println!(
-                    "正在从 Nyaa (Playwright) 首页爬取最新种子文件列表 ({} 页)...",
-                    pages
-                );
-                all_titles =
-                    match nyaa_playwright::scrape_recent_with_playwright_opts(pages, nyaa_opts)
-                        .await
-                    {
-                        Ok(titles) => titles,
-                        Err(err) => {
-                            eprintln!(
-                                "[Torrent] Nyaa Playwright 抓取失败，回退到 HTTP 抓取: {err}"
-                            );
-                            nyaa::scrape_recent(pages).await?
-                        }
-                    };
+                println!("正在从 Nyaa 首页爬取最新种子文件列表 ({} 页)...", pages);
+                nyaa::scrape_recent(pages).await?
             }
         }
         TorrentSource::All => {
-            println!("正在从 DMHY (Playwright) 爬取 ({} 页)...", pages);
-            match dmhy_playwright::scrape_dmhy_with_playwright_opts(pages, opts.clone()).await {
-                Ok(dmhy_titles) => all_titles.extend(dmhy_titles),
-                Err(err) => {
-                    eprintln!("[Torrent] DMHY Playwright 抓取失败，回退到 HTTP 抓取: {err}");
-                    all_titles.extend(dmhy::scrape_dmhy(pages).await?);
-                }
-            }
+            println!("正在从 DMHY 爬取 ({} 页)...", pages);
+            let mut titles = dmhy::scrape_dmhy(pages).await?;
 
-            println!(
-                "正在从 Nyaa (Playwright) 首页爬取最新种子 ({} 页)...",
-                pages
-            );
-            match nyaa_playwright::scrape_recent_with_playwright_opts(pages, nyaa_opts).await {
-                Ok(nyaa_titles) => all_titles.extend(nyaa_titles),
-                Err(err) => {
-                    eprintln!("[Torrent] Nyaa Playwright 抓取失败，回退到 HTTP 抓取: {err}");
-                    all_titles.extend(nyaa::scrape_recent(pages).await?);
-                }
-            }
+            println!("正在从 Nyaa 首页爬取最新种子 ({} 页)...", pages);
+            titles.extend(nyaa::scrape_recent(pages).await?);
+            titles
         }
-    }
+    };
 
     if all_titles.is_empty() {
         println!("未爬取到任何文件");

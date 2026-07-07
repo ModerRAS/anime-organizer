@@ -58,12 +58,24 @@ pub struct BangumiSubject {
     /// 话数
     #[serde(default)]
     pub eps: Option<u32>,
-    /// Wiki Infobox 原始文本
-    #[serde(default)]
+    /// Wiki Infobox 原始文本（Archive 为字符串；v0 API 为结构化数组时忽略）。
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     pub infobox: Option<String>,
     /// Bangumi v0 API 返回的封面图集合；Archive dump 中通常不存在。
     #[serde(default)]
     pub images: Option<BangumiImages>,
+}
+
+fn deserialize_optional_string<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(value) => Ok(Some(value)),
+        _ => Ok(None),
+    }
 }
 
 impl BangumiSubject {
@@ -72,6 +84,24 @@ impl BangumiSubject {
             .as_ref()
             .and_then(BangumiImages::best_poster_url)
     }
+}
+
+#[derive(Debug, Serialize)]
+struct BangumiSearchRequest<'a> {
+    keyword: &'a str,
+    filter: BangumiSearchFilter,
+}
+
+#[derive(Debug, Serialize)]
+struct BangumiSearchFilter {
+    #[serde(rename = "type")]
+    subject_type: [u32; 1],
+}
+
+#[derive(Debug, Deserialize)]
+struct BangumiSearchResponse {
+    #[serde(default)]
+    data: Vec<BangumiSubject>,
 }
 
 /// Bangumi 封面图 URL 集合。
@@ -187,20 +217,62 @@ impl BangumiClient {
     /// 从 Bangumi 获取 Subject 信息并解析 Wiki Infobox。
     #[cfg(feature = "metadata")]
     pub async fn fetch_metadata(&self, bangumi_id: u32) -> Result<AnimeMetadata> {
-        self.prepare_index().await?;
-
-        if let Some(subject) = self.find_by_id(bangumi_id)? {
-            let mut metadata = self.subject_to_metadata(&subject);
-            if metadata.poster_url.is_none() {
-                if let Ok(online_subject) = self.fetch_subject(bangumi_id).await {
-                    metadata.poster_url = online_subject.best_poster_url();
+        if self.prepare_index().await.is_ok() {
+            if let Some(subject) = self.find_by_id(bangumi_id)? {
+                let mut metadata = self.subject_to_metadata(&subject);
+                if metadata.poster_url.is_none() {
+                    if let Ok(online_subject) = self.fetch_subject(bangumi_id).await {
+                        metadata.poster_url = online_subject.best_poster_url();
+                    }
                 }
+                return Ok(metadata);
             }
-            return Ok(metadata);
         }
 
         let subject = self.fetch_subject(bangumi_id).await?;
         Ok(self.subject_to_metadata(&subject))
+    }
+
+    /// 使用 Bangumi v0 API 按标题搜索动画 Subject。
+    #[cfg(feature = "metadata")]
+    pub async fn search_subjects(&self, query: &str, limit: u32) -> Result<Vec<BangumiSubject>> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let url = format!(
+            "{BANGUMI_API_BASE}/search/subjects?limit={}",
+            limit.clamp(1, 20)
+        );
+        let resp = self
+            .http
+            .post(&url)
+            .json(&BangumiSearchRequest {
+                keyword: query,
+                filter: BangumiSearchFilter { subject_type: [2] },
+            })
+            .send()
+            .await
+            .map_err(|e| AppError::MetadataFetchError(format!("搜索 Bangumi 失败: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Err(AppError::MetadataFetchError(format!(
+                "搜索 Bangumi 失败 (HTTP {})",
+                resp.status()
+            )));
+        }
+
+        let response: BangumiSearchResponse = resp
+            .json()
+            .await
+            .map_err(|e| AppError::BangumiParseError(format!("解析 Bangumi 搜索结果失败: {e}")))?;
+
+        Ok(response
+            .data
+            .into_iter()
+            .filter(|subject| subject.subject_type == 2)
+            .collect())
     }
 
     /// 从本地 dump 文件中按 ID 查找
@@ -543,6 +615,12 @@ impl BangumiClient {
     }
 }
 
+impl Default for BangumiClient {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -586,6 +664,22 @@ mod tests {
     }
 
     #[test]
+    fn search_response_deserializes_subjects() {
+        let response: BangumiSearchResponse = serde_json::from_str(
+            r#"{"data":[{"id":498947,"type":2,"name":"ガチアクタ","name_cn":"咔嗒咔嗒","infobox":[{"key":"中文名","value":"咔嗒咔嗒"}],"images":{"large":"large.jpg"}}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(response.data.len(), 1);
+        assert_eq!(response.data[0].id, 498947);
+        assert_eq!(
+            response.data[0].best_poster_url().as_deref(),
+            Some("large.jpg")
+        );
+        assert!(response.data[0].infobox.is_none());
+    }
+
+    #[test]
     fn subject_to_metadata_keeps_bangumi_poster_url() {
         let client = BangumiClient::new(None);
         let subject = sample_subject(Some(BangumiImages {
@@ -599,11 +693,5 @@ mod tests {
         let metadata = client.subject_to_metadata(&subject);
 
         assert_eq!(metadata.poster_url.as_deref(), Some("large.jpg"));
-    }
-}
-
-impl Default for BangumiClient {
-    fn default() -> Self {
-        Self::new(None)
     }
 }
