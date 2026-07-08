@@ -4,7 +4,7 @@
 //! state such as playback history or favorites belongs in the player database.
 
 use crate::error::{AppError, Result};
-use crate::parser::FilenameParser;
+use crate::parser::{split_series_and_season, FilenameParser};
 use rusqlite::{params, Connection};
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -305,7 +305,9 @@ impl LibraryIndexRecord {
         };
 
         let (series_title, season) = match components.as_slice() {
-            [series, file] if file == file_name => (series.clone(), 1),
+            [series, file] if file == file_name => {
+                (series.clone(), title_season_number(series).unwrap_or(1))
+            }
             [series, season_dir, file] if file == file_name => {
                 if let Some(season) = parse_season_dir(season_dir) {
                     (series.clone(), season)
@@ -785,6 +787,13 @@ fn parse_season_dir(value: &str) -> Option<i64> {
     let lower = value.trim().to_ascii_lowercase();
     let raw = lower.strip_prefix("season")?.trim();
     raw.parse::<i64>().ok().filter(|season| *season > 0)
+}
+
+fn title_season_number(value: &str) -> Option<i64> {
+    split_series_and_season(value)
+        .1
+        .map(i64::from)
+        .filter(|season| *season > 0)
 }
 
 fn parse_episode_number(value: &str) -> Result<f64> {

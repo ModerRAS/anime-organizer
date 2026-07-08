@@ -16,7 +16,7 @@ use anime_organizer::{
 };
 #[cfg(feature = "metadata")]
 use anime_organizer::{
-    metadata::{tmdb::TmdbTvShow, AliasLookup, BangumiClient, TmdbClient},
+    metadata::{bangumi::BangumiSubject, tmdb::TmdbTvShow, AliasLookup, BangumiClient, TmdbClient},
     nfo::{EpisodeNfo, NfoWriter, TvShowNfo, UniqueId},
     AnimeMetadata,
 };
@@ -785,6 +785,8 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
             alias_lookup: &alias_lookup,
             bangumi: &bangumi,
             tmdb: tmdb.as_ref(),
+            download_images: !args.no_images,
+            force_overwrite: args.force_overwrite,
             verbose: args.verbose,
         },
     )
@@ -858,17 +860,19 @@ async fn fetch_anime_metadata(
     }
 
     if metadata.is_none() {
-        for query in unique_titles(series_name, Some(anime_name), None) {
-            match bangumi.search_subjects(&query, 3).await {
+        let mut best_subject = None;
+        for query in metadata_search_queries(series_name, Some(anime_name), None) {
+            match bangumi.search_subjects(&query, 10).await {
                 Ok(subjects) => {
-                    if let Some(subject) = subjects.into_iter().next() {
-                        if verbose {
-                            eprintln!("Bangumi 在线搜索: {} -> {}", query, subject.name);
+                    if let Some((subject, score)) = choose_bangumi_subject(&query, subjects) {
+                        if best_subject
+                            .as_ref()
+                            .is_none_or(|(_, best_score, _)| score > *best_score)
+                        {
+                            best_subject = Some((subject, score, query));
                         }
-                        if let Ok(meta) = bangumi.fetch_metadata(subject.id).await {
-                            metadata = Some(meta);
-                            break;
-                        }
+                    } else if verbose {
+                        eprintln!("Bangumi 在线搜索未找到可靠匹配: {query}");
                     }
                 }
                 Err(error) => {
@@ -876,6 +880,18 @@ async fn fetch_anime_metadata(
                         eprintln!("Bangumi 在线搜索失败 '{}': {error}", query);
                     }
                 }
+            }
+        }
+
+        if let Some((subject, score, query)) = best_subject {
+            if verbose {
+                eprintln!(
+                    "Bangumi 在线搜索: {} -> {} (score={score:.2})",
+                    query, subject.name
+                );
+            }
+            if let Ok(meta) = bangumi.fetch_metadata(subject.id).await {
+                metadata = Some(meta);
             }
         }
     }
@@ -1343,6 +1359,8 @@ struct MetadataIndexContext<'a> {
     alias_lookup: &'a AliasLookup,
     bangumi: &'a BangumiClient,
     tmdb: Option<&'a TmdbClient>,
+    download_images: bool,
+    force_overwrite: bool,
     verbose: bool,
 }
 
@@ -1424,8 +1442,20 @@ async fn enrich_library_index_records(
         };
 
         if let Some(ref meta) = metadata {
-            record.apply_metadata(meta);
             let anime_root = target.join(&lookup_title);
+            if context.download_images {
+                download_images(
+                    meta,
+                    &anime_root,
+                    season.max(1),
+                    context.bangumi,
+                    context.tmdb,
+                    context.force_overwrite,
+                    context.verbose,
+                )
+                .await;
+            }
+            record.apply_metadata(meta);
             add_metadata_artwork(record, target, &anime_root, season.max(1));
         }
     }
@@ -1582,6 +1612,426 @@ fn has_valid_extension(path: &Path, extensions: &HashSet<String>) -> bool {
 
 fn parse_year(value: &str) -> Option<i32> {
     value.get(0..4)?.parse().ok()
+}
+
+#[cfg(feature = "metadata")]
+fn metadata_search_queries(
+    primary: &str,
+    secondary: Option<&str>,
+    tertiary: Option<&str>,
+) -> Vec<String> {
+    let mut queries = unique_titles(primary, secondary, tertiary);
+    for query in queries.clone() {
+        let simplified = simplify_title_text(&query);
+        if simplified != query && !queries.iter().any(|item| item == &simplified) {
+            queries.push(simplified);
+        }
+    }
+    queries
+}
+
+#[cfg(feature = "metadata")]
+fn choose_bangumi_subject(
+    query: &str,
+    subjects: Vec<BangumiSubject>,
+) -> Option<(BangumiSubject, f32)> {
+    subjects
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, subject)| {
+            let score = bangumi_subject_match_score(query, &subject);
+            let ranked_score = score - (index as f32 * 0.12);
+            (score >= 0.45).then_some((subject, ranked_score))
+        })
+        .max_by(|(_, left), (_, right)| left.total_cmp(right))
+}
+
+#[cfg(feature = "metadata")]
+fn bangumi_subject_match_score(query: &str, subject: &BangumiSubject) -> f32 {
+    let query_season = title_season_hint(query);
+    [Some(subject.name.as_str()), subject.name_cn.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(|title| title_match_score_with_season(query, title, query_season))
+        .fold(0.0, f32::max)
+}
+
+#[cfg(feature = "metadata")]
+fn title_match_score_with_season(query: &str, candidate: &str, query_season: Option<u32>) -> f32 {
+    let candidate_season = title_season_hint(candidate);
+    if query_season.is_some() && candidate_season.is_some() && query_season != candidate_season {
+        return 0.0;
+    }
+
+    if query_season.is_some() && candidate_season.is_none() {
+        let query_text = normalized_match_text(query);
+        let candidate_text = normalized_match_text(candidate);
+        let query_len = query_text.chars().count();
+        let candidate_len = candidate_text.chars().count();
+        if candidate_len >= 4
+            && query_len > candidate_len
+            && query_text.contains(&candidate_text)
+            && candidate_len * 4 < query_len * 3
+        {
+            return 0.0;
+        }
+    }
+
+    let score = title_match_score(query, candidate);
+    if query_season.is_some() && query_season == candidate_season {
+        (score + 0.25).min(1.0)
+    } else {
+        score
+    }
+}
+
+#[cfg(feature = "metadata")]
+fn title_season_hint(value: &str) -> Option<u32> {
+    let normalized = simplify_title_text(value).to_ascii_lowercase();
+    let chars: Vec<char> = normalized.chars().collect();
+
+    for (index, ch) in chars.iter().enumerate() {
+        if *ch != '第' {
+            continue;
+        }
+        let Some(end) = chars[index + 1..]
+            .iter()
+            .position(|item| *item == '季' || *item == '期')
+        else {
+            continue;
+        };
+        let raw: String = chars[index + 1..index + 1 + end].iter().collect();
+        if let Some(season) = parse_season_hint_number(&raw) {
+            return Some(season);
+        }
+    }
+
+    let words: Vec<&str> = normalized
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    for pair in words.windows(2) {
+        if pair[0] == "season" {
+            if let Ok(season) = pair[1].parse::<u32>() {
+                return Some(season);
+            }
+        }
+        if pair[1] == "season" {
+            if let Some(season) = parse_ordinal_number(pair[0]) {
+                return Some(season);
+            }
+        }
+    }
+    words
+        .iter()
+        .find_map(|word| word.strip_prefix('s')?.parse::<u32>().ok())
+}
+
+fn parse_season_hint_number(value: &str) -> Option<u32> {
+    value.parse::<u32>().ok().or(match value {
+        "一" => Some(1),
+        "二" => Some(2),
+        "三" => Some(3),
+        "四" => Some(4),
+        "五" => Some(5),
+        "六" => Some(6),
+        "七" => Some(7),
+        "八" => Some(8),
+        "九" => Some(9),
+        "十" => Some(10),
+        _ => None,
+    })
+}
+
+fn parse_ordinal_number(value: &str) -> Option<u32> {
+    value
+        .strip_suffix("st")
+        .or_else(|| value.strip_suffix("nd"))
+        .or_else(|| value.strip_suffix("rd"))
+        .or_else(|| value.strip_suffix("th"))
+        .and_then(|number| number.parse::<u32>().ok())
+}
+
+#[cfg(feature = "metadata")]
+fn title_match_score(query: &str, candidate: &str) -> f32 {
+    let query = normalized_match_text(query);
+    let candidate = normalized_match_text(candidate);
+    if query.is_empty() || candidate.is_empty() {
+        return 0.0;
+    }
+    if query == candidate {
+        return 1.0;
+    }
+
+    let query_len = query.chars().count();
+    let candidate_len = candidate.chars().count();
+    let shorter = query_len.min(candidate_len) as f32;
+    let longer = query_len.max(candidate_len) as f32;
+    if shorter >= 4.0 && (query.contains(&candidate) || candidate.contains(&query)) {
+        return 0.8 + 0.2 * (shorter / longer);
+    }
+
+    let query_chars: HashSet<char> = query.chars().collect();
+    let candidate_chars: HashSet<char> = candidate.chars().collect();
+    let overlap = query_chars.intersection(&candidate_chars).count() as f32;
+    if overlap == 0.0 {
+        return 0.0;
+    }
+
+    let query_coverage = overlap / query_chars.len() as f32;
+    let candidate_coverage = overlap / candidate_chars.len() as f32;
+    query_coverage.min(candidate_coverage)
+}
+
+#[cfg(feature = "metadata")]
+fn normalized_match_text(value: &str) -> String {
+    simplify_title_text(value)
+        .chars()
+        .filter_map(|ch| {
+            let ch = ch.to_ascii_lowercase();
+            ch.is_alphanumeric().then_some(ch)
+        })
+        .collect()
+}
+
+#[cfg(feature = "metadata")]
+fn simplify_title_text(value: &str) -> String {
+    value.chars().map(simplify_title_char).collect()
+}
+
+#[cfg(feature = "metadata")]
+fn simplify_title_char(ch: char) -> char {
+    match ch {
+        '國' => '国',
+        '強' => '强',
+        '從' => '从',
+        '後' => '后',
+        '復' => '复',
+        '戀' => '恋',
+        '戰' => '战',
+        '戲' => '戏',
+        '戶' => '户',
+        '數' => '数',
+        '斷' => '断',
+        '時' => '时',
+        '會' => '会',
+        '機' => '机',
+        '氣' => '气',
+        '漢' => '汉',
+        '燈' => '灯',
+        '爾' => '尔',
+        '獸' => '兽',
+        '現' => '现',
+        '異' => '异',
+        '當' => '当',
+        '盜' => '盗',
+        '禮' => '礼',
+        '種' => '种',
+        '穩' => '稳',
+        '級' => '级',
+        '經' => '经',
+        '續' => '续',
+        '聖' => '圣',
+        '聲' => '声',
+        '職' => '职',
+        '脫' => '脱',
+        '臨' => '临',
+        '與' => '与',
+        '舊' => '旧',
+        '萬' => '万',
+        '處' => '处',
+        '術' => '术',
+        '衛' => '卫',
+        '裡' => '里',
+        '覺' => '觉',
+        '討' => '讨',
+        '譚' => '谭',
+        '變' => '变',
+        '貓' => '猫',
+        '貴' => '贵',
+        '賢' => '贤',
+        '轉' => '转',
+        '輕' => '轻',
+        '輩' => '辈',
+        '邊' => '边',
+        '醫' => '医',
+        '醬' => '酱',
+        '釋' => '释',
+        '銀' => '银',
+        '錄' => '录',
+        '長' => '长',
+        '間' => '间',
+        '關' => '关',
+        '闇' => '暗',
+        '隊' => '队',
+        '階' => '阶',
+        '險' => '险',
+        '雜' => '杂',
+        '靈' => '灵',
+        '領' => '领',
+        '顧' => '顾',
+        '顯' => '显',
+        '騎' => '骑',
+        '體' => '体',
+        '鬥' => '斗',
+        '鬆' => '松',
+        '魔' => '魔',
+        '鳥' => '鸟',
+        '點' => '点',
+        '齡' => '龄',
+        '龍' => '龙',
+        '龐' => '庞',
+        '乾' => '干',
+        '亂' => '乱',
+        '亞' => '亚',
+        '優' => '优',
+        '傳' => '传',
+        '兒' => '儿',
+        '兩' => '两',
+        '內' => '内',
+        '劍' => '剑',
+        '動' => '动',
+        '勞' => '劳',
+        '勝' => '胜',
+        '單' => '单',
+        '喪' => '丧',
+        '嚮' => '向',
+        '圖' => '图',
+        '圓' => '圆',
+        '壞' => '坏',
+        '壓' => '压',
+        '壘' => '垒',
+        '壯' => '壮',
+        '夢' => '梦',
+        '夥' => '伙',
+        '奪' => '夺',
+        '學' => '学',
+        '寶' => '宝',
+        '實' => '实',
+        '將' => '将',
+        '專' => '专',
+        '尋' => '寻',
+        '對' => '对',
+        '導' => '导',
+        '屬' => '属',
+        '歲' => '岁',
+        '幫' => '帮',
+        '幾' => '几',
+        '庫' => '库',
+        '廳' => '厅',
+        '廣' => '广',
+        '廢' => '废',
+        '開' => '开',
+        '張' => '张',
+        '彈' => '弹',
+        '彙' => '汇',
+        '徵' => '征',
+        '德' => '德',
+        '憑' => '凭',
+        '應' => '应',
+        '懶' => '懒',
+        '懲' => '惩',
+        '滅' => '灭',
+        '灣' => '湾',
+        '為' => '为',
+        '無' => '无',
+        '爭' => '争',
+        '產' => '产',
+        '疊' => '叠',
+        '發' => '发',
+        '盡' => '尽',
+        '砲' => '炮',
+        '禦' => '御',
+        '稱' => '称',
+        '穫' => '获',
+        '竊' => '窃',
+        '紅' => '红',
+        '紳' => '绅',
+        '給' => '给',
+        '絕' => '绝',
+        '絲' => '丝',
+        '緣' => '缘',
+        '縱' => '纵',
+        '繼' => '继',
+        '罰' => '罚',
+        '罵' => '骂',
+        '義' => '义',
+        '習' => '习',
+        '聽' => '听',
+        '肅' => '肃',
+        '脈' => '脉',
+        '腦' => '脑',
+        '臺' => '台',
+        '莊' => '庄',
+        '著' => '着',
+        '藍' => '蓝',
+        '虛' => '虚',
+        '號' => '号',
+        '蟲' => '虫',
+        '蠻' => '蛮',
+        '計' => '计',
+        '詛' => '诅',
+        '話' => '话',
+        '該' => '该',
+        '誕' => '诞',
+        '語' => '语',
+        '說' => '说',
+        '調' => '调',
+        '諸' => '诸',
+        '謎' => '谜',
+        '識' => '识',
+        '護' => '护',
+        '讚' => '赞',
+        '豬' => '猪',
+        '貳' => '贰',
+        '買' => '买',
+        '賽' => '赛',
+        '贖' => '赎',
+        '軍' => '军',
+        '農' => '农',
+        '迴' => '回',
+        '選' => '选',
+        '遺' => '遗',
+        '遲' => '迟',
+        '還' => '还',
+        '邁' => '迈',
+        '鄉' => '乡',
+        '鄰' => '邻',
+        '釀' => '酿',
+        '鈴' => '铃',
+        '鍊' => '炼',
+        '鎖' => '锁',
+        '鐘' => '钟',
+        '鐵' => '铁',
+        '鑰' => '钥',
+        '門' => '门',
+        '闆' => '板',
+        '陣' => '阵',
+        '陸' => '陆',
+        '雙' => '双',
+        '雞' => '鸡',
+        '離' => '离',
+        '難' => '难',
+        '電' => '电',
+        '霧' => '雾',
+        '靜' => '静',
+        '頁' => '页',
+        '風' => '风',
+        '飛' => '飞',
+        '飢' => '饥',
+        '館' => '馆',
+        '馬' => '马',
+        '驅' => '驱',
+        '驗' => '验',
+        '髮' => '发',
+        '鬧' => '闹',
+        '魯' => '鲁',
+        '鮮' => '鲜',
+        '鳴' => '鸣',
+        '鷹' => '鹰',
+        '麼' => '么',
+        _ => ch,
+    }
 }
 
 fn unique_titles(primary: &str, secondary: Option<&str>, tertiary: Option<&str>) -> Vec<String> {
@@ -2213,4 +2663,90 @@ async fn run_torrent_scrape(args: TorrentScrapeArgs) -> Result<(), AppError> {
 
     println!("\n共爬取 {} 个文件名", unique_lines.len());
     Ok(())
+}
+
+#[cfg(all(test, feature = "metadata"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bangumi_search_score_accepts_reliable_matches() {
+        assert!(
+            title_match_score_with_season(
+                "Re：從零開始的異世界生活 第四季",
+                "Re：从零开始的异世界生活 第四季 丧失篇",
+                title_season_hint("Re：從零開始的異世界生活 第四季")
+            ) >= 0.45
+        );
+        assert!(title_match_score("咒術迴戰 死滅迴游 前篇", "咒术回战 死灭回游 前篇") >= 0.45);
+        assert!(title_match_score("少女怪獸焦糖戀心", "少女怪兽焦糖味") >= 0.45);
+    }
+
+    fn bangumi_subject(id: u32, name: &str, name_cn: &str) -> BangumiSubject {
+        BangumiSubject {
+            id,
+            subject_type: 2,
+            name: name.to_string(),
+            name_cn: Some(name_cn.to_string()),
+            summary: None,
+            date: None,
+            score: None,
+            eps: None,
+            infobox: None,
+            tags: Vec::new(),
+            meta_tags: Vec::new(),
+            images: None,
+        }
+    }
+
+    #[test]
+    fn bangumi_search_score_rejects_bad_first_results() {
+        assert!(title_match_score("Re：從零開始的異世界生活 第四季", "Re: 甜心战士") < 0.45);
+        assert!(
+            title_match_score_with_season(
+                "Re：從零開始的異世界生活 第四季",
+                "Re：从零开始的异世界生活 第四季 丧失篇",
+                title_season_hint("Re：從零開始的異世界生活 第四季")
+            ) > title_match_score_with_season(
+                "Re：從零開始的異世界生活 第四季",
+                "Re：从零开始的异世界生活",
+                title_season_hint("Re：從零開始的異世界生活 第四季")
+            )
+        );
+        assert!(
+            title_match_score(
+                "Animatica「北斗之拳 拳王軍雜兵們的輓歌」",
+                "莎士比亚名剧动画"
+            ) < 0.45
+        );
+        assert!(
+            title_match_score("咒術迴戰 死滅迴游 前篇", "咒术回战 真实版4D ～轮转的钟楼～") < 0.45
+        );
+        assert_eq!(
+            title_match_score_with_season(
+                "Dr.STONE 新石紀 第四季",
+                "Dr.STONE",
+                title_season_hint("Dr.STONE 新石紀 第四季")
+            ),
+            0.0
+        );
+    }
+
+    #[test]
+    fn bangumi_search_prefers_api_rank_for_close_scores() {
+        let (subject, _) = choose_bangumi_subject(
+            "Dr.STONE 新石紀 第四季",
+            vec![
+                bangumi_subject(471578, "Dr.STONE SCIENCE FUTURE", "石纪元 科学与未来"),
+                bangumi_subject(
+                    424372,
+                    "Dr.STONE NEW WORLD 第2クール",
+                    "石纪元 新世界 第2部分",
+                ),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(subject.id, 471578);
+    }
 }

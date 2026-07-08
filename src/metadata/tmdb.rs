@@ -14,6 +14,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::LazyLock;
+use std::time::Duration;
 
 /// TMDB API 基础 URL
 const TMDB_API_BASE: &str = "https://api.themoviedb.org/3";
@@ -23,6 +24,12 @@ const TMDB_IMAGE_BASE: &str = "https://image.tmdb.org/t/p";
 
 /// AniDB 图片 CDN
 const ANIDB_IMAGE_CDN: &str = "https://cdn.anidb.net/images/main";
+
+const USER_AGENT: &str = concat!(
+    "ModerRAS/anime-organizer/",
+    env!("CARGO_PKG_VERSION"),
+    " (https://github.com/ModerRAS/anime-organizer)"
+);
 
 static ANIDB_IMAGE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"https://cdn\.anidb\.net/images/main/[^"']+"#)
@@ -140,7 +147,9 @@ impl TmdbClient {
             api_key,
             #[cfg(feature = "metadata")]
             http: reqwest::Client::builder()
-                .user_agent("anime-organizer/0.1")
+                .user_agent(USER_AGENT)
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(20))
                 .build()
                 .expect("创建 HTTP 客户端失败"),
         }

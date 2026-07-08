@@ -94,10 +94,15 @@ fn target_path_parser_reads_flat_and_season_layouts() {
         .join("Seasonal Show")
         .join("Season 2")
         .join("03.5 [WEB-DL].mkv");
+    let title_season = target
+        .join("終究，與你相戀。第二季")
+        .join("13 [1080P][Baha].mp4");
     fs::create_dir_all(flat.parent().unwrap()).unwrap();
     fs::create_dir_all(seasonal.parent().unwrap()).unwrap();
+    fs::create_dir_all(title_season.parent().unwrap()).unwrap();
     fs::write(&flat, b"flat").unwrap();
     fs::write(&seasonal, b"seasonal").unwrap();
+    fs::write(&title_season, b"title-season").unwrap();
 
     let flat_record = LibraryIndexRecord::from_target_path(target, &flat)
         .unwrap()
@@ -117,6 +122,13 @@ fn target_path_parser_reads_flat_and_season_layouts() {
         seasonal_record.relative_path,
         "Seasonal Show/Season 2/03.5 [WEB-DL].mkv"
     );
+
+    let title_season_record = LibraryIndexRecord::from_target_path(target, &title_season)
+        .unwrap()
+        .unwrap();
+    assert_eq!(title_season_record.series_title, "終究，與你相戀。第二季");
+    assert_eq!(title_season_record.season, 2);
+    assert_eq!(title_season_record.episode, 13.0);
 }
 
 #[test]

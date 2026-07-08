@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[cfg(feature = "scraper")]
 use rusqlite::Connection;
@@ -32,6 +33,13 @@ const SUBJECT_DUMP_FILENAME: &str = "subject.jsonlines";
 /// 默认本地数据库文件名
 #[cfg(feature = "scraper")]
 const BANGUMI_DATABASE_FILENAME: &str = "bangumi.db";
+
+/// Bangumi 要求非浏览器 API 调用带开发者 ID、应用名、版本号和项目主页。
+const BANGUMI_USER_AGENT: &str = concat!(
+    "ModerRAS/anime-organizer/",
+    env!("CARGO_PKG_VERSION"),
+    " (https://github.com/ModerRAS/anime-organizer)"
+);
 
 /// Bangumi Subject 基本信息（从 Archive 获取）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +69,12 @@ pub struct BangumiSubject {
     /// Wiki Infobox 原始文本（Archive 为字符串；v0 API 为结构化数组时忽略）。
     #[serde(default, deserialize_with = "deserialize_optional_string")]
     pub infobox: Option<String>,
+    /// Bangumi 用户标签，写入 MLIP genre。
+    #[serde(default, deserialize_with = "deserialize_tag_names")]
+    pub tags: Vec<String>,
+    /// Bangumi 元标签，作为用户标签缺失时的 genre 后备。
+    #[serde(default, deserialize_with = "deserialize_tag_names")]
+    pub meta_tags: Vec<String>,
     /// Bangumi v0 API 返回的封面图集合；Archive dump 中通常不存在。
     #[serde(default)]
     pub images: Option<BangumiImages>,
@@ -76,6 +90,27 @@ where
         serde_json::Value::String(value) => Ok(Some(value)),
         _ => Ok(None),
     }
+}
+
+fn deserialize_tag_names<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let serde_json::Value::Array(values) = serde_json::Value::deserialize(deserializer)? else {
+        return Ok(Vec::new());
+    };
+
+    Ok(values
+        .into_iter()
+        .filter_map(|value| match value {
+            serde_json::Value::String(name) => Some(name),
+            serde_json::Value::Object(mut object) => object
+                .remove("name")
+                .and_then(|name| name.as_str().map(ToOwned::to_owned)),
+            _ => None,
+        })
+        .filter(|name| !name.trim().is_empty())
+        .collect())
 }
 
 impl BangumiSubject {
@@ -175,7 +210,9 @@ impl BangumiClient {
         Self {
             #[cfg(feature = "metadata")]
             http: reqwest::Client::builder()
-                .user_agent("anime-organizer/0.1")
+                .user_agent(BANGUMI_USER_AGENT)
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(20))
                 .build()
                 .expect("创建 HTTP 客户端失败"),
             cache_dir,
@@ -597,6 +634,11 @@ impl BangumiClient {
         metadata.rating = subject.score.unwrap_or(0.0);
         metadata.episode_count = subject.eps.unwrap_or(0);
         metadata.poster_url = subject.best_poster_url();
+        metadata.genre = if subject.tags.is_empty() {
+            subject.meta_tags.iter().take(8).cloned().collect()
+        } else {
+            subject.tags.iter().take(8).cloned().collect()
+        };
 
         // 解析 Wiki Infobox 提取额外信息
         if let Some(ref infobox) = subject.infobox {
@@ -636,6 +678,8 @@ mod tests {
             score: Some(8.2),
             eps: Some(13),
             infobox: None,
+            tags: vec!["原创".to_string()],
+            meta_tags: Vec::new(),
             images,
         }
     }
@@ -666,12 +710,13 @@ mod tests {
     #[test]
     fn search_response_deserializes_subjects() {
         let response: BangumiSearchResponse = serde_json::from_str(
-            r#"{"data":[{"id":498947,"type":2,"name":"ガチアクタ","name_cn":"咔嗒咔嗒","infobox":[{"key":"中文名","value":"咔嗒咔嗒"}],"images":{"large":"large.jpg"}}]}"#,
+            r#"{"data":[{"id":498947,"type":2,"name":"ガチアクタ","name_cn":"咔嗒咔嗒","infobox":[{"key":"中文名","value":"咔嗒咔嗒"}],"tags":[{"name":"战斗"}],"meta_tags":["2025年7月"],"images":{"large":"large.jpg"}}]}"#,
         )
         .unwrap();
 
         assert_eq!(response.data.len(), 1);
         assert_eq!(response.data[0].id, 498947);
+        assert_eq!(response.data[0].tags, ["战斗"]);
         assert_eq!(
             response.data[0].best_poster_url().as_deref(),
             Some("large.jpg")
