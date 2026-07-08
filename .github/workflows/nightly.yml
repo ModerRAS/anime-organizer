@@ -15,8 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       build_version: ${{ steps.meta.outputs.build_version }}
-      release_name: ${{ steps.meta.outputs.release_name }}
-      release_tag: ${{ steps.meta.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -26,8 +24,6 @@ jobs:
           base_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
           build_version="${base_version}-nightly.${GITHUB_RUN_NUMBER}"
           echo "build_version=${build_version}" >> "$GITHUB_OUTPUT"
-          echo "release_name=Nightly ${build_version}" >> "$GITHUB_OUTPUT"
-          echo "release_tag=nightly-v${build_version}" >> "$GITHUB_OUTPUT"
 
   build:
     needs: meta
@@ -135,33 +131,3 @@ jobs:
         with:
           name: ${{ env.ARCHIVE_NAME }}
           path: ${{ env.ARCHIVE_NAME }}.${{ matrix.archive }}
-
-  release:
-    name: Publish nightly release
-    needs:
-      - meta
-      - build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Create or update nightly versioned release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ needs.meta.outputs.release_tag }}
-          name: ${{ needs.meta.outputs.release_name }}
-          prerelease: true
-          draft: false
-          generate_release_notes: false
-          files: artifacts/**/*
-          body: |
-            Nightly build version: ${{ needs.meta.outputs.build_version }}
-            Commit: ${{ github.sha }}
-            Run: ${{ github.run_id }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

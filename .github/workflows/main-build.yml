@@ -1,10 +1,9 @@
-name: Main Build
+name: Release
 
 on:
   push:
     branches:
       - master
-      - main
   workflow_dispatch:
 
 env:
@@ -12,7 +11,7 @@ env:
 
 jobs:
   meta:
-    name: Compute branch build version
+    name: Compute release version
     runs-on: ubuntu-latest
     outputs:
       branch_name: ${{ steps.meta.outputs.branch_name }}
@@ -27,15 +26,15 @@ jobs:
         run: |
           base_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
           branch_name="${GITHUB_REF_NAME}"
-          build_version="${base_version}-${branch_name}.${GITHUB_RUN_NUMBER}"
+          build_version="${base_version}+${GITHUB_RUN_NUMBER}"
           echo "branch_name=${branch_name}" >> "$GITHUB_OUTPUT"
           echo "build_version=${build_version}" >> "$GITHUB_OUTPUT"
-          echo "release_name=Main Build ${build_version}" >> "$GITHUB_OUTPUT"
-          echo "release_tag=${branch_name}-v${build_version}" >> "$GITHUB_OUTPUT"
+          echo "release_name=Release ${build_version}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=v${build_version}" >> "$GITHUB_OUTPUT"
 
   build:
     needs: meta
-    name: Branch build ${{ matrix.target }}
+    name: Release build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -69,7 +68,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply branch build version
+      - name: Apply release build version
         shell: pwsh
         run: |
           $path = 'Cargo.toml'
@@ -136,7 +135,7 @@ jobs:
           path: ${{ env.ARCHIVE_NAME }}.${{ matrix.archive }}
 
   release:
-    name: Publish branch release
+    name: Publish release
     needs:
       - meta
       - build
@@ -149,17 +148,17 @@ jobs:
         with:
           path: artifacts
 
-      - name: Create or update branch release
+      - name: Create release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ needs.meta.outputs.release_tag }}
           name: ${{ needs.meta.outputs.release_name }}
-          prerelease: true
+          prerelease: false
           draft: false
-          generate_release_notes: false
+          generate_release_notes: true
           files: artifacts/**/*
           body: |
-            Branch build version: ${{ needs.meta.outputs.build_version }}
+            Build version: ${{ needs.meta.outputs.build_version }}
             Branch: ${{ needs.meta.outputs.branch_name }}
             Commit: ${{ github.sha }}
             Run: ${{ github.run_id }}
