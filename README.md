@@ -128,12 +128,14 @@ aniorg --source="/path/to/downloads" --dry-run --verbose
 | `--tmdb-api-key` | | string | ❌ | - | TMDB API Key，用于备选海报和背景图 |
 | `--alias-file` | | string | ❌ | - | 自定义别名 JSON 文件，覆盖本地 `bangumi.db` 中的同名项 |
 | `--no-images` | | bool | ❌ | false | 只生成 NFO，不下载图片 |
+| `--no-episode-metadata` | | bool | ❌ | false | 跳过 Bangumi 分集标题、简介和时长查询 |
 | `--force-overwrite` | | bool | ❌ | false | 覆盖已有的 NFO 和图片文件 |
 | `--bangumi-cache` | | string | ❌ | 系统临时目录 | Bangumi 缓存目录 |
 | `--metadata-source` | | string | ❌ | - | 指定本地 `subject.jsonlines` 或其所在目录 |
 | `--library-index` | | bool | ❌ | false | 生成/更新目标目录根部的 `library.db` |
 | `--mlip` | | bool | ❌ | false | 生成 MiruPlay 可直接导入的 MLIP 媒体库，自动启用 `library.db` 并写入 Bangumi 元数据 |
 | `--rebuild-library-index` | | bool | ❌ | false | 与 `--library-index` 或 `--mlip` 一起使用，强制全量重扫目标目录并重建索引 |
+| `--probe-runtime` | | bool | ❌ | false | 使用 `ffprobe` 探测视频时长并写入 `episode.runtime`（秒） |
 | `--help` | `-h` | bool | ❌ | false | 显示帮助 |
 | `--version` | `-V` | bool | ❌ | false | 显示版本 |
 
@@ -168,7 +170,7 @@ aniorg --source="/path/to/downloads" --dry-run --verbose
 - 如果同时传入 `--rebuild-library-index`：整理完成后重新扫描整个 target 并重建数据库。
 - `--dry-run` 下只打印将执行的模式和统计，不创建或修改数据库。
 
-`--library-index` 只写文件索引，不主动联网补元数据。给 MiruPlay 使用时推荐 `--mlip`：它会自动生成 `library.db`，并把 Bangumi 元数据和 Bangumi 海报写入索引；如果提供 TMDB API Key，TMDB 会作为备选海报来源并补充背景图。
+`--library-index` 只写文件索引，不主动联网补元数据。给 MiruPlay 使用时推荐 `--mlip`：它会自动生成 `library.db`，并把 Bangumi 作品元数据、分集标题/简介、Bangumi 海报写入索引；如果提供 TMDB API Key，TMDB 会作为备选海报来源并补充背景图。Bangumi 分集数据有 `duration_seconds` 时会写入 `episode.runtime`；如需以本地视频为准，可额外传入 `--probe-runtime` 使用 `ffprobe` 探测实际时长。
 
 本数据库是只读协议。任何播放器不得修改本数据库；播放历史、收藏、继续播放等数据必须保存在播放器自己的数据库。
 
@@ -314,7 +316,7 @@ CREATE TABLE episode
     sort_order  REAL NOT NULL,
     title       TEXT,
     summary     TEXT,
-    runtime     INTEGER,
+    runtime     INTEGER, -- seconds
 
     FOREIGN KEY(series_id)
         REFERENCES series(id)
@@ -701,12 +703,14 @@ aniorg --source="/path/to/downloads" --target="/path/to/anime" --library-index -
 | `--tmdb-api-key` | | string | ❌ | - | TMDB API key for backup posters and fanart |
 | `--alias-file` | | string | ❌ | - | Custom alias JSON file overriding same-name entries from local `bangumi.db` |
 | `--no-images` | | bool | ❌ | false | Generate NFO only, skip artwork download |
+| `--no-episode-metadata` | | bool | ❌ | false | Skip Bangumi episode title, summary, and duration lookup |
 | `--force-overwrite` | | bool | ❌ | false | Overwrite existing NFO and image files |
 | `--bangumi-cache` | | string | ❌ | system temp dir | Bangumi cache directory |
 | `--metadata-source` | | string | ❌ | - | Local `subject.jsonlines` file or containing directory |
 | `--library-index` | | bool | ❌ | false | Generate/update `library.db` in the target root |
 | `--mlip` | | bool | ❌ | false | Generate a MiruPlay-ready MLIP library and write Bangumi metadata into `library.db` |
 | `--rebuild-library-index` | | bool | ❌ | false | Force a full target rescan and rebuild; requires `--library-index` or `--mlip` |
+| `--probe-runtime` | | bool | ❌ | false | Use `ffprobe` to probe video duration and write `episode.runtime` in seconds |
 | `--help` | `-h` | bool | ❌ | false | Show help |
 | `--version` | `-V` | bool | ❌ | false | Show version |
 
@@ -734,7 +738,7 @@ The `--alias-file` JSON can reuse the object output format from `extract-aliases
 
 ### 🗃️ MLIP Library Index
 
-`--library-index` manages a fixed `library.db` in the target root. It only writes the file index and does not fetch metadata. For MiruPlay, prefer `--mlip`; it implies `library.db` generation and writes Bangumi metadata and posters, while leaving Kodi NFO generation disabled unless `--scrape-metadata` is also set. A TMDB API key is optional and only adds backup poster/fanart coverage.
+`--library-index` manages a fixed `library.db` in the target root. It only writes the file index and does not fetch metadata. For MiruPlay, prefer `--mlip`; it implies `library.db` generation and writes Bangumi series metadata, episode titles/summaries, and posters, while leaving Kodi NFO generation disabled unless `--scrape-metadata` is also set. A TMDB API key is optional and only adds backup poster/fanart coverage. When Bangumi episodes include `duration_seconds`, it is written to `episode.runtime`; pass `--probe-runtime` to use `ffprobe` and prefer actual local video duration.
 
 The first run creates the database by scanning the full target directory after organization finishes:
 

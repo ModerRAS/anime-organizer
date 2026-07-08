@@ -16,7 +16,11 @@ use anime_organizer::{
 };
 #[cfg(feature = "metadata")]
 use anime_organizer::{
-    metadata::{bangumi::BangumiSubject, tmdb::TmdbTvShow, AliasLookup, BangumiClient, TmdbClient},
+    metadata::{
+        bangumi::{BangumiEpisode, BangumiSubject},
+        tmdb::TmdbTvShow,
+        AliasLookup, BangumiClient, TmdbClient,
+    },
     nfo::{EpisodeNfo, NfoWriter, TvShowNfo, UniqueId},
     AnimeMetadata,
 };
@@ -34,6 +38,7 @@ use std::collections::HashSet;
 #[cfg(feature = "scraper")]
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use walkdir::WalkDir;
 
 /// 默认支持的视频扩展名
@@ -118,6 +123,10 @@ struct OrganizeArgs {
     #[arg(long)]
     no_images: bool,
 
+    /// 跳过 Bangumi 分集标题、简介和时长查询
+    #[arg(long)]
+    no_episode_metadata: bool,
+
     /// 覆盖已有的 NFO 和图片文件
     #[arg(long)]
     force_overwrite: bool,
@@ -145,6 +154,10 @@ struct OrganizeArgs {
     /// 强制重新扫描目标目录并重建 MLIP 媒体库索引
     #[arg(long)]
     rebuild_library_index: bool,
+
+    /// 使用 ffprobe 探测视频时长并写入 MLIP episode.runtime（秒）
+    #[arg(long)]
+    probe_runtime: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -540,6 +553,7 @@ fn run_organize(args: OrganizeArgs) -> Result<(), AppError> {
         .fallback_on_link_failure
         .map(FallbackMode::to_operation_mode);
     let extensions = build_extensions(&args.include_ext);
+    let probe_runtime = runtime_probe_enabled(&args);
 
     let mut processed = 0;
     let mut succeeded = 0;
@@ -588,9 +602,10 @@ fn run_organize(args: OrganizeArgs) -> Result<(), AppError> {
             Ok(target_path) => {
                 succeeded += 1;
                 if args.writes_library_index() {
-                    if let Some(record) =
+                    if let Some(mut record) =
                         LibraryIndexRecord::from_target_path(&target, &target_path)?
                     {
+                        apply_runtime_probe(&mut record, &target, probe_runtime, args.verbose);
                         library_records.push(record);
                     }
                 }
@@ -643,12 +658,14 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
     if !args.no_images && tmdb.is_none() && args.verbose {
         eprintln!("未提供 TMDB API Key，将跳过 TMDB 图片下载");
     }
+    let probe_runtime = runtime_probe_enabled(&args);
 
     let anime_groups = collect_anime_groups(&source, &extensions, args.verbose);
     let mut processed = 0;
     let mut succeeded = 0;
     let mut failed = 0;
     let mut metadata_cache: HashMap<String, Option<AnimeMetadata>> = HashMap::new();
+    let mut episode_cache: HashMap<u32, Option<Vec<BangumiEpisode>>> = HashMap::new();
     let mut library_records = Vec::new();
 
     for (anime_name, files) in anime_groups {
@@ -675,6 +692,23 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
             metadata_cache.insert(anime_name.clone(), fetched.clone());
             fetched
         };
+
+        let episodes = if !args.no_episode_metadata {
+            if let Some(ref meta) = metadata {
+                fetch_bangumi_episodes_cached(
+                    meta.bangumi_id,
+                    &bangumi,
+                    &mut episode_cache,
+                    args.verbose,
+                )
+                .await
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let group_min_episode = anime_group_min_episode(&files);
 
         if let Some(ref meta) = metadata {
             if args.scrape_metadata {
@@ -729,6 +763,11 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
                         {
                             if let Some(ref meta) = metadata {
                                 record.apply_metadata(meta);
+                                apply_bangumi_episode_details(
+                                    &mut record,
+                                    episodes.as_deref(),
+                                    group_min_episode,
+                                );
                                 add_metadata_artwork(
                                     &mut record,
                                     &target,
@@ -736,6 +775,7 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
                                     season_number,
                                 );
                             }
+                            apply_runtime_probe(&mut record, &target, probe_runtime, args.verbose);
                             library_records.push(record);
                         }
                     }
@@ -782,11 +822,14 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
         &library_records,
         MetadataIndexContext {
             metadata_cache: &mut metadata_cache,
+            episode_cache: &mut episode_cache,
             alias_lookup: &alias_lookup,
             bangumi: &bangumi,
             tmdb: tmdb.as_ref(),
             download_images: !args.no_images,
             force_overwrite: args.force_overwrite,
+            fetch_episode_metadata: !args.no_episode_metadata,
+            probe_runtime,
             verbose: args.verbose,
         },
     )
@@ -1299,7 +1342,9 @@ fn finish_library_index(
 
     let stats = match mode {
         LibraryIndexWriteMode::Initialize | LibraryIndexWriteMode::Rebuild => {
-            let records = collect_target_library_records(target, extensions, args.verbose)?;
+            let mut records = collect_target_library_records(target, extensions, args.verbose)?;
+            let probe_runtime = runtime_probe_enabled(args);
+            apply_runtime_probe_to_records(&mut records, target, probe_runtime, args.verbose);
             LibraryIndex::rebuild(target, &records)?
         }
         LibraryIndexWriteMode::Incremental => LibraryIndex::update(target, current_records)?,
@@ -1353,14 +1398,223 @@ fn collect_target_library_records(
     Ok(records)
 }
 
+fn runtime_probe_enabled(args: &OrganizeArgs) -> bool {
+    if !args.probe_runtime || args.dry_run || !args.writes_library_index() {
+        return false;
+    }
+
+    match Command::new("ffprobe").arg("-version").output() {
+        Ok(output) if output.status.success() => true,
+        _ => {
+            eprintln!("--probe-runtime 需要 PATH 中存在 ffprobe，将跳过时长探测");
+            false
+        }
+    }
+}
+
+fn apply_runtime_probe_to_records(
+    records: &mut [LibraryIndexRecord],
+    target: &Path,
+    probe_runtime: bool,
+    verbose: bool,
+) {
+    if !probe_runtime {
+        return;
+    }
+
+    for record in records {
+        apply_runtime_probe(record, target, true, verbose);
+    }
+}
+
+fn apply_runtime_probe(
+    record: &mut LibraryIndexRecord,
+    target: &Path,
+    probe_runtime: bool,
+    verbose: bool,
+) {
+    if !probe_runtime {
+        return;
+    }
+
+    let media_path = target.join(&record.relative_path);
+    if let Some(seconds) = probe_media_runtime_seconds(&media_path, verbose) {
+        record.runtime = Some(seconds);
+    }
+}
+
+fn probe_media_runtime_seconds(path: &Path, verbose: bool) -> Option<i64> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output();
+
+    let output = match output {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            if verbose {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!("ffprobe 读取时长失败 {}: {}", path.display(), stderr.trim());
+            }
+            return None;
+        }
+        Err(error) => {
+            if verbose {
+                eprintln!("ffprobe 启动失败 {}: {error}", path.display());
+            }
+            return None;
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let duration = stdout
+        .lines()
+        .find_map(|line| line.trim().parse::<f64>().ok())?;
+    if !duration.is_finite() || duration <= 0.0 || duration > i64::MAX as f64 {
+        return None;
+    }
+
+    Some(duration.round() as i64)
+}
+
+#[cfg(feature = "metadata")]
+async fn fetch_bangumi_episodes_cached(
+    bangumi_id: u32,
+    bangumi: &BangumiClient,
+    episode_cache: &mut HashMap<u32, Option<Vec<BangumiEpisode>>>,
+    verbose: bool,
+) -> Option<Vec<BangumiEpisode>> {
+    if let Some(cached) = episode_cache.get(&bangumi_id) {
+        return cached.clone();
+    }
+
+    let fetched = match bangumi.fetch_episodes(bangumi_id).await {
+        Ok(episodes) => {
+            if verbose {
+                eprintln!("Bangumi 分集加载: {bangumi_id} -> {} 集", episodes.len());
+            }
+            Some(episodes)
+        }
+        Err(error) => {
+            if verbose {
+                eprintln!("Bangumi 分集加载失败 {bangumi_id}: {error}");
+            }
+            None
+        }
+    };
+    episode_cache.insert(bangumi_id, fetched.clone());
+    fetched
+}
+
+#[cfg(feature = "metadata")]
+fn apply_bangumi_episode_details(
+    record: &mut LibraryIndexRecord,
+    episodes: Option<&[BangumiEpisode]>,
+    min_episode: Option<f64>,
+) {
+    let Some(episode) = episodes.and_then(|items| find_bangumi_episode(record, items, min_episode))
+    else {
+        return;
+    };
+
+    if let Some(title) = episode.display_title() {
+        record.episode_title = Some(title);
+    }
+    if let Some(summary) = episode.cleaned_summary() {
+        record.episode_summary = Some(summary);
+    }
+    if let Some(seconds) = episode.duration_seconds.filter(|seconds| *seconds > 0) {
+        record.runtime = Some(i64::from(seconds));
+    }
+}
+
+#[cfg(feature = "metadata")]
+fn find_bangumi_episode<'a>(
+    record: &LibraryIndexRecord,
+    episodes: &'a [BangumiEpisode],
+    min_episode: Option<f64>,
+) -> Option<&'a BangumiEpisode> {
+    let number = record.episode;
+    episodes
+        .iter()
+        .find(|episode| {
+            episode
+                .sort
+                .is_some_and(|sort| episode_number_matches(sort, number))
+        })
+        .or_else(|| {
+            episodes.iter().find(|episode| {
+                episode
+                    .ep
+                    .is_some_and(|ep| episode_number_matches(ep, number))
+            })
+        })
+        .or_else(|| {
+            let local_number = min_episode
+                .filter(|min| *min > 1.0 && number >= *min)
+                .map(|min| number - min + 1.0)?;
+            episodes.iter().find(|episode| {
+                episode
+                    .sort
+                    .is_some_and(|sort| episode_number_matches(sort, local_number))
+                    || episode
+                        .ep
+                        .is_some_and(|ep| episode_number_matches(ep, local_number))
+            })
+        })
+}
+
+#[cfg(feature = "metadata")]
+fn episode_number_matches(left: f64, right: f64) -> bool {
+    (left - right).abs() < 0.001
+}
+
+#[cfg(feature = "metadata")]
+fn anime_group_min_episode(files: &[AnimeFileInfo]) -> Option<f64> {
+    files
+        .iter()
+        .filter_map(|file| file.episode.trim().parse::<f64>().ok())
+        .filter(|episode| episode.is_finite())
+        .min_by(|left, right| left.total_cmp(right))
+}
+
+#[cfg(feature = "metadata")]
+fn min_episode_by_series(records: &[LibraryIndexRecord]) -> HashMap<String, f64> {
+    let mut min_episodes = HashMap::new();
+    for record in records {
+        if !record.episode.is_finite() {
+            continue;
+        }
+        min_episodes
+            .entry(record.series_title.clone())
+            .and_modify(|episode| {
+                if record.episode < *episode {
+                    *episode = record.episode;
+                }
+            })
+            .or_insert(record.episode);
+    }
+    min_episodes
+}
+
 #[cfg(feature = "metadata")]
 struct MetadataIndexContext<'a> {
     metadata_cache: &'a mut HashMap<String, Option<AnimeMetadata>>,
+    episode_cache: &'a mut HashMap<u32, Option<Vec<BangumiEpisode>>>,
     alias_lookup: &'a AliasLookup,
     bangumi: &'a BangumiClient,
     tmdb: Option<&'a TmdbClient>,
     download_images: bool,
     force_overwrite: bool,
+    fetch_episode_metadata: bool,
+    probe_runtime: bool,
     verbose: bool,
 }
 
@@ -1420,6 +1674,8 @@ async fn enrich_library_index_records(
     target: &Path,
     context: &mut MetadataIndexContext<'_>,
 ) {
+    let min_episodes = min_episode_by_series(records);
+
     for record in records {
         let lookup_title = record.series_title.clone();
         let season = u32::try_from(record.season).unwrap_or(1);
@@ -1442,6 +1698,17 @@ async fn enrich_library_index_records(
         };
 
         if let Some(ref meta) = metadata {
+            let episodes = if context.fetch_episode_metadata {
+                fetch_bangumi_episodes_cached(
+                    meta.bangumi_id,
+                    context.bangumi,
+                    context.episode_cache,
+                    context.verbose,
+                )
+                .await
+            } else {
+                None
+            };
             let anime_root = target.join(&lookup_title);
             if context.download_images {
                 download_images(
@@ -1456,8 +1723,14 @@ async fn enrich_library_index_records(
                 .await;
             }
             record.apply_metadata(meta);
+            apply_bangumi_episode_details(
+                record,
+                episodes.as_deref(),
+                min_episodes.get(&lookup_title).copied(),
+            );
             add_metadata_artwork(record, target, &anime_root, season.max(1));
         }
+        apply_runtime_probe(record, target, context.probe_runtime, context.verbose);
     }
 }
 
@@ -2730,6 +3003,55 @@ mod tests {
             ),
             0.0
         );
+    }
+
+    fn bangumi_episode(ep: f64, sort: f64, title: &str, duration_seconds: u32) -> BangumiEpisode {
+        BangumiEpisode {
+            id: sort as u32,
+            subject_id: 1,
+            ep: Some(ep),
+            sort: Some(sort),
+            name: Some(format!("JP {title}")),
+            name_cn: Some(title.to_string()),
+            summary: Some(format!("{title} summary")),
+            duration_seconds: Some(duration_seconds),
+            episode_type: 0,
+        }
+    }
+
+    #[test]
+    fn bangumi_episode_details_match_global_or_local_numbering() {
+        let episodes = vec![
+            bangumi_episode(1.0, 1.0, "第一集", 1440),
+            bangumi_episode(2.0, 2.0, "第二集", 1441),
+        ];
+        let mut record = LibraryIndexRecord::new(
+            "Dr.STONE 新石紀 第四季".to_string(),
+            4,
+            25.0,
+            "Dr.STONE 新石紀 第四季/25.mkv".to_string(),
+            std::path::Path::new("25.mkv"),
+        );
+
+        apply_bangumi_episode_details(&mut record, Some(&episodes), Some(25.0));
+
+        assert_eq!(record.episode_title.as_deref(), Some("第一集"));
+        assert_eq!(record.episode_summary.as_deref(), Some("第一集 summary"));
+        assert_eq!(record.runtime, Some(1440));
+
+        let episodes = vec![bangumi_episode(1.0, 13.0, "第十三集", 0)];
+        let mut record = LibraryIndexRecord::new(
+            "終究，與你相戀。第二季".to_string(),
+            2,
+            13.0,
+            "終究，與你相戀。第二季/13.mkv".to_string(),
+            std::path::Path::new("13.mkv"),
+        );
+
+        apply_bangumi_episode_details(&mut record, Some(&episodes), Some(13.0));
+
+        assert_eq!(record.episode_title.as_deref(), Some("第十三集"));
+        assert_eq!(record.runtime, None);
     }
 
     #[test]

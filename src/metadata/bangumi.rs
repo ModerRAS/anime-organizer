@@ -139,6 +139,68 @@ struct BangumiSearchResponse {
     data: Vec<BangumiSubject>,
 }
 
+#[derive(Debug, Deserialize)]
+struct BangumiEpisodeResponse {
+    #[serde(default)]
+    data: Vec<BangumiEpisode>,
+    #[serde(default)]
+    total: u32,
+}
+
+/// Bangumi 分集信息。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BangumiEpisode {
+    /// Episode ID
+    pub id: u32,
+    /// 所属 Subject ID
+    pub subject_id: u32,
+    /// 单季内集数编号。
+    #[serde(default)]
+    pub ep: Option<f64>,
+    /// Bangumi 排序编号，有些续季会使用全局集数。
+    #[serde(default)]
+    pub sort: Option<f64>,
+    /// 原始分集标题。
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 中文分集标题。
+    #[serde(default)]
+    pub name_cn: Option<String>,
+    /// 分集简介。
+    #[serde(default, rename = "desc")]
+    pub summary: Option<String>,
+    /// 秒级时长。
+    #[serde(default)]
+    pub duration_seconds: Option<u32>,
+    /// 0 = 正片。
+    #[serde(default, rename = "type")]
+    pub episode_type: u32,
+}
+
+impl BangumiEpisode {
+    #[must_use]
+    pub fn display_title(&self) -> Option<String> {
+        self.name_cn
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                self.name
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .map(|value| value.trim().to_string())
+    }
+
+    #[must_use]
+    pub fn cleaned_summary(&self) -> Option<String> {
+        self.summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    }
+}
+
 /// Bangumi 封面图 URL 集合。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BangumiImages {
@@ -310,6 +372,49 @@ impl BangumiClient {
             .into_iter()
             .filter(|subject| subject.subject_type == 2)
             .collect())
+    }
+
+    /// 使用 Bangumi v0 API 获取正片分集信息。
+    #[cfg(feature = "metadata")]
+    pub async fn fetch_episodes(&self, bangumi_id: u32) -> Result<Vec<BangumiEpisode>> {
+        let limit = 100u32;
+        let mut offset = 0u32;
+        let mut episodes = Vec::new();
+
+        loop {
+            let url = format!(
+                "{BANGUMI_API_BASE}/episodes?subject_id={bangumi_id}&type=0&limit={limit}&offset={offset}"
+            );
+            let resp =
+                self.http.get(&url).send().await.map_err(|e| {
+                    AppError::MetadataFetchError(format!("获取 Bangumi 分集失败: {e}"))
+                })?;
+
+            if !resp.status().is_success() {
+                return Err(AppError::MetadataFetchError(format!(
+                    "获取 Bangumi 分集失败 (HTTP {})",
+                    resp.status()
+                )));
+            }
+
+            let response: BangumiEpisodeResponse = resp.json().await.map_err(|e| {
+                AppError::BangumiParseError(format!("解析 Bangumi 分集结果失败: {e}"))
+            })?;
+            let count = response.data.len() as u32;
+            episodes.extend(
+                response
+                    .data
+                    .into_iter()
+                    .filter(|episode| episode.episode_type == 0),
+            );
+
+            offset += limit;
+            if count < limit || offset >= response.total {
+                break;
+            }
+        }
+
+        Ok(episodes)
     }
 
     /// 从本地 dump 文件中按 ID 查找
@@ -722,6 +827,19 @@ mod tests {
             Some("large.jpg")
         );
         assert!(response.data[0].infobox.is_none());
+    }
+
+    #[test]
+    fn episode_response_deserializes_titles_and_duration() {
+        let response: BangumiEpisodeResponse = serde_json::from_str(
+            r#"{"data":[{"id":1519541,"subject_id":498947,"ep":1,"sort":1,"name":"天界","name_cn":"天界","desc":"简介","duration_seconds":1420,"type":0}],"total":1}"#,
+        )
+        .unwrap();
+
+        assert_eq!(response.data.len(), 1);
+        assert_eq!(response.data[0].display_title().as_deref(), Some("天界"));
+        assert_eq!(response.data[0].cleaned_summary().as_deref(), Some("简介"));
+        assert_eq!(response.data[0].duration_seconds, Some(1420));
     }
 
     #[test]

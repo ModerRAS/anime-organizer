@@ -89,6 +89,7 @@ fn mlip_flag_creates_metadata_library_without_nfo() {
         "--metadata-source".to_string(),
         subject_path.display().to_string(),
         "--no-images".to_string(),
+        "--no-episode-metadata".to_string(),
     ]);
 
     assert!(
