@@ -70,9 +70,15 @@ cargo build --release
 
 # 全功能构建
 cargo build --release --features "scraper clouddrive torrent-scraper"
+
+# 启用嵌入式 AniFileBERT ONNX 文件名解析器
+cargo build --release --features "anifilebert"
+
+# 启用 AniFileBERT，并在 Windows 上优先尝试 DirectML NPU（Ryzen AI 可用时走 NPU）
+cargo build --release --features "anifilebert-amd-npu"
 ```
 
-编译后的二进制文件位于 `target/release/aniorg`。
+编译后的二进制文件位于 `target/release/aniorg`。`anifilebert-amd-npu` 当前使用 Windows DirectML NPU 路线；VitisAI 需要额外的 ONNX Runtime provider 包，未放入默认构建。
 
 ### 🎯 快速开始
 
@@ -121,6 +127,7 @@ aniorg --source="/path/to/downloads" --dry-run --verbose
 | `--mode` | `-m` | enum | ❌ | link | 操作模式：move/copy/link |
 | `--dry-run` | | bool | ❌ | false | 仅预览不执行 |
 | `--include-ext` | | string | ❌ | mp4,mkv,... | 处理的扩展名（逗号分隔） |
+| `--filename-parser` | | enum | ❌ | rules | 文件名解析器：`rules`、`anifilebert`、`auto`（规则失败后回退 AniFileBERT） |
 | `--verbose` | `-v` | bool | ❌ | false | 显示详细日志 |
 | `--fallback-on-link-failure` | | enum | ❌ | - | 硬链接失败时回退模式：move 或 copy（默认不回退） |
 | `--season-mode` / `--分季` | | bool | ❌ | false | 按 `番名/Season N/` 结构整理多季作品 |
@@ -657,7 +664,15 @@ cargo build --release
 
 # Full features
 cargo build --release --features "scraper clouddrive torrent-scraper"
+
+# Embedded AniFileBERT ONNX filename parser
+cargo build --release --features "anifilebert"
+
+# AniFileBERT plus DirectML NPU on Windows when Ryzen AI is available
+cargo build --release --features "anifilebert-amd-npu"
 ```
+
+The compiled binary is located at `target/release/aniorg`. `anifilebert-amd-npu` currently uses the Windows DirectML NPU path; VitisAI requires an additional ONNX Runtime provider package and is not part of the default build.
 
 ### 🎯 Quick Start
 
@@ -696,6 +711,7 @@ aniorg --source="/path/to/downloads" --target="/path/to/anime" --library-index -
 | `--mode` | `-m` | enum | ❌ | link | Operation mode: move/copy/link |
 | `--dry-run` | | bool | ❌ | false | Preview only, no actual changes |
 | `--include-ext` | | string | ❌ | mp4,mkv,... | File extensions to process |
+| `--filename-parser` | | enum | ❌ | rules | Filename parser: `rules`, `anifilebert`, or `auto` (fall back to AniFileBERT after rules fail) |
 | `--verbose` | `-v` | bool | ❌ | false | Show detailed logs |
 | `--fallback-on-link-failure` | | enum | ❌ | - | Fallback when hard link fails: move or copy (disabled by default) |
 | `--season-mode` / `--分季` | | bool | ❌ | false | Group multi-season titles as `Series/Season N/` |

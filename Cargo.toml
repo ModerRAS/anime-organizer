@@ -26,6 +26,8 @@ quick-xml = { version = "0.37", features = ["serialize"] }
 tokio = { version = "1", features = ["full"], optional = true }
 rusqlite = { version = "0.34", features = ["bundled"] }
 flate2 = { version = "1.1", optional = true }
+ndarray = { version = "0.17", optional = true }
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tls-native", "api-24"], optional = true }
 zip = { version = "2", optional = true }
 tempfile = { version = "3.9", optional = true }
 urlencoding = { version = "2", optional = true }
@@ -52,6 +54,8 @@ tokio = { version = "1", features = ["full"] }
 
 [features]
 default = ["metadata"]
+anifilebert = ["dep:flate2", "dep:ndarray", "dep:ort"]
+anifilebert-amd-npu = ["anifilebert", "ort/directml"]
 metadata = ["dep:reqwest", "dep:tokio", "dep:flate2"]
 scraper = ["metadata", "dep:zip", "dep:tempfile"]
 torrent-scraper = ["dep:tokio", "dep:reqwest", "dep:urlencoding"]

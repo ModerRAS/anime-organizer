@@ -1,6 +1,16 @@
+#[cfg(any(
+    feature = "scraper",
+    feature = "clouddrive",
+    feature = "torrent-scraper"
+))]
 use crate::cli::*;
+#[cfg(any(
+    feature = "scraper",
+    feature = "clouddrive",
+    feature = "torrent-scraper"
+))]
 use anime_organizer::error::AppError;
-#[cfg(feature = "metadata")]
+#[cfg(feature = "scraper")]
 use anime_organizer::metadata::AliasLookup;
 #[cfg(feature = "scraper")]
 use anime_organizer::scraper::{

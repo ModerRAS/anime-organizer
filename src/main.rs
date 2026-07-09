@@ -40,6 +40,8 @@ use walkdir::WalkDir;
 
 /// 默认支持的视频扩展名
 const DEFAULT_EXTENSIONS: &[&str] = &[".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".rmvb"];
+static ANIFILEBERT_AUTO_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("错误: {error}");
@@ -97,6 +99,7 @@ fn run_organize_entry(args: OrganizeArgs) -> Result<(), AppError> {
 /// 仅文件整理流程（无元数据）
 fn run_organize(args: OrganizeArgs) -> Result<(), AppError> {
     validate_library_index_args(&args)?;
+    validate_filename_parser_args(&args)?;
     let (source, target) = resolve_source_and_target(&args)?;
     let fallback_mode = args
         .fallback_on_link_failure
@@ -119,7 +122,7 @@ fn run_organize(args: OrganizeArgs) -> Result<(), AppError> {
             continue;
         }
 
-        let anime_file = match FilenameParser::parse(path) {
+        let anime_file = match parse_anime_file(path, args.filename_parser, args.verbose)? {
             Some(info) => info,
             None => {
                 if args.verbose {
@@ -172,6 +175,7 @@ fn run_organize(args: OrganizeArgs) -> Result<(), AppError> {
 #[cfg(feature = "metadata")]
 async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
     validate_library_index_args(&args)?;
+    validate_filename_parser_args(&args)?;
     let (source, target) = resolve_source_and_target(&args)?;
     let fallback_mode = args
         .fallback_on_link_failure
@@ -209,7 +213,8 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
     }
     let probe_runtime = runtime_probe_enabled(&args);
 
-    let anime_groups = collect_anime_groups(&source, &extensions, args.verbose);
+    let anime_groups =
+        collect_anime_groups(&source, &extensions, args.filename_parser, args.verbose)?;
     let mut processed = 0;
     let mut succeeded = 0;
     let mut failed = 0;
@@ -463,6 +468,17 @@ fn validate_library_index_args(args: &OrganizeArgs) -> Result<(), AppError> {
             "--rebuild-library-index 必须与 --library-index 或 --mlip 一起使用".to_string(),
         ));
     }
+    Ok(())
+}
+
+fn validate_filename_parser_args(args: &OrganizeArgs) -> Result<(), AppError> {
+    #[cfg(not(feature = "anifilebert"))]
+    if args.filename_parser == FilenameParserMode::Anifilebert {
+        return Err(AppError::ParseError(
+            "--filename-parser anifilebert 需要使用 --features anifilebert 编译".to_string(),
+        ));
+    }
+
     Ok(())
 }
 
@@ -838,11 +854,64 @@ fn normalized_relative_path(path: &Path) -> String {
         .join("/")
 }
 
+fn parse_anime_file(
+    path: &Path,
+    mode: FilenameParserMode,
+    verbose: bool,
+) -> Result<Option<AnimeFileInfo>, AppError> {
+    match mode {
+        FilenameParserMode::Rules => Ok(FilenameParser::parse(path)),
+        FilenameParserMode::Anifilebert => parse_anifilebert(path, true, verbose),
+        FilenameParserMode::Auto => match FilenameParser::parse(path) {
+            Some(info) => Ok(Some(info)),
+            None => parse_anifilebert(path, false, verbose),
+        },
+    }
+}
+
+#[cfg(feature = "anifilebert")]
+fn parse_anifilebert(
+    path: &Path,
+    required: bool,
+    verbose: bool,
+) -> Result<Option<AnimeFileInfo>, AppError> {
+    match anime_organizer::anifilebert::parse_path(path) {
+        Ok(info) => Ok(info),
+        Err(error) if required => Err(AppError::ParseError(format!(
+            "AniFileBERT 解析器初始化或推理失败: {error}"
+        ))),
+        Err(error) => {
+            if verbose && ANIFILEBERT_AUTO_WARNED.set(()).is_ok() {
+                eprintln!("AniFileBERT 回退不可用，将继续使用规则解析器: {error}");
+            }
+            Ok(None)
+        }
+    }
+}
+
+#[cfg(not(feature = "anifilebert"))]
+fn parse_anifilebert(
+    _path: &Path,
+    required: bool,
+    verbose: bool,
+) -> Result<Option<AnimeFileInfo>, AppError> {
+    if required {
+        return Err(AppError::ParseError(
+            "AniFileBERT 解析器未启用，请使用 --features anifilebert 编译".to_string(),
+        ));
+    }
+    if verbose && ANIFILEBERT_AUTO_WARNED.set(()).is_ok() {
+        eprintln!("AniFileBERT 回退未启用，将继续使用规则解析器");
+    }
+    Ok(None)
+}
+
 fn collect_anime_groups(
     source: &Path,
     extensions: &HashSet<String>,
+    filename_parser: FilenameParserMode,
     verbose: bool,
-) -> HashMap<String, Vec<AnimeFileInfo>> {
+) -> Result<HashMap<String, Vec<AnimeFileInfo>>, AppError> {
     let mut groups: HashMap<String, Vec<AnimeFileInfo>> = HashMap::new();
 
     for entry in WalkDir::new(source)
@@ -855,7 +924,7 @@ fn collect_anime_groups(
             continue;
         }
 
-        if let Some(info) = FilenameParser::parse(path) {
+        if let Some(info) = parse_anime_file(path, filename_parser, verbose)? {
             groups
                 .entry(info.anime_name.clone())
                 .or_default()
@@ -868,7 +937,7 @@ fn collect_anime_groups(
         }
     }
 
-    groups
+    Ok(groups)
 }
 
 fn resolve_source_and_target(args: &OrganizeArgs) -> Result<(PathBuf, PathBuf), AppError> {

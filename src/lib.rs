@@ -34,6 +34,8 @@
 /// - [`metadata`] - 元数据模块（Bangumi 元数据，TMDB/AniDB 可选图片补充）
 /// - [`nfo`] - NFO 文件生成模块
 /// - `scraper` - 数据源刮削模块（需 `scraper` feature，参考 `cargo doc --features scraper`）
+#[cfg(feature = "anifilebert")]
+pub mod anifilebert;
 pub mod error;
 pub mod library_index;
 pub mod metadata;

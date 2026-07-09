@@ -123,6 +123,20 @@ pub(crate) struct OrganizeArgs {
     /// 使用 ffprobe 探测视频时长并写入 MLIP episode.runtime（秒）
     #[arg(long)]
     pub(crate) probe_runtime: bool,
+
+    /// 文件名解析器：rules（默认规则）、anifilebert（ONNX）、auto（规则失败后回退 ONNX）
+    #[arg(long, value_enum, default_value = "rules")]
+    pub(crate) filename_parser: FilenameParserMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum FilenameParserMode {
+    /// 使用内置规则解析器
+    Rules,
+    /// 使用嵌入的 AniFileBERT ONNX 模型解析器
+    Anifilebert,
+    /// 先用规则解析器，失败后回退 AniFileBERT
+    Auto,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
