@@ -152,7 +152,7 @@ aniorg --source="/path/to/downloads" --dry-run --verbose
 
 启用 `--scrape-metadata` 后，程序会：
 
-- 优先使用 `--alias-file` JSON 和本地 `bangumi.db` 别名库匹配 Bangumi 条目，缺失时回退到 Bangumi 名称/搜索匹配
+- 优先使用 `--alias-file` JSON 和本地别名库匹配 Bangumi 条目；若未提供本地 `animeatlas.sqlite`/`bangumi.db`，会自动下载 AnimeAtlas latest release 的 `animeatlas.sqlite` 到缓存目录，失败时回退到 Bangumi 名称/搜索匹配
 - 在动画根目录生成 `tvshow.nfo`
 - 在 `Season N/` 目录下生成与视频同名的 `*.nfo`
 - 优先从 Bangumi 下载 `poster.jpg` 和 `seasonXX-poster.jpg`；如果提供了 TMDB API Key，则 TMDB 作为海报备选并补充 `fanart.jpg`
@@ -738,7 +738,7 @@ aniorg --source="/path/to/downloads" --target="/path/to/anime" --library-index -
 
 When `--scrape-metadata` is enabled, the tool will:
 
-- Prefer aliases from `--alias-file` JSON and a local `bangumi.db`; if neither is available, it falls back to Bangumi title/search matching
+- Prefer aliases from `--alias-file` JSON and a local alias database; when no local `animeatlas.sqlite`/`bangumi.db` is available, it downloads AnimeAtlas latest-release `animeatlas.sqlite` into the cache directory and falls back to Bangumi title/search matching if that download fails
 - Generate `tvshow.nfo` in the series root
 - Generate per-episode `*.nfo` files beside organized videos in `Season N/`
 - Download `poster.jpg` and `seasonXX-poster.jpg` from Bangumi first; when a TMDB API key is provided, TMDB is used as a poster backup and for `fanart.jpg`

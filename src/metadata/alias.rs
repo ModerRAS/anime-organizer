@@ -1,7 +1,7 @@
 //! 别名库查找
 //!
 //! 提供动画名称别名到 Bangumi/TMDB/AniDB ID 的映射查找功能。
-//! 别名数据从 Bangumi SQLite 数据库加载。
+//! 别名数据从 Bangumi SQLite 或 AnimeAtlas SQLite 数据库加载。
 
 use regex::Regex;
 use rusqlite::Connection;
@@ -11,6 +11,20 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use crate::error::{AppError, Result};
+
+enum AliasDatabaseSchema {
+    Bangumi,
+    AnimeAtlas,
+}
+
+struct AnimeAtlasAliasRow {
+    alias: String,
+    bangumi_id: String,
+    title: Option<String>,
+    metadata_json: String,
+    tmdb_id: Option<String>,
+    anidb_id: Option<String>,
+}
 
 static RELEASE_TITLE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(?P<title>.+?)\s+-\s+(?:ep?\s*)?\d{1,4}(?:[vV]\d+)?(?:\s.*)?$")
@@ -46,7 +60,7 @@ pub struct AliasEntry {
 
 /// 别名库查找
 ///
-/// 管理动画名称别名到元数据 ID 的映射关系，支持从 Bangumi SQLite 数据库加载。
+/// 管理动画名称别名到元数据 ID 的映射关系，支持从 Bangumi 或 AnimeAtlas SQLite 数据库加载。
 ///
 /// # 示例
 ///
@@ -66,7 +80,7 @@ pub struct AliasLookup {
 impl AliasLookup {
     /// 从可选的数据源加载别名库。
     ///
-    /// - `db_path` 存在时，从 SQLite `aliases` 表加载。
+    /// - `db_path` 存在时，从 Bangumi 或 AnimeAtlas SQLite `aliases` 表加载。
     /// - `alias_file` 存在时，从 JSON 文件加载，并覆盖同名数据库别名。
     /// - 两者都缺失时，返回空的别名库，供首次运行时回退到名称搜索。
     pub fn load_from_sources(db_path: Option<&Path>, alias_file: Option<&Path>) -> Result<Self> {
@@ -83,7 +97,7 @@ impl AliasLookup {
         Ok(Self::from_aliases(aliases))
     }
 
-    /// 从 Bangumi SQLite 数据库加载别名库
+    /// 从 Bangumi 或 AnimeAtlas SQLite 数据库加载别名库
     ///
     /// # 参数
     ///
@@ -120,7 +134,18 @@ impl AliasLookup {
         let conn = Connection::open(db_path)
             .map_err(|e| AppError::AliasLoadError(format!("打开数据库失败: {e}")))?;
 
-        // 从数据库加载别名：关联 aliases 表和 subjects 表
+        match detect_database_schema(&conn)? {
+            AliasDatabaseSchema::Bangumi => Self::load_bangumi_database_aliases(&conn, aliases),
+            AliasDatabaseSchema::AnimeAtlas => {
+                Self::load_animeatlas_database_aliases(&conn, aliases)
+            }
+        }
+    }
+
+    fn load_bangumi_database_aliases(
+        conn: &Connection,
+        aliases: &mut HashMap<String, AliasEntry>,
+    ) -> Result<()> {
         let mut stmt = conn
             .prepare(
                 "SELECT a.alias, a.subject_id, s.name FROM aliases a JOIN subjects s ON a.subject_id = s.id",
@@ -140,7 +165,6 @@ impl AliasLookup {
         for row in rows {
             let (alias, subject_id, name) =
                 row.map_err(|e| AppError::AliasLoadError(format!("读取别名失败: {e}")))?;
-            // tmdb_id 和 anidb_id 不存储在数据库别名表中，设为 None
             let entry = AliasEntry {
                 bangumi_id: subject_id,
                 name,
@@ -148,6 +172,70 @@ impl AliasLookup {
                 anidb_id: None,
             };
             aliases.insert(alias, entry);
+        }
+
+        Ok(())
+    }
+
+    fn load_animeatlas_database_aliases(
+        conn: &Connection,
+        aliases: &mut HashMap<String, AliasEntry>,
+    ) -> Result<()> {
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT
+                    a.value,
+                    bgm.provider_id,
+                    m.title,
+                    m.metadata_json,
+                    (SELECT provider_id FROM provider_refs WHERE media_id = a.media_id AND provider = 'tmdb' LIMIT 1),
+                    (SELECT provider_id FROM provider_refs WHERE media_id = a.media_id AND provider = 'anidb' LIMIT 1)
+                FROM aliases a
+                JOIN provider_refs bgm
+                    ON bgm.media_id = a.media_id
+                    AND bgm.provider = 'bangumi'
+                    AND bgm.entity = 'subject'
+                JOIN media m ON m.id = a.media_id
+                "#,
+            )
+            .map_err(|e| AppError::AliasLoadError(format!("预处理 AnimeAtlas SQL 失败: {e}")))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(AnimeAtlasAliasRow {
+                    alias: row.get::<_, String>(0)?,
+                    bangumi_id: row.get::<_, String>(1)?,
+                    title: row.get::<_, Option<String>>(2)?,
+                    metadata_json: row.get::<_, String>(3)?,
+                    tmdb_id: row.get::<_, Option<String>>(4)?,
+                    anidb_id: row.get::<_, Option<String>>(5)?,
+                })
+            })
+            .map_err(|e| AppError::AliasLoadError(format!("查询 AnimeAtlas 别名失败: {e}")))?;
+
+        for row in rows {
+            let row = row
+                .map_err(|e| AppError::AliasLoadError(format!("读取 AnimeAtlas 别名失败: {e}")))?;
+            let alias = row.alias.trim();
+            if alias.is_empty() {
+                continue;
+            }
+
+            let entry = AliasEntry {
+                bangumi_id: parse_provider_id(&row.bangumi_id, "bangumi")?,
+                name: row
+                    .title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                    .map(ToOwned::to_owned)
+                    .or_else(|| metadata_json_title(&row.metadata_json))
+                    .unwrap_or_else(|| alias.to_string()),
+                tmdb_id: parse_optional_provider_id(row.tmdb_id.as_deref(), "tmdb")?,
+                anidb_id: parse_optional_provider_id(row.anidb_id.as_deref(), "anidb")?,
+            };
+            aliases.insert(alias.to_string(), entry);
         }
 
         Ok(())
@@ -376,6 +464,80 @@ fn compact_name(name: &str) -> String {
         .collect()
 }
 
+fn detect_database_schema(conn: &Connection) -> Result<AliasDatabaseSchema> {
+    if table_exists(conn, "aliases")?
+        && table_exists(conn, "media")?
+        && table_exists(conn, "provider_refs")?
+    {
+        return Ok(AliasDatabaseSchema::AnimeAtlas);
+    }
+
+    if table_exists(conn, "aliases")?
+        && table_exists(conn, "subjects")?
+        && column_exists(conn, "aliases", "alias")?
+        && column_exists(conn, "aliases", "subject_id")?
+    {
+        return Ok(AliasDatabaseSchema::Bangumi);
+    }
+
+    Err(AppError::AliasLoadError(
+        "不支持的别名数据库格式，期望 Bangumi 或 AnimeAtlas SQLite".to_string(),
+    ))
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        [table],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|exists| exists != 0)
+    .map_err(|e| AppError::AliasLoadError(format!("检查数据库表失败: {e}")))
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| AppError::AliasLoadError(format!("检查数据库列失败: {e}")))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| AppError::AliasLoadError(format!("检查数据库列失败: {e}")))?;
+
+    for row in rows {
+        if row.map_err(|e| AppError::AliasLoadError(format!("读取数据库列失败: {e}")))? == column
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn metadata_json_title(metadata_json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(metadata_json)
+        .ok()?
+        .get("title")?
+        .as_str()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn parse_provider_id(value: &str, provider: &str) -> Result<u32> {
+    value.trim().parse::<u32>().map_err(|e| {
+        AppError::AliasLoadError(format!(
+            "解析 AnimeAtlas {provider} provider_id 失败: {value}: {e}"
+        ))
+    })
+}
+
+fn parse_optional_provider_id(value: Option<&str>, provider: &str) -> Result<Option<u32>> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| parse_provider_id(value, provider))
+        .transpose()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,6 +603,72 @@ mod tests {
         dir
     }
 
+    fn create_animeatlas_test_db() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("animeatlas.sqlite");
+        let conn = Connection::open(&db_path).unwrap();
+
+        conn.execute_batch(
+            r#"
+            CREATE TABLE media (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                title TEXT,
+                summary TEXT,
+                metadata_json TEXT NOT NULL,
+                provenance_json TEXT NOT NULL
+            );
+            CREATE TABLE aliases (
+                media_id TEXT NOT NULL REFERENCES media(id),
+                value TEXT NOT NULL,
+                normalized TEXT NOT NULL,
+                language TEXT,
+                type TEXT,
+                source TEXT,
+                confidence REAL,
+                PRIMARY KEY (media_id, value)
+            );
+            CREATE TABLE provider_refs (
+                media_id TEXT NOT NULL REFERENCES media(id),
+                provider TEXT NOT NULL,
+                entity TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                provider_key TEXT NOT NULL UNIQUE
+            );
+            CREATE TABLE release_info (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            "#,
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO media (id, kind, title, summary, metadata_json, provenance_json) VALUES (?1, 'anime', ?2, '', ?3, '{}')",
+            rusqlite::params!["media-000001", "葬送のフリーレン", r#"{"title":"葬送のフリーレン"}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO aliases (media_id, value, normalized, language, type, source, confidence) VALUES ('media-000001', '芙莉莲', '芙莉莲', 'zh-Hans', 'localized', 'community', 0.9)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO provider_refs (media_id, provider, entity, provider_id, provider_key) VALUES ('media-000001', 'bangumi', 'subject', '414680', 'anime:bangumi:subject:414680')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO provider_refs (media_id, provider, entity, provider_id, provider_key) VALUES ('media-000001', 'tmdb', 'tv', '209867', 'anime:tmdb:tv:209867')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO provider_refs (media_id, provider, entity, provider_id, provider_key) VALUES ('media-000001', 'anidb', 'anime', '18597', 'anime:anidb:anime:18597')",
+            [],
+        )
+        .unwrap();
+
+        dir
+    }
+
     #[test]
     fn test_load_from_database() {
         let dir = create_test_db();
@@ -452,6 +680,18 @@ mod tests {
             "Expected >= 3 aliases after expansion, got {}",
             lookup.len()
         );
+    }
+
+    #[test]
+    fn test_load_from_animeatlas_database() {
+        let dir = create_animeatlas_test_db();
+        let db_path = dir.path().join("animeatlas.sqlite");
+        let lookup = AliasLookup::load(&db_path).unwrap();
+        let entry = lookup.find("芙莉莲").unwrap();
+        assert_eq!(entry.bangumi_id, 414680);
+        assert_eq!(entry.name, "葬送のフリーレン");
+        assert_eq!(entry.tmdb_id, Some(209867));
+        assert_eq!(entry.anidb_id, Some(18597));
     }
 
     #[test]

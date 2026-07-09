@@ -40,6 +40,17 @@ use walkdir::WalkDir;
 
 /// 默认支持的视频扩展名
 const DEFAULT_EXTENSIONS: &[&str] = &[".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".rmvb"];
+#[cfg(feature = "metadata")]
+const ANIMEATLAS_SQLITE_FILENAME: &str = "animeatlas.sqlite";
+#[cfg(feature = "metadata")]
+const ANIMEATLAS_SQLITE_URL: &str =
+    "https://github.com/ModerRAS/AnimeAtlas/releases/latest/download/animeatlas.sqlite";
+#[cfg(feature = "metadata")]
+const HTTP_USER_AGENT: &str = concat!(
+    "ModerRAS/anime-organizer/",
+    env!("CARGO_PKG_VERSION"),
+    " (https://github.com/ModerRAS/anime-organizer)"
+);
 static ANIFILEBERT_AUTO_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 fn main() {
@@ -183,9 +194,10 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
     let extensions = build_extensions(&args.include_ext);
     let bangumi =
         BangumiClient::with_source(args.bangumi_cache.clone(), args.metadata_source.clone());
-    let alias_db_path = resolve_alias_db_path(&bangumi, args.metadata_source.as_deref());
+    let alias_db_path =
+        resolve_alias_db_path(&bangumi, args.metadata_source.as_deref(), args.verbose).await;
     let alias_lookup =
-        AliasLookup::load_from_sources(Some(&alias_db_path), args.alias_file.as_deref())?;
+        AliasLookup::load_from_sources(alias_db_path.as_deref(), args.alias_file.as_deref())?;
     if args.verbose {
         if alias_lookup.is_empty() {
             eprintln!("未找到可用别名库，将仅使用 Bangumi 名称和搜索匹配");
@@ -978,22 +990,95 @@ fn build_extensions(include_ext: &Option<Vec<String>>) -> HashSet<String> {
 }
 
 #[cfg(feature = "metadata")]
-fn resolve_alias_db_path(bangumi: &BangumiClient, metadata_source: Option<&Path>) -> PathBuf {
-    if let Some(source) = metadata_source {
-        let candidate = if source.is_dir() {
-            Some(source.join("bangumi.db"))
-        } else {
-            source.parent().map(|parent| parent.join("bangumi.db"))
-        };
-
-        if let Some(candidate) = candidate {
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
+async fn resolve_alias_db_path(
+    bangumi: &BangumiClient,
+    metadata_source: Option<&Path>,
+    verbose: bool,
+) -> Option<PathBuf> {
+    if let Some(path) = find_metadata_source_alias_db(metadata_source) {
+        return Some(path);
     }
 
-    bangumi.cache_dir().join("bangumi.db")
+    let animeatlas_path = bangumi.cache_dir().join(ANIMEATLAS_SQLITE_FILENAME);
+    if animeatlas_path.is_file() {
+        return Some(animeatlas_path);
+    }
+
+    let bangumi_path = bangumi.cache_dir().join("bangumi.db");
+    if metadata_source.is_some() {
+        return bangumi_path.is_file().then_some(bangumi_path);
+    }
+
+    match download_animeatlas_alias_db(bangumi.cache_dir()).await {
+        Ok(path) => {
+            if verbose {
+                eprintln!("AnimeAtlas 别名库已就绪: {}", path.display());
+            }
+            Some(path)
+        }
+        Err(error) => {
+            if verbose {
+                eprintln!("AnimeAtlas 别名库下载失败，将回退到本地 bangumi.db 或在线搜索: {error}");
+            }
+            bangumi_path.is_file().then_some(bangumi_path)
+        }
+    }
+}
+
+#[cfg(feature = "metadata")]
+fn find_metadata_source_alias_db(metadata_source: Option<&Path>) -> Option<PathBuf> {
+    let source = metadata_source?;
+    let parent = if source.is_dir() {
+        source
+    } else {
+        source.parent()?
+    };
+    [ANIMEATLAS_SQLITE_FILENAME, "bangumi.db"]
+        .into_iter()
+        .map(|name| parent.join(name))
+        .find(|path| path.is_file())
+}
+
+#[cfg(feature = "metadata")]
+async fn download_animeatlas_alias_db(cache_dir: &Path) -> Result<PathBuf, AppError> {
+    std::fs::create_dir_all(cache_dir)
+        .map_err(|e| AppError::MetadataFetchError(format!("创建缓存目录失败: {e}")))?;
+
+    let db_path = cache_dir.join(ANIMEATLAS_SQLITE_FILENAME);
+    if db_path.is_file() {
+        return Ok(db_path);
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent(HTTP_USER_AGENT)
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| AppError::MetadataFetchError(format!("创建 HTTP 客户端失败: {e}")))?;
+    let resp = client
+        .get(ANIMEATLAS_SQLITE_URL)
+        .send()
+        .await
+        .map_err(|e| AppError::MetadataFetchError(format!("下载 AnimeAtlas 别名库失败: {e}")))?;
+
+    if !resp.status().is_success() {
+        return Err(AppError::MetadataFetchError(format!(
+            "下载 AnimeAtlas 别名库失败 (HTTP {})",
+            resp.status()
+        )));
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| AppError::MetadataFetchError(format!("读取 AnimeAtlas 别名库失败: {e}")))?;
+    let tmp_path = db_path.with_extension("sqlite.tmp");
+    std::fs::write(&tmp_path, &bytes)
+        .map_err(|e| AppError::MetadataFetchError(format!("写入 AnimeAtlas 临时文件失败: {e}")))?;
+    std::fs::rename(&tmp_path, &db_path)
+        .map_err(|e| AppError::MetadataFetchError(format!("保存 AnimeAtlas 别名库失败: {e}")))?;
+
+    Ok(db_path)
 }
 
 fn has_valid_extension(path: &Path, extensions: &HashSet<String>) -> bool {
