@@ -472,6 +472,7 @@ fn validate_library_index_args(args: &OrganizeArgs) -> Result<(), AppError> {
 }
 
 fn validate_filename_parser_args(args: &OrganizeArgs) -> Result<(), AppError> {
+    let _ = args;
     #[cfg(not(feature = "anifilebert"))]
     if args.filename_parser == FilenameParserMode::Anifilebert {
         return Err(AppError::ParseError(
