@@ -317,7 +317,7 @@ fn info_from_entities(
         episode,
         tags,
         extension,
-        original_path: path.to_path_buf(),
+        original_path: path.to_string_lossy().to_string(),
     })
 }
 
