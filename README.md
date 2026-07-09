@@ -71,14 +71,14 @@ cargo build --release
 # 全功能构建
 cargo build --release --features "scraper clouddrive torrent-scraper"
 
-# 启用嵌入式 AniFileBERT ONNX 文件名解析器
+# 启用嵌入式 AniFileBERT ONNX 文件名解析器（CPU）
 cargo build --release --features "anifilebert"
 
-# 启用 AniFileBERT，并在 Windows 上优先尝试 DirectML NPU（Ryzen AI 可用时走 NPU）
-cargo build --release --features "anifilebert-amd-npu"
+# 启用 AniFileBERT + Windows DirectML（GPU；NPU 可显式选择）
+cargo build --release --features "anifilebert-directml"
 ```
 
-编译后的二进制文件位于 `target/release/aniorg`。`anifilebert-amd-npu` 当前使用 Windows DirectML NPU 路线；VitisAI 需要额外的 ONNX Runtime provider 包，未放入默认构建。
+编译后的二进制文件位于 `target/release/aniorg`。`ANIORG_BERT_PROVIDER=cpu|auto|directml-gpu|directml-npu|directml-any` 控制 ONNX Runtime provider；`ANIORG_DIRECTML_DEVICE_ID=0` 可指定 DirectML 设备。未启用 `anifilebert-directml` 时默认 CPU；启用后默认 `auto`，会先尝试 DirectML GPU，失败则回退 CPU。CPU 线程数可用 `ANIORG_ORT_INTRA_THREADS` 和 `ANIORG_ORT_INTER_THREADS` 调整，默认均为 `1`。`anifilebert-amd-npu` 仍可用，是 `anifilebert-directml` 的兼容别名；VitisAI 需要额外的 ONNX Runtime provider 包，未放入默认构建。
 
 ### 🎯 快速开始
 
@@ -665,14 +665,14 @@ cargo build --release
 # Full features
 cargo build --release --features "scraper clouddrive torrent-scraper"
 
-# Embedded AniFileBERT ONNX filename parser
+# Embedded AniFileBERT ONNX filename parser (CPU)
 cargo build --release --features "anifilebert"
 
-# AniFileBERT plus DirectML NPU on Windows when Ryzen AI is available
-cargo build --release --features "anifilebert-amd-npu"
+# AniFileBERT plus Windows DirectML (GPU; NPU can be selected explicitly)
+cargo build --release --features "anifilebert-directml"
 ```
 
-The compiled binary is located at `target/release/aniorg`. `anifilebert-amd-npu` currently uses the Windows DirectML NPU path; VitisAI requires an additional ONNX Runtime provider package and is not part of the default build.
+The compiled binary is located at `target/release/aniorg`. `ANIORG_BERT_PROVIDER=cpu|auto|directml-gpu|directml-npu|directml-any` controls the ONNX Runtime provider; `ANIORG_DIRECTML_DEVICE_ID=0` pins a DirectML device. Without `anifilebert-directml`, the parser uses CPU. With it, the default is `auto`: try DirectML GPU first, then fall back to CPU. CPU threads can be tuned with `ANIORG_ORT_INTRA_THREADS` and `ANIORG_ORT_INTER_THREADS`; both default to `1`. `anifilebert-amd-npu` remains as a compatibility alias for `anifilebert-directml`; VitisAI requires an additional ONNX Runtime provider package and is not part of the default build.
 
 ### 🎯 Quick Start
 

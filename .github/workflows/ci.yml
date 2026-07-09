@@ -63,6 +63,31 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  anifilebert-cpu:
+    name: AniFileBERT CPU smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-anifilebert-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run embedded ONNX CPU smoke test
+        run: cargo test --features anifilebert --lib runs_embedded_model_on_cpu -- --nocapture
+
   docs:
     name: Documentation
     runs-on: ubuntu-latest

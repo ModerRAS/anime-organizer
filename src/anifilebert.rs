@@ -12,6 +12,7 @@ use ort::{
 };
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::env;
 use std::io::Read;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -24,6 +25,11 @@ const PAD_TOKEN: i64 = 0;
 const UNK_TOKEN: i64 = 1;
 const CLS_TOKEN: i64 = 2;
 const SEP_TOKEN: i64 = 3;
+const ENV_PROVIDER: &str = "ANIORG_BERT_PROVIDER";
+#[cfg(all(feature = "anifilebert-directml", target_os = "windows"))]
+const ENV_DIRECTML_DEVICE_ID: &str = "ANIORG_DIRECTML_DEVICE_ID";
+const ENV_INTRA_THREADS: &str = "ANIORG_ORT_INTRA_THREADS";
+const ENV_INTER_THREADS: &str = "ANIORG_ORT_INTER_THREADS";
 
 static PARSER: OnceLock<Result<Mutex<AniFileBertParser>, String>> = OnceLock::new();
 
@@ -79,9 +85,21 @@ impl AniFileBertParser {
         builder = builder
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|error| format!("failed to configure ONNX graph optimization: {error}"))?;
+        builder = builder
+            .with_intra_threads(env_thread_count(ENV_INTRA_THREADS)?.unwrap_or(1))
+            .map_err(|error| format!("failed to configure ONNX intra-op threads: {error}"))?;
+        builder = builder
+            .with_inter_threads(env_thread_count(ENV_INTER_THREADS)?.unwrap_or(1))
+            .map_err(|error| format!("failed to configure ONNX inter-op threads: {error}"))?;
+        builder = builder
+            .with_parallel_execution(false)
+            .map_err(|error| format!("failed to configure ONNX execution mode: {error}"))?;
 
-        let providers = execution_providers();
+        let providers = execution_providers()?;
         if !providers.is_empty() {
+            builder = builder
+                .with_memory_pattern(false)
+                .map_err(|error| format!("failed to configure ONNX memory pattern: {error}"))?;
             builder = builder
                 .with_execution_providers(providers)
                 .map_err(|error| {
@@ -436,20 +454,151 @@ fn clean_leading_separators(value: &str) -> String {
         .to_string()
 }
 
-fn execution_providers() -> Vec<ExecutionProviderDispatch> {
-    #[cfg(all(feature = "anifilebert-amd-npu", target_os = "windows"))]
-    {
-        use ort::ep;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderMode {
+    Cpu,
+    Auto,
+    DirectMl(DirectMlDeviceFilter),
+}
 
-        vec![ep::DirectML::default()
-            .with_device_filter(ep::directml::DeviceFilter::Npu)
-            .build()]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DirectMlDeviceFilter {
+    Gpu,
+    Npu,
+    Any,
+}
+
+fn execution_providers() -> Result<Vec<ExecutionProviderDispatch>, String> {
+    match provider_mode()? {
+        ProviderMode::Cpu => Ok(Vec::new()),
+        ProviderMode::Auto if directml_available_in_build() => {
+            directml_provider(DirectMlDeviceFilter::Gpu, false)
+        }
+        ProviderMode::Auto => Ok(Vec::new()),
+        ProviderMode::DirectMl(filter) => directml_provider(filter, true),
+    }
+}
+
+fn provider_mode() -> Result<ProviderMode, String> {
+    provider_mode_from_str(env::var(ENV_PROVIDER).ok().as_deref())
+}
+
+fn provider_mode_from_str(value: Option<&str>) -> Result<ProviderMode, String> {
+    let value = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(default_provider_mode);
+    let normalized = value.to_ascii_lowercase().replace('_', "-");
+
+    match normalized.as_str() {
+        "cpu" => Ok(ProviderMode::Cpu),
+        "auto" => Ok(ProviderMode::Auto),
+        "directml" | "directml-gpu" | "dml" | "gpu" => {
+            Ok(ProviderMode::DirectMl(DirectMlDeviceFilter::Gpu))
+        }
+        "directml-npu" | "dml-npu" | "npu" => {
+            Ok(ProviderMode::DirectMl(DirectMlDeviceFilter::Npu))
+        }
+        "directml-any" | "dml-any" => Ok(ProviderMode::DirectMl(DirectMlDeviceFilter::Any)),
+        _ => Err(format!(
+            "unsupported {ENV_PROVIDER}={value}; expected cpu, auto, directml-gpu, directml-npu, or directml-any"
+        )),
+    }
+}
+
+fn default_provider_mode() -> &'static str {
+    if directml_available_in_build() {
+        "auto"
+    } else {
+        "cpu"
+    }
+}
+
+fn directml_available_in_build() -> bool {
+    cfg!(all(feature = "anifilebert-directml", target_os = "windows"))
+}
+
+fn directml_provider(
+    filter: DirectMlDeviceFilter,
+    required: bool,
+) -> Result<Vec<ExecutionProviderDispatch>, String> {
+    directml_provider_impl(filter, required)
+}
+
+#[cfg(all(feature = "anifilebert-directml", target_os = "windows"))]
+fn directml_provider_impl(
+    filter: DirectMlDeviceFilter,
+    required: bool,
+) -> Result<Vec<ExecutionProviderDispatch>, String> {
+    use ort::ep;
+
+    let mut provider = ep::DirectML::default();
+    if let Some(device_id) = env_i32(ENV_DIRECTML_DEVICE_ID)? {
+        provider = provider.with_device_id(device_id);
+    } else {
+        provider = provider.with_device_filter(match filter {
+            DirectMlDeviceFilter::Gpu => ep::directml::DeviceFilter::Gpu,
+            DirectMlDeviceFilter::Npu => ep::directml::DeviceFilter::Npu,
+            DirectMlDeviceFilter::Any => ep::directml::DeviceFilter::Any,
+        });
     }
 
-    #[cfg(not(all(feature = "anifilebert-amd-npu", target_os = "windows")))]
-    {
-        Vec::new()
+    let provider = provider.build();
+    let provider = if required {
+        provider.error_on_failure()
+    } else {
+        provider.fail_silently()
+    };
+    Ok(vec![provider])
+}
+
+#[cfg(not(all(feature = "anifilebert-directml", target_os = "windows")))]
+fn directml_provider_impl(
+    _filter: DirectMlDeviceFilter,
+    _required: bool,
+) -> Result<Vec<ExecutionProviderDispatch>, String> {
+    Err(format!(
+        "{ENV_PROVIDER}=directml requires a Windows build with --features anifilebert-directml"
+    ))
+}
+
+fn env_thread_count(name: &str) -> Result<Option<usize>, String> {
+    let Some(value) = env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let count = value
+        .parse::<usize>()
+        .map_err(|error| format!("invalid {name}={value}: {error}"))?;
+    if count == 0 {
+        return Err(format!(
+            "invalid {name}=0: thread count must be greater than zero"
+        ));
     }
+    Ok(Some(count))
+}
+
+#[cfg(all(feature = "anifilebert-directml", target_os = "windows"))]
+fn env_i32(name: &str) -> Result<Option<i32>, String> {
+    let Some(value) = env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let id = value
+        .parse::<i32>()
+        .map_err(|error| format!("invalid {name}={value}: {error}"))?;
+    if id < 0 {
+        return Err(format!(
+            "invalid {name}={value}: device id must be non-negative"
+        ));
+    }
+    Ok(Some(id))
 }
 
 #[cfg(test)]
@@ -566,5 +715,36 @@ mod tests {
         assert_eq!(info.episode, "01");
         assert_eq!(info.tags, "[1080p]");
         assert_eq!(info.extension, ".mkv");
+    }
+
+    #[test]
+    fn parses_provider_modes() {
+        assert_eq!(
+            provider_mode_from_str(Some("cpu")).unwrap(),
+            ProviderMode::Cpu
+        );
+        assert_eq!(
+            provider_mode_from_str(Some("auto")).unwrap(),
+            ProviderMode::Auto
+        );
+        assert_eq!(
+            provider_mode_from_str(Some("gpu")).unwrap(),
+            ProviderMode::DirectMl(DirectMlDeviceFilter::Gpu)
+        );
+        assert_eq!(
+            provider_mode_from_str(Some("directml_npu")).unwrap(),
+            ProviderMode::DirectMl(DirectMlDeviceFilter::Npu)
+        );
+        assert!(provider_mode_from_str(Some("vitis")).is_err());
+    }
+
+    #[cfg(not(feature = "anifilebert-directml"))]
+    #[test]
+    fn runs_embedded_model_on_cpu() {
+        let mut parser = AniFileBertParser::new().unwrap();
+        let path =
+            Path::new("[GM-Team][国漫][神印王座][Throne of Seal][2022][200][AVC][GB][1080P].mp4");
+
+        parser.parse_path(path).unwrap();
     }
 }
