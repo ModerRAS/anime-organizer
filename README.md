@@ -80,6 +80,8 @@ cargo build --release --features "anifilebert-directml"
 
 编译后的二进制文件位于 `target/release/aniorg`。`ANIORG_BERT_PROVIDER=cpu|auto|directml-gpu|directml-npu|directml-any` 控制 ONNX Runtime provider；`ANIORG_DIRECTML_DEVICE_ID=0` 可指定 DirectML 设备。未启用 `anifilebert-directml` 时默认 CPU；启用后默认 `auto`，会先尝试 DirectML GPU，失败则回退 CPU。CPU 线程数可用 `ANIORG_ORT_INTRA_THREADS` 和 `ANIORG_ORT_INTER_THREADS` 调整，默认均为 `1`。`anifilebert-amd-npu` 仍可用，是 `anifilebert-directml` 的兼容别名；VitisAI 需要额外的 ONNX Runtime provider 包，未放入默认构建。
 
+如果本机默认是 GNU Rust 工具链，Windows 上验证 AniFileBERT/DirectML 时请显式指定 MSVC `rustc`。若 ONNX Runtime 在本地链接阶段报错，可将 `ORT_LIB_LOCATION` 指向解压后的 ORT 目录，并设置 `ORT_PREFER_DYNAMIC_LINK=1` 改走 import-lib/dll 路线。
+
 ### 🎯 快速开始
 
 #### 基本用法
@@ -673,6 +675,8 @@ cargo build --release --features "anifilebert-directml"
 ```
 
 The compiled binary is located at `target/release/aniorg`. `ANIORG_BERT_PROVIDER=cpu|auto|directml-gpu|directml-npu|directml-any` controls the ONNX Runtime provider; `ANIORG_DIRECTML_DEVICE_ID=0` pins a DirectML device. Without `anifilebert-directml`, the parser uses CPU. With it, the default is `auto`: try DirectML GPU first, then fall back to CPU. CPU threads can be tuned with `ANIORG_ORT_INTRA_THREADS` and `ANIORG_ORT_INTER_THREADS`; both default to `1`. `anifilebert-amd-npu` remains as a compatibility alias for `anifilebert-directml`; VitisAI requires an additional ONNX Runtime provider package and is not part of the default build.
+
+If your local Windows machine defaults to the GNU Rust toolchain, validate AniFileBERT/DirectML builds with the MSVC `rustc` explicitly. If ONNX Runtime fails during the local link step, point `ORT_LIB_LOCATION` at the extracted ORT directory and set `ORT_PREFER_DYNAMIC_LINK=1` to use the import-lib/dll path.
 
 ### 🎯 Quick Start
 

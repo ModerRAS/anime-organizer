@@ -80,36 +80,7 @@ impl AniFileBertParser {
             .read_to_end(&mut model)
             .map_err(|error| format!("failed to decompress AniFileBERT ONNX model: {error}"))?;
 
-        let mut builder = Session::builder()
-            .map_err(|error| format!("failed to create ONNX Runtime session builder: {error}"))?;
-        builder = builder
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|error| format!("failed to configure ONNX graph optimization: {error}"))?;
-        builder = builder
-            .with_intra_threads(env_thread_count(ENV_INTRA_THREADS)?.unwrap_or(1))
-            .map_err(|error| format!("failed to configure ONNX intra-op threads: {error}"))?;
-        builder = builder
-            .with_inter_threads(env_thread_count(ENV_INTER_THREADS)?.unwrap_or(1))
-            .map_err(|error| format!("failed to configure ONNX inter-op threads: {error}"))?;
-        builder = builder
-            .with_parallel_execution(false)
-            .map_err(|error| format!("failed to configure ONNX execution mode: {error}"))?;
-
-        let providers = execution_providers()?;
-        if !providers.is_empty() {
-            builder = builder
-                .with_memory_pattern(false)
-                .map_err(|error| format!("failed to configure ONNX memory pattern: {error}"))?;
-            builder = builder
-                .with_execution_providers(providers)
-                .map_err(|error| {
-                    format!("failed to configure ONNX execution providers: {error}")
-                })?;
-        }
-
-        let session = builder
-            .commit_from_memory(&model)
-            .map_err(|error| format!("failed to load embedded AniFileBERT ONNX model: {error}"))?;
+        let session = create_session(&model, provider_mode()?)?;
 
         Ok(Self {
             vocab,
@@ -156,6 +127,62 @@ impl AniFileBertParser {
 
         Ok(info_from_entities(path, file_name, &chars, &entities))
     }
+}
+
+fn create_session(model: &[u8], mode: ProviderMode) -> Result<Session, String> {
+    match mode {
+        ProviderMode::Cpu => build_session_with_providers(model, Vec::new()),
+        ProviderMode::Auto if directml_available_in_build() => {
+            let providers = directml_provider(DirectMlDeviceFilter::Gpu, false)?;
+            match build_session_with_providers(model, providers) {
+                Ok(session) => Ok(session),
+                Err(directml_error) => build_session_with_providers(model, Vec::new())
+                    .map_err(|cpu_error| {
+                        format!(
+                            "DirectML auto initialization failed: {directml_error}; CPU fallback failed: {cpu_error}"
+                        )
+                    }),
+            }
+        }
+        ProviderMode::Auto => build_session_with_providers(model, Vec::new()),
+        ProviderMode::DirectMl(filter) => {
+            let providers = directml_provider(filter, true)?;
+            build_session_with_providers(model, providers)
+        }
+    }
+}
+
+fn build_session_with_providers(
+    model: &[u8],
+    providers: Vec<ExecutionProviderDispatch>,
+) -> Result<Session, String> {
+    let mut builder = Session::builder()
+        .map_err(|error| format!("failed to create ONNX Runtime session builder: {error}"))?;
+    builder = builder
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(|error| format!("failed to configure ONNX graph optimization: {error}"))?;
+    builder = builder
+        .with_intra_threads(env_thread_count(ENV_INTRA_THREADS)?.unwrap_or(1))
+        .map_err(|error| format!("failed to configure ONNX intra-op threads: {error}"))?;
+    builder = builder
+        .with_inter_threads(env_thread_count(ENV_INTER_THREADS)?.unwrap_or(1))
+        .map_err(|error| format!("failed to configure ONNX inter-op threads: {error}"))?;
+    builder = builder
+        .with_parallel_execution(false)
+        .map_err(|error| format!("failed to configure ONNX execution mode: {error}"))?;
+
+    if !providers.is_empty() {
+        builder = builder
+            .with_memory_pattern(false)
+            .map_err(|error| format!("failed to configure ONNX memory pattern: {error}"))?;
+        builder = builder
+            .with_execution_providers(providers)
+            .map_err(|error| format!("failed to configure ONNX execution providers: {error}"))?;
+    }
+
+    builder
+        .commit_from_memory(model)
+        .map_err(|error| format!("failed to load embedded AniFileBERT ONNX model: {error}"))
 }
 
 struct EncodedInput {
@@ -468,17 +495,6 @@ enum DirectMlDeviceFilter {
     Any,
 }
 
-fn execution_providers() -> Result<Vec<ExecutionProviderDispatch>, String> {
-    match provider_mode()? {
-        ProviderMode::Cpu => Ok(Vec::new()),
-        ProviderMode::Auto if directml_available_in_build() => {
-            directml_provider(DirectMlDeviceFilter::Gpu, false)
-        }
-        ProviderMode::Auto => Ok(Vec::new()),
-        ProviderMode::DirectMl(filter) => directml_provider(filter, true),
-    }
-}
-
 fn provider_mode() -> Result<ProviderMode, String> {
     provider_mode_from_str(env::var(ENV_PROVIDER).ok().as_deref())
 }
@@ -487,7 +503,8 @@ fn provider_mode_from_str(value: Option<&str>) -> Result<ProviderMode, String> {
     let value = value
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(default_provider_mode);
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| default_provider_mode().to_string());
     let normalized = value.to_ascii_lowercase().replace('_', "-");
 
     match normalized.as_str() {
@@ -738,9 +755,8 @@ mod tests {
         assert!(provider_mode_from_str(Some("vitis")).is_err());
     }
 
-    #[cfg(not(feature = "anifilebert-directml"))]
     #[test]
-    fn runs_embedded_model_on_cpu() {
+    fn runs_embedded_model_parser_smoke() {
         let mut parser = AniFileBertParser::new().unwrap();
         let path =
             Path::new("[GM-Team][国漫][神印王座][Throne of Seal][2022][200][AVC][GB][1080P].mp4");

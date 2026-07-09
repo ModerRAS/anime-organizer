@@ -86,7 +86,7 @@ jobs:
           key: ${{ runner.os }}-cargo-anifilebert-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run embedded ONNX CPU smoke test
-        run: cargo test --features anifilebert --lib runs_embedded_model_on_cpu -- --nocapture
+        run: cargo test --features anifilebert --lib runs_embedded_model_parser_smoke -- --nocapture
 
   docs:
     name: Documentation
