@@ -526,11 +526,59 @@ fn choose_bangumi_subject(
 #[cfg(feature = "metadata")]
 fn bangumi_subject_match_score(query: &str, subject: &BangumiSubject) -> f32 {
     let query_season = title_season_hint(query);
+    let ascii_tokens = distinctive_ascii_tokens(query);
     [Some(subject.name.as_str()), subject.name_cn.as_deref()]
         .into_iter()
         .flatten()
-        .map(|title| title_match_score_with_season(query, title, query_season))
+        .map(|title| {
+            let score = title_match_score_with_season(query, title, query_season);
+            if score < 0.75
+                && !ascii_tokens.is_empty()
+                && !candidate_has_any_ascii_token(title, &ascii_tokens)
+            {
+                return 0.0;
+            }
+            score
+        })
         .fold(0.0, f32::max)
+}
+
+#[cfg(feature = "metadata")]
+fn distinctive_ascii_tokens(value: &str) -> Vec<String> {
+    simplify_title_text(value)
+        .to_ascii_lowercase()
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| token.len() >= 3 && !is_generic_ascii_token(token))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+#[cfg(feature = "metadata")]
+fn candidate_has_any_ascii_token(candidate: &str, tokens: &[String]) -> bool {
+    let candidate = distinctive_ascii_tokens(candidate);
+    tokens
+        .iter()
+        .any(|token| candidate.iter().any(|item| item == token))
+}
+
+#[cfg(feature = "metadata")]
+fn is_generic_ascii_token(value: &str) -> bool {
+    matches!(
+        value,
+        "and"
+            | "for"
+            | "from"
+            | "into"
+            | "movie"
+            | "ona"
+            | "ova"
+            | "season"
+            | "special"
+            | "the"
+            | "tv"
+            | "tvsp"
+            | "with"
+    )
 }
 
 #[cfg(feature = "metadata")]
@@ -989,6 +1037,24 @@ mod tests {
             ),
             0.0
         );
+        assert!(choose_bangumi_subject(
+            "假面騎士 ZEZTZ",
+            vec![bangumi_subject(
+                48352,
+                "仮面ライダーSD 怪奇!?クモ男",
+                "假面骑士SD 怪奇!?蜘蛛男"
+            )]
+        )
+        .is_none());
+        assert!(choose_bangumi_subject(
+            "THE WORLD IS DANCING 世界在起舞",
+            vec![bangumi_subject(
+                622633,
+                "ワールド イズ ダンシング",
+                "世界在起舞"
+            )]
+        )
+        .is_some());
     }
 
     fn bangumi_episode(ep: f64, sort: f64, title: &str, duration_seconds: u32) -> BangumiEpisode {
