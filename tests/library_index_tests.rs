@@ -57,6 +57,7 @@ fn rebuild_creates_mlip_v1_schema_with_real_foreign_keys() {
             "series_artwork",
             "series_external_id",
             "series_genre",
+            "series_release_date",
         ]
     );
 
@@ -186,6 +187,35 @@ fn target_path_parser_reads_flat_and_season_layouts() {
 }
 
 #[test]
+fn incremental_update_adds_release_date_table_to_legacy_v1_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path();
+    let media_path = target.join("Legacy Show").join("01.mkv");
+    fs::create_dir_all(media_path.parent().unwrap()).unwrap();
+    fs::write(&media_path, b"video").unwrap();
+
+    LibraryIndex::rebuild(target, &[]).unwrap();
+    Connection::open(target.join("library.db"))
+        .unwrap()
+        .execute("DROP TABLE series_release_date", [])
+        .unwrap();
+
+    let mut record = LibraryIndexRecord::from_target_path(target, &media_path)
+        .unwrap()
+        .unwrap();
+    record.air_date = Some("2024-07-05".to_string());
+    LibraryIndex::update(target, &[record]).unwrap();
+
+    let conn = Connection::open(target.join("library.db")).unwrap();
+    let air_date: String = conn
+        .query_row("SELECT air_date FROM series_release_date", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(air_date, "2024-07-05");
+}
+
+#[test]
 fn records_store_metadata_genres_external_ids_and_artwork() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path();
@@ -202,6 +232,7 @@ fn records_store_metadata_genres_external_ids_and_artwork() {
     record.original_title = Some("Original Meta Show".to_string());
     record.summary = Some("Summary".to_string());
     record.year = Some(2026);
+    record.air_date = Some("2026-04-03".to_string());
     record.genres = vec![
         "Action".to_string(),
         "Action".to_string(),
@@ -231,6 +262,13 @@ fn records_store_metadata_genres_external_ids_and_artwork() {
         })
         .unwrap();
     assert_eq!(external_count, 3);
+
+    let air_date: String = conn
+        .query_row("SELECT air_date FROM series_release_date", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(air_date, "2026-04-03");
 
     let artwork_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM series_artwork", [], |row| row.get(0))
