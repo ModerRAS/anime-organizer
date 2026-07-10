@@ -10,8 +10,6 @@
 use crate::error::{AppError, Result};
 use crate::metadata::wiki::WikiParser;
 use crate::metadata::AnimeMetadata;
-#[cfg(feature = "metadata")]
-use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -24,11 +22,15 @@ use rusqlite::Connection;
 /// Bangumi API 基础 URL
 const BANGUMI_API_BASE: &str = "https://api.bgm.tv/v0";
 
-/// Bangumi Archive Release URL
-const BANGUMI_ARCHIVE_RELEASE: &str = "https://github.com/bangumi/archive/releases/latest/download";
+/// Bangumi Archive latest release metadata URL.
+const BANGUMI_ARCHIVE_LATEST_JSON: &str =
+    "https://raw.githubusercontent.com/bangumi/Archive/master/aux/latest.json";
 
 /// 默认本地 dump 文件名
 const SUBJECT_DUMP_FILENAME: &str = "subject.jsonlines";
+
+/// Bangumi Archive dump can be hundreds of MB.
+const BANGUMI_ARCHIVE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// 默认本地数据库文件名
 #[cfg(feature = "scraper")]
@@ -145,6 +147,12 @@ struct BangumiEpisodeResponse {
     data: Vec<BangumiEpisode>,
     #[serde(default)]
     total: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct BangumiArchiveLatest {
+    #[serde(rename = "browser_download_url", alias = "download_url")]
+    download_url: String,
 }
 
 /// Bangumi 分集信息。
@@ -649,27 +657,36 @@ impl BangumiClient {
         std::fs::create_dir_all(&self.cache_dir)
             .map_err(|e| AppError::MetadataFetchError(format!("创建缓存目录失败: {e}")))?;
 
-        let dump_path = self.cache_dir.join(SUBJECT_DUMP_FILENAME);
-
-        let plain_url = format!("{BANGUMI_ARCHIVE_RELEASE}/{SUBJECT_DUMP_FILENAME}");
-        if let Ok(resp) = self.http.get(&plain_url).send().await {
-            if resp.status().is_success() {
-                let bytes = resp.bytes().await.map_err(|e| {
-                    AppError::MetadataFetchError(format!("读取 dump 数据失败: {e}"))
-                })?;
-                std::fs::write(&dump_path, &bytes).map_err(|e| {
-                    AppError::MetadataFetchError(format!("写入 dump 文件失败: {e}"))
-                })?;
-                return Ok(dump_path);
-            }
+        let latest_resp = self
+            .http
+            .get(BANGUMI_ARCHIVE_LATEST_JSON)
+            .send()
+            .await
+            .map_err(|e| AppError::MetadataFetchError(format!("获取 dump 版本信息失败: {e}")))?;
+        if !latest_resp.status().is_success() {
+            return Err(AppError::MetadataFetchError(format!(
+                "获取 dump 版本信息失败 (HTTP {})",
+                latest_resp.status()
+            )));
         }
 
-        let gz_url = format!("{BANGUMI_ARCHIVE_RELEASE}/{SUBJECT_DUMP_FILENAME}.gz");
-        let resp =
-            self.http.get(&gz_url).send().await.map_err(|e| {
-                AppError::MetadataFetchError(format!("下载 Bangumi dump 失败: {e}"))
-            })?;
+        let latest: BangumiArchiveLatest = latest_resp
+            .json()
+            .await
+            .map_err(|e| AppError::MetadataFetchError(format!("解析 dump 版本信息失败: {e}")))?;
 
+        let dump_path = self.cache_dir.join(SUBJECT_DUMP_FILENAME);
+        let zip_path = self.cache_dir.join("bangumi-archive.zip.tmp");
+        let mut zip_output = std::fs::File::create(&zip_path)
+            .map_err(|e| AppError::MetadataFetchError(format!("创建 dump 临时文件失败: {e}")))?;
+
+        let mut resp = self
+            .http
+            .get(&latest.download_url)
+            .timeout(BANGUMI_ARCHIVE_DOWNLOAD_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| AppError::MetadataFetchError(format!("下载 Bangumi dump 失败: {e}")))?;
         if !resp.status().is_success() {
             return Err(AppError::MetadataFetchError(format!(
                 "下载 dump 失败 (HTTP {})",
@@ -677,18 +694,29 @@ impl BangumiClient {
             )));
         }
 
-        let bytes = resp
-            .bytes()
+        while let Some(chunk) = resp
+            .chunk()
             .await
-            .map_err(|e| AppError::MetadataFetchError(format!("读取 dump 数据失败: {e}")))?;
+            .map_err(|e| AppError::MetadataFetchError(format!("读取 dump 数据失败: {e}")))?
+        {
+            std::io::Write::write_all(&mut zip_output, &chunk).map_err(|e| {
+                AppError::MetadataFetchError(format!("写入 dump 临时文件失败: {e}"))
+            })?;
+        }
+        drop(zip_output);
 
-        let mut decoder = GzDecoder::new(bytes.as_ref());
-        let mut content = Vec::new();
-        std::io::Read::read_to_end(&mut decoder, &mut content)
-            .map_err(|e| AppError::MetadataFetchError(format!("解压 dump 失败: {e}")))?;
-
-        std::fs::write(&dump_path, &content)
+        let zip_file = std::fs::File::open(&zip_path)
+            .map_err(|e| AppError::MetadataFetchError(format!("打开 dump ZIP 失败: {e}")))?;
+        let mut archive = zip::ZipArchive::new(zip_file)
+            .map_err(|e| AppError::MetadataFetchError(format!("读取 dump ZIP 失败: {e}")))?;
+        let mut subject_file = archive.by_name(SUBJECT_DUMP_FILENAME).map_err(|e| {
+            AppError::MetadataFetchError(format!("在 dump ZIP 中找不到 subject.jsonlines: {e}"))
+        })?;
+        let mut output = std::fs::File::create(&dump_path)
             .map_err(|e| AppError::MetadataFetchError(format!("写入 dump 文件失败: {e}")))?;
+        std::io::copy(&mut subject_file, &mut output)
+            .map_err(|e| AppError::MetadataFetchError(format!("解压 dump 失败: {e}")))?;
+        let _ = std::fs::remove_file(&zip_path);
 
         Ok(dump_path)
     }
@@ -845,6 +873,19 @@ mod tests {
         assert_eq!(response.data[0].display_title().as_deref(), Some("天界"));
         assert_eq!(response.data[0].cleaned_summary().as_deref(), Some("简介"));
         assert_eq!(response.data[0].duration_seconds, Some(1420));
+    }
+
+    #[test]
+    fn archive_latest_deserializes_download_url() {
+        let latest: BangumiArchiveLatest = serde_json::from_str(
+            r#"{"browser_download_url":"https://github.com/bangumi/Archive/releases/download/archive/dump.zip"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            latest.download_url,
+            "https://github.com/bangumi/Archive/releases/download/archive/dump.zip"
+        );
     }
 
     #[test]
