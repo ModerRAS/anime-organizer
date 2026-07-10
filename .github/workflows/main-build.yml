@@ -42,24 +42,31 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
+            features: scraper clouddrive
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             archive: tar.gz
+            features: scraper clouddrive
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
+            features: scraper clouddrive
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             archive: zip
+            features: scraper clouddrive anifilebert
           - target: aarch64-pc-windows-msvc
             os: windows-latest
             archive: zip
+            features: scraper clouddrive
           - target: x86_64-apple-darwin
             os: macos-latest
             archive: tar.gz
+            features: scraper clouddrive
           - target: aarch64-apple-darwin
             os: macos-latest
             archive: tar.gz
+            features: scraper clouddrive
 
     env:
       BUILD_VERSION: ${{ needs.meta.outputs.build_version }}
@@ -109,7 +116,7 @@ jobs:
         shell: powershell
 
       - name: Build release binary
-        run: cargo build --release --features "scraper clouddrive" --target ${{ matrix.target }}
+        run: cargo build --release --features "${{ matrix.features }}" --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
@@ -125,7 +132,8 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
-          7z a ../../../${{ env.ARCHIVE_NAME }}.zip aniorg.exe
+          $files = @("aniorg.exe") + @(Get-ChildItem -Filter "*.dll" | ForEach-Object { $_.Name })
+          7z a ../../../${{ env.ARCHIVE_NAME }}.zip $files
           cd ../../..
 
       - name: Upload artifact
