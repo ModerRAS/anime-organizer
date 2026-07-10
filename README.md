@@ -139,7 +139,7 @@ aniorg --source="/path/to/downloads" --dry-run --verbose
 | `--no-images` | | bool | ❌ | false | 只生成 NFO，不下载图片 |
 | `--no-episode-metadata` | | bool | ❌ | false | 跳过 Bangumi 分集标题、简介和时长查询 |
 | `--force-overwrite` | | bool | ❌ | false | 覆盖已有的 NFO 和图片文件 |
-| `--bangumi-cache` | | string | ❌ | 系统临时目录 | Bangumi 缓存目录 |
+| `--bangumi-cache` | | string | ❌ | 系统缓存目录 | Bangumi 缓存目录 |
 | `--metadata-source` | | string | ❌ | - | 指定本地 `subject.jsonlines` 或其所在目录 |
 | `--library-index` | | bool | ❌ | false | 生成/更新目标目录根部的 `library.db` |
 | `--mlip` | | bool | ❌ | false | 生成 MiruPlay 可直接导入的 MLIP 媒体库，自动启用 `library.db` 并写入 Bangumi 元数据 |
@@ -725,7 +725,7 @@ aniorg --source="/path/to/downloads" --target="/path/to/anime" --library-index -
 | `--no-images` | | bool | ❌ | false | Generate NFO only, skip artwork download |
 | `--no-episode-metadata` | | bool | ❌ | false | Skip Bangumi episode title, summary, and duration lookup |
 | `--force-overwrite` | | bool | ❌ | false | Overwrite existing NFO and image files |
-| `--bangumi-cache` | | string | ❌ | system temp dir | Bangumi cache directory |
+| `--bangumi-cache` | | string | ❌ | system cache dir | Bangumi cache directory |
 | `--metadata-source` | | string | ❌ | - | Local `subject.jsonlines` file or containing directory |
 | `--library-index` | | bool | ❌ | false | Generate/update `library.db` in the target root |
 | `--mlip` | | bool | ❌ | false | Generate a MiruPlay-ready MLIP library and write Bangumi metadata into `library.db` |

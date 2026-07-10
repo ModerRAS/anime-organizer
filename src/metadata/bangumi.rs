@@ -12,6 +12,7 @@ use crate::metadata::wiki::WikiParser;
 use crate::metadata::AnimeMetadata;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -264,19 +265,48 @@ pub struct BangumiClient {
     aliases_index: std::sync::Mutex<Option<HashMap<String, (u32, String)>>>,
 }
 
+fn default_cache_dir() -> PathBuf {
+    default_cache_dir_from_env(
+        std::env::var_os("LOCALAPPDATA"),
+        std::env::var_os("APPDATA"),
+        std::env::var_os("XDG_CACHE_HOME"),
+        std::env::var_os("HOME"),
+        std::env::temp_dir(),
+    )
+}
+
+fn default_cache_dir_from_env(
+    local_app_data: Option<OsString>,
+    app_data: Option<OsString>,
+    xdg_cache_home: Option<OsString>,
+    home: Option<OsString>,
+    temp_dir: PathBuf,
+) -> PathBuf {
+    let root = if cfg!(windows) {
+        local_app_data.or(app_data).map(PathBuf::from)
+    } else {
+        xdg_cache_home
+            .map(PathBuf::from)
+            .or_else(|| home.map(|path| PathBuf::from(path).join(".cache")))
+    }
+    .unwrap_or(temp_dir);
+
+    root.join("anime-organizer").join("bangumi-cache")
+}
+
 impl BangumiClient {
     /// 创建新的 Bangumi 客户端
     ///
     /// # 参数
     ///
-    /// - `cache_dir` - 本地缓存目录，默认使用系统临时目录下的 `bangumi-cache`
+    /// - `cache_dir` - 本地缓存目录，默认使用系统缓存目录下的 `anime-organizer/bangumi-cache`
     pub fn new(cache_dir: Option<PathBuf>) -> Self {
         Self::with_source(cache_dir, None)
     }
 
     /// 创建新的 Bangumi 客户端，并允许显式指定 dump 路径。
     pub fn with_source(cache_dir: Option<PathBuf>, source_path: Option<PathBuf>) -> Self {
-        let cache_dir = cache_dir.unwrap_or_else(|| std::env::temp_dir().join("bangumi-cache"));
+        let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
         Self {
             #[cfg(feature = "metadata")]
             http: reqwest::Client::builder()
@@ -885,6 +915,37 @@ mod tests {
         assert_eq!(
             latest.download_url,
             "https://github.com/bangumi/Archive/releases/download/archive/dump.zip"
+        );
+    }
+
+    #[test]
+    fn default_cache_dir_uses_platform_cache_root() {
+        let path = default_cache_dir_from_env(
+            Some(OsString::from("local")),
+            Some(OsString::from("roaming")),
+            Some(OsString::from("xdg")),
+            Some(OsString::from("home")),
+            PathBuf::from("tmp"),
+        );
+        let expected_root = if cfg!(windows) {
+            PathBuf::from("local")
+        } else {
+            PathBuf::from("xdg")
+        };
+
+        assert_eq!(
+            path,
+            expected_root.join("anime-organizer").join("bangumi-cache")
+        );
+    }
+
+    #[test]
+    fn default_cache_dir_falls_back_to_temp() {
+        assert_eq!(
+            default_cache_dir_from_env(None, None, None, None, PathBuf::from("tmp")),
+            PathBuf::from("tmp")
+                .join("anime-organizer")
+                .join("bangumi-cache")
         );
     }
 
