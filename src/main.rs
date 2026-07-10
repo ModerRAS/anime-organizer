@@ -230,7 +230,7 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
     let mut processed = 0;
     let mut succeeded = 0;
     let mut failed = 0;
-    let mut metadata_cache: HashMap<String, Option<AnimeMetadata>> = HashMap::new();
+    let mut metadata_cache: HashMap<(String, u32), Option<AnimeMetadata>> = HashMap::new();
     let mut episode_cache: HashMap<u32, Option<Vec<BangumiEpisode>>> = HashMap::new();
     let mut library_records = Vec::new();
 
@@ -243,19 +243,21 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
         let season_number = first_file.season_number().unwrap_or(1);
         let anime_root = target.join(&series_name);
 
-        let metadata = if let Some(cached) = metadata_cache.get(&anime_name) {
+        let cache_key = (anime_name.clone(), season_number);
+        let metadata = if let Some(cached) = metadata_cache.get(&cache_key) {
             cached.clone()
         } else {
             let fetched = fetch_anime_metadata(
                 &anime_name,
                 &series_name,
+                first_file.season_number(),
                 &alias_lookup,
                 &bangumi,
                 tmdb.as_ref(),
                 args.verbose,
             )
             .await;
-            metadata_cache.insert(anime_name.clone(), fetched.clone());
+            metadata_cache.insert(cache_key, fetched.clone());
             fetched
         };
 
@@ -685,7 +687,7 @@ fn probe_media_runtime_seconds(path: &Path, verbose: bool) -> Option<i64> {
 
 #[cfg(feature = "metadata")]
 struct MetadataIndexContext<'a> {
-    metadata_cache: &'a mut HashMap<String, Option<AnimeMetadata>>,
+    metadata_cache: &'a mut HashMap<(String, u32), Option<AnimeMetadata>>,
     episode_cache: &'a mut HashMap<u32, Option<Vec<BangumiEpisode>>>,
     alias_lookup: &'a AliasLookup,
     bangumi: &'a BangumiClient,
@@ -758,21 +760,22 @@ async fn enrich_library_index_records(
     for record in records {
         let lookup_title = record.series_title.clone();
         let season = u32::try_from(record.season).unwrap_or(1);
-        let metadata = if let Some(cached) = context.metadata_cache.get(&lookup_title) {
+        let season_hint = (season > 1).then_some(season);
+        let cache_key = (lookup_title.clone(), season);
+        let metadata = if let Some(cached) = context.metadata_cache.get(&cache_key) {
             cached.clone()
         } else {
             let fetched = fetch_anime_metadata(
                 &lookup_title,
                 &lookup_title,
+                season_hint,
                 context.alias_lookup,
                 context.bangumi,
                 context.tmdb,
                 context.verbose,
             )
             .await;
-            context
-                .metadata_cache
-                .insert(lookup_title.clone(), fetched.clone());
+            context.metadata_cache.insert(cache_key, fetched.clone());
             fetched
         };
 
@@ -805,7 +808,9 @@ async fn enrich_library_index_records(
             apply_bangumi_episode_details(
                 record,
                 episodes.as_deref(),
-                min_episodes.get(&lookup_title).copied(),
+                min_episodes
+                    .get(&(lookup_title.clone(), i64::from(season)))
+                    .copied(),
             );
             add_metadata_artwork(record, target, &anime_root, season.max(1));
         }

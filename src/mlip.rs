@@ -12,6 +12,7 @@ use std::path::Path;
 pub(crate) async fn fetch_anime_metadata(
     anime_name: &str,
     series_name: &str,
+    season_hint: Option<u32>,
     alias_lookup: &AliasLookup,
     bangumi: &BangumiClient,
     tmdb: Option<&TmdbClient>,
@@ -19,8 +20,9 @@ pub(crate) async fn fetch_anime_metadata(
 ) -> Option<AnimeMetadata> {
     let mut metadata = None;
     let mut anidb_id = None;
+    let lookup_queries = metadata_search_queries(series_name, Some(anime_name), None, season_hint);
 
-    let alias = [anime_name, series_name].into_iter().find_map(|query| {
+    let alias = lookup_queries.iter().find_map(|query| {
         alias_lookup
             .find(query)
             .or_else(|| alias_lookup.find_fuzzy(query))
@@ -50,17 +52,9 @@ pub(crate) async fn fetch_anime_metadata(
     }
 
     if metadata.is_none() {
-        let subject = bangumi
-            .find_by_name(anime_name)
-            .ok()
-            .flatten()
-            .or_else(|| bangumi.find_by_name(series_name).ok().flatten())
-            .or_else(|| {
-                bangumi
-                    .search(series_name)
-                    .ok()
-                    .and_then(|mut matches| matches.drain(..).next())
-            });
+        let subject = lookup_queries
+            .iter()
+            .find_map(|query| bangumi.find_by_name(query).ok().flatten());
 
         if let Some(subject) = subject {
             if verbose {
@@ -74,15 +68,45 @@ pub(crate) async fn fetch_anime_metadata(
 
     if metadata.is_none() {
         let mut best_subject = None;
-        for query in metadata_search_queries(series_name, Some(anime_name), None) {
-            match bangumi.search_subjects(&query, 10).await {
+        for query in &lookup_queries {
+            if let Ok(candidates) = bangumi.find_local_subjects(0.72, 10, |subject| {
+                bangumi_subject_match_score(query, subject, false)
+            }) {
+                if let Some((subject, score)) = choose_local_bangumi_subject(query, candidates) {
+                    if best_subject
+                        .as_ref()
+                        .is_none_or(|(_, best_score, _)| score > *best_score)
+                    {
+                        best_subject = Some((subject, score, query.clone()));
+                    }
+                }
+            }
+        }
+
+        if let Some((subject, score, query)) = best_subject {
+            if verbose {
+                eprintln!(
+                    "Bangumi 本地搜索: {} -> {} (score={score:.2})",
+                    query, subject.name
+                );
+            }
+            if let Ok(meta) = bangumi.fetch_metadata(subject.id).await {
+                metadata = Some(meta);
+            }
+        }
+    }
+
+    if metadata.is_none() {
+        let mut best_subject = None;
+        for query in &lookup_queries {
+            match bangumi.search_subjects(query, 10).await {
                 Ok(subjects) => {
-                    if let Some((subject, score)) = choose_bangumi_subject(&query, subjects) {
+                    if let Some((subject, score)) = choose_bangumi_subject(query, subjects) {
                         if best_subject
                             .as_ref()
                             .is_none_or(|(_, best_score, _)| score > *best_score)
                         {
-                            best_subject = Some((subject, score, query));
+                            best_subject = Some((subject, score, query.clone()));
                         }
                     } else if verbose {
                         eprintln!("Bangumi 在线搜索未找到可靠匹配: {query}");
@@ -469,14 +493,14 @@ pub(crate) fn anime_group_min_episode(files: &[AnimeFileInfo]) -> Option<f64> {
 }
 
 #[cfg(feature = "metadata")]
-pub(crate) fn min_episode_by_series(records: &[LibraryIndexRecord]) -> HashMap<String, f64> {
+pub(crate) fn min_episode_by_series(records: &[LibraryIndexRecord]) -> HashMap<(String, i64), f64> {
     let mut min_episodes = HashMap::new();
     for record in records {
         if !record.episode.is_finite() {
             continue;
         }
         min_episodes
-            .entry(record.series_title.clone())
+            .entry((record.series_title.clone(), record.season))
             .and_modify(|episode| {
                 if record.episode < *episode {
                     *episode = record.episode;
@@ -496,15 +520,56 @@ fn metadata_search_queries(
     primary: &str,
     secondary: Option<&str>,
     tertiary: Option<&str>,
+    season_hint: Option<u32>,
 ) -> Vec<String> {
-    let mut queries = unique_titles(primary, secondary, tertiary);
-    for query in queries.clone() {
-        let simplified = simplify_title_text(&query);
-        if simplified != query && !queries.iter().any(|item| item == &simplified) {
-            queries.push(simplified);
+    let titles = unique_titles(primary, secondary, tertiary);
+    let mut queries = Vec::new();
+
+    for title in titles {
+        if let Some(season) = season_hint.filter(|season| *season > 1) {
+            if title_season_hint(&title).is_some() {
+                push_unique_title(&mut queries, title);
+            } else {
+                if let Some(number) = cjk_season_number(season) {
+                    push_unique_title(&mut queries, format!("{title} 第{number}季"));
+                }
+                push_unique_title(&mut queries, format!("{title} Season {season}"));
+            }
+        } else {
+            push_unique_title(&mut queries, title);
         }
     }
+
+    for query in queries.clone() {
+        let simplified = simplify_title_text(&query);
+        push_unique_title(&mut queries, simplified);
+    }
     queries
+}
+
+#[cfg(feature = "metadata")]
+fn push_unique_title(titles: &mut Vec<String>, value: String) {
+    let value = value.trim();
+    if !value.is_empty() && !titles.iter().any(|item| item == value) {
+        titles.push(value.to_string());
+    }
+}
+
+#[cfg(feature = "metadata")]
+fn cjk_season_number(season: u32) -> Option<&'static str> {
+    match season {
+        1 => Some("一"),
+        2 => Some("二"),
+        3 => Some("三"),
+        4 => Some("四"),
+        5 => Some("五"),
+        6 => Some("六"),
+        7 => Some("七"),
+        8 => Some("八"),
+        9 => Some("九"),
+        10 => Some("十"),
+        _ => None,
+    }
 }
 
 #[cfg(feature = "metadata")]
@@ -516,7 +581,7 @@ fn choose_bangumi_subject(
         .into_iter()
         .enumerate()
         .filter_map(|(index, subject)| {
-            let score = bangumi_subject_match_score(query, &subject);
+            let score = bangumi_subject_match_score(query, &subject, true);
             let ranked_score = score - (index as f32 * 0.12);
             (score >= 0.45).then_some((subject, ranked_score))
         })
@@ -524,14 +589,39 @@ fn choose_bangumi_subject(
 }
 
 #[cfg(feature = "metadata")]
-fn bangumi_subject_match_score(query: &str, subject: &BangumiSubject) -> f32 {
-    let query_season = title_season_hint(query);
+fn choose_local_bangumi_subject(
+    query: &str,
+    subjects: Vec<(BangumiSubject, f32)>,
+) -> Option<(BangumiSubject, f32)> {
+    subjects
+        .into_iter()
+        .filter_map(|(subject, _)| {
+            let score = bangumi_subject_match_score(query, &subject, true);
+            (score >= 0.72).then_some((subject, score))
+        })
+        .max_by(|(_, left), (_, right)| left.total_cmp(right))
+}
+
+#[cfg(feature = "metadata")]
+fn bangumi_subject_match_score(
+    query: &str,
+    subject: &BangumiSubject,
+    use_bert_season: bool,
+) -> f32 {
+    let query_season = title_season_hint(query)
+        .or_else(|| use_bert_season.then(|| bert_season_hint(query)).flatten());
     let ascii_tokens = distinctive_ascii_tokens(query);
     [Some(subject.name.as_str()), subject.name_cn.as_deref()]
         .into_iter()
         .flatten()
         .map(|title| {
-            let score = title_match_score_with_season(query, title, query_season);
+            let candidate_season = title_season_hint(title)
+                .or_else(|| use_bert_season.then(|| bert_season_hint(title)).flatten())
+                .or_else(|| {
+                    query_season.filter(|season| has_trailing_season_number(title, *season))
+                });
+            let score =
+                title_match_score_with_known_seasons(query, title, query_season, candidate_season);
             if score < 0.75
                 && !ascii_tokens.is_empty()
                 && !candidate_has_any_ascii_token(title, &ascii_tokens)
@@ -541,6 +631,18 @@ fn bangumi_subject_match_score(query: &str, subject: &BangumiSubject) -> f32 {
             score
         })
         .fold(0.0, f32::max)
+}
+
+#[cfg(all(feature = "metadata", feature = "anifilebert"))]
+fn bert_season_hint(value: &str) -> Option<u32> {
+    anime_organizer::anifilebert::detect_season(value)
+        .ok()
+        .flatten()
+}
+
+#[cfg(all(feature = "metadata", not(feature = "anifilebert")))]
+fn bert_season_hint(_value: &str) -> Option<u32> {
+    None
 }
 
 #[cfg(feature = "metadata")]
@@ -581,9 +683,23 @@ fn is_generic_ascii_token(value: &str) -> bool {
     )
 }
 
-#[cfg(feature = "metadata")]
+#[cfg(all(test, feature = "metadata"))]
 fn title_match_score_with_season(query: &str, candidate: &str, query_season: Option<u32>) -> f32 {
-    let candidate_season = title_season_hint(candidate);
+    title_match_score_with_known_seasons(
+        query,
+        candidate,
+        query_season,
+        title_season_hint(candidate),
+    )
+}
+
+#[cfg(feature = "metadata")]
+fn title_match_score_with_known_seasons(
+    query: &str,
+    candidate: &str,
+    query_season: Option<u32>,
+    candidate_season: Option<u32>,
+) -> f32 {
     if query_season.is_some() && candidate_season.is_some() && query_season != candidate_season {
         return 0.0;
     }
@@ -675,6 +791,16 @@ fn parse_ordinal_number(value: &str) -> Option<u32> {
         .or_else(|| value.strip_suffix("rd"))
         .or_else(|| value.strip_suffix("th"))
         .and_then(|number| number.parse::<u32>().ok())
+}
+
+#[cfg(feature = "metadata")]
+fn has_trailing_season_number(value: &str, expected: u32) -> bool {
+    let value = simplify_title_text(value).trim().to_ascii_lowercase();
+    let suffix = expected.to_string();
+    value
+        .strip_suffix(&suffix)
+        .and_then(|prefix| prefix.chars().next_back())
+        .is_some_and(|previous| !previous.is_ascii_digit())
 }
 
 #[cfg(feature = "metadata")]
@@ -1004,6 +1130,74 @@ mod tests {
             meta_tags: Vec::new(),
             images: None,
         }
+    }
+
+    #[test]
+    fn season_directory_queries_do_not_fall_back_to_bare_title() {
+        let queries =
+            metadata_search_queries("女性向遊戲世界對路人角色很不友好", None, None, Some(2));
+
+        assert!(queries
+            .iter()
+            .any(|query| query == "女性向遊戲世界對路人角色很不友好 第二季"));
+        assert!(queries
+            .iter()
+            .any(|query| query == "女性向遊戲世界對路人角色很不友好 Season 2"));
+        assert!(!queries
+            .iter()
+            .any(|query| query == "女性向遊戲世界對路人角色很不友好"));
+    }
+
+    #[test]
+    fn local_search_prefers_matching_season() {
+        let (subject, _) = choose_local_bangumi_subject(
+            "女性向遊戲世界對路人角色很不友好 第二季",
+            vec![
+                (
+                    bangumi_subject(
+                        359980,
+                        "乙女ゲー世界はモブに厳しい世界です",
+                        "恋爱游戏世界对路人角色很不友好",
+                    ),
+                    0.8,
+                ),
+                (
+                    bangumi_subject(
+                        412144,
+                        "乙女ゲー世界はモブに厳しい世界です2",
+                        "恋爱游戏世界对路人角色很不友好 第二季",
+                    ),
+                    1.0,
+                ),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(subject.id, 412144);
+    }
+
+    #[test]
+    fn min_episode_isolated_by_season() {
+        let records = vec![
+            LibraryIndexRecord::new(
+                "Anime".to_string(),
+                1,
+                13.0,
+                "Anime/Season 1/13.mkv".to_string(),
+                std::path::Path::new("13.mkv"),
+            ),
+            LibraryIndexRecord::new(
+                "Anime".to_string(),
+                2,
+                1.0,
+                "Anime/Season 2/01.mkv".to_string(),
+                std::path::Path::new("01.mkv"),
+            ),
+        ];
+
+        let minimums = min_episode_by_series(&records);
+        assert_eq!(minimums.get(&("Anime".to_string(), 1)), Some(&13.0));
+        assert_eq!(minimums.get(&("Anime".to_string(), 2)), Some(&1.0));
     }
 
     #[test]

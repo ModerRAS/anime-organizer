@@ -603,6 +603,38 @@ impl BangumiClient {
             .unwrap_or_default())
     }
 
+    /// 在已加载的本地 dump 中按调用方评分返回前几个候选。
+    pub fn find_local_subjects<F>(
+        &self,
+        min_score: f32,
+        limit: usize,
+        score: F,
+    ) -> Result<Vec<(BangumiSubject, f32)>>
+    where
+        F: Fn(&BangumiSubject) -> f32,
+    {
+        let index = self
+            .index
+            .lock()
+            .map_err(|e| AppError::BangumiParseError(format!("锁定索引失败: {e}")))?;
+        let mut matches = index
+            .as_ref()
+            .into_iter()
+            .flat_map(|subjects| subjects.values())
+            .filter_map(|subject| {
+                let value = score(subject);
+                (value >= min_score).then_some((subject.clone(), value))
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by(|(left_subject, left), (right_subject, right)| {
+            right
+                .total_cmp(left)
+                .then_with(|| left_subject.id.cmp(&right_subject.id))
+        });
+        matches.truncate(limit);
+        Ok(matches)
+    }
+
     /// 加载本地 JSONL dump 文件
     ///
     /// 从缓存目录中加载 `subject.jsonlines`，仅保留 `type=2`（动画）的条目。

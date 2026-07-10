@@ -3,7 +3,7 @@
 //! The rule parser remains the default. This module is loaded only when the
 //! `anifilebert` feature is enabled and the CLI asks for it.
 
-use crate::parser::AnimeFileInfo;
+use crate::parser::{split_series_and_season, AnimeFileInfo};
 use flate2::read::GzDecoder;
 use ort::{
     ep::ExecutionProviderDispatch,
@@ -32,6 +32,7 @@ const ENV_INTRA_THREADS: &str = "ANIORG_ORT_INTRA_THREADS";
 const ENV_INTER_THREADS: &str = "ANIORG_ORT_INTER_THREADS";
 
 static PARSER: OnceLock<Result<Mutex<AniFileBertParser>, String>> = OnceLock::new();
+static SEASON_CACHE: OnceLock<Mutex<HashMap<String, Option<u32>>>> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 struct ModelConfig {
@@ -48,12 +49,39 @@ struct Entity {
 }
 
 pub fn parse_path(path: &Path) -> Result<Option<AnimeFileInfo>, String> {
+    with_parser(|parser| parser.parse_path(path))
+}
+
+/// 从标题文本中识别季号；使用文件名形状保持与模型训练分布一致。
+pub fn detect_season(value: &str) -> Result<Option<u32>, String> {
+    let cache = SEASON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(season) = cache
+        .lock()
+        .map_err(|_| "AniFileBERT season cache lock poisoned".to_string())?
+        .get(value)
+        .copied()
+    {
+        return Ok(season);
+    }
+
+    let input = format!("[Search] {value} - 01.mkv");
+    let season = with_parser(|parser| parser.detect_season(&input))?;
+    cache
+        .lock()
+        .map_err(|_| "AniFileBERT season cache lock poisoned".to_string())?
+        .insert(value.to_string(), season);
+    Ok(season)
+}
+
+fn with_parser<T>(
+    run: impl FnOnce(&mut AniFileBertParser) -> Result<T, String>,
+) -> Result<T, String> {
     let parser = PARSER.get_or_init(|| AniFileBertParser::new().map(Mutex::new));
     let parser = parser.as_ref().map_err(Clone::clone)?;
     let mut parser = parser
         .lock()
         .map_err(|_| "AniFileBERT parser lock poisoned".to_string())?;
-    parser.parse_path(path)
+    run(&mut parser)
 }
 
 struct AniFileBertParser {
@@ -96,11 +124,23 @@ impl AniFileBertParser {
             .and_then(|value| value.to_str())
             .ok_or_else(|| format!("invalid filename: {}", path.display()))?;
         let chars: Vec<char> = file_name.chars().collect();
+        let entities = self.predict_entities(&chars)?;
+        Ok(info_from_entities(path, file_name, &chars, &entities))
+    }
+
+    fn detect_season(&mut self, value: &str) -> Result<Option<u32>, String> {
+        let chars: Vec<char> = value.chars().collect();
+        let entities = self.predict_entities(&chars)?;
+        Ok(season_from_entities(&entities))
+    }
+
+    fn predict_entities(&mut self, chars: &[char]) -> Result<Vec<Entity>, String> {
         if chars.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
-        let encoded = encode_chars(&self.vocab, &chars, self.max_seq_len);
+        let encoded = encode_chars(&self.vocab, chars, self.max_seq_len);
+        let char_count = encoded.char_count;
         let input_ids = Tensor::from_array(([1usize, self.max_seq_len], encoded.input_ids))
             .map_err(|error| format!("failed to create input_ids tensor: {error}"))?;
         let attention_mask =
@@ -117,15 +157,12 @@ impl AniFileBertParser {
         let (shape, logits) = outputs[0]
             .try_extract_tensor::<f32>()
             .map_err(|error| format!("failed to read AniFileBERT logits: {error}"))?;
-        let labels = argmax_labels(shape, logits, &self.id2label)?;
-        let labels = labels
+        let labels = argmax_labels(shape, logits, &self.id2label)?
             .into_iter()
             .skip(1)
-            .take(encoded.char_count)
+            .take(char_count)
             .collect::<Vec<_>>();
-        let entities = collect_entities(&chars[..encoded.char_count], &labels);
-
-        Ok(info_from_entities(path, file_name, &chars, &entities))
+        Ok(collect_entities(&chars[..char_count], &labels))
     }
 }
 
@@ -335,7 +372,15 @@ fn info_from_entities(
     chars: &[char],
     entities: &[Entity],
 ) -> Option<AnimeFileInfo> {
-    let title = choose_title(entities)?;
+    let mut title = choose_title(entities)?;
+    if split_series_and_season(&title).1.is_none() {
+        if let Some(season) = season_entity(entities) {
+            let title_with_season = format!("{title} {}", season.value);
+            if split_series_and_season(&title_with_season).1.is_some() {
+                title = title_with_season;
+            }
+        }
+    }
     let episode = entities
         .iter()
         .find(|entity| entity.label == "EPISODE")
@@ -364,6 +409,17 @@ fn info_from_entities(
         extension,
         original_path: path.to_string_lossy().to_string(),
     })
+}
+
+fn season_from_entities(entities: &[Entity]) -> Option<u32> {
+    let season = season_entity(entities)?;
+    split_series_and_season(&format!("Title {}", season.value)).1
+}
+
+fn season_entity(entities: &[Entity]) -> Option<&Entity> {
+    entities
+        .iter()
+        .find(|entity| matches!(entity.label.as_str(), "SEASON" | "PATH_SEASON"))
 }
 
 fn choose_title(entities: &[Entity]) -> Option<String> {
@@ -735,6 +791,56 @@ mod tests {
     }
 
     #[test]
+    fn preserves_model_season_entity_in_parser_result() {
+        let path = Path::new("[Grp] Anime S2 - 01 [1080p].mkv");
+        let chars: Vec<char> = path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .chars()
+            .collect();
+        let entities = vec![
+            Entity {
+                label: "GROUP".to_string(),
+                value: "Grp".to_string(),
+                start: 1,
+                end: 4,
+            },
+            Entity {
+                label: "TITLE_LATIN".to_string(),
+                value: "Anime".to_string(),
+                start: 6,
+                end: 11,
+            },
+            Entity {
+                label: "SEASON".to_string(),
+                value: "S2".to_string(),
+                start: 12,
+                end: 14,
+            },
+            Entity {
+                label: "EPISODE".to_string(),
+                value: "01".to_string(),
+                start: 17,
+                end: 19,
+            },
+        ];
+
+        let info = info_from_entities(
+            path,
+            path.file_name().unwrap().to_str().unwrap(),
+            &chars,
+            &entities,
+        )
+        .unwrap();
+
+        assert_eq!(season_from_entities(&entities), Some(2));
+        assert_eq!(info.anime_name, "Anime S2");
+        assert_eq!(info.season_number(), Some(2));
+    }
+
+    #[test]
     fn parses_provider_modes() {
         assert_eq!(
             provider_mode_from_str(Some("cpu")).unwrap(),
@@ -762,5 +868,25 @@ mod tests {
             Path::new("[GM-Team][国漫][神印王座][Throne of Seal][2022][200][AVC][GB][1080P].mp4");
 
         parser.parse_path(path).unwrap();
+    }
+
+    #[test]
+    fn embedded_model_detects_candidate_season() {
+        assert_eq!(
+            detect_season("恋爱游戏世界对路人角色很不友好 第二季").unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            detect_season("恋爱游戏世界对路人角色很不友好").unwrap(),
+            None
+        );
+        assert_eq!(
+            detect_season("乙女ゲー世界はモブに厳しい世界です2").unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            detect_season("乙女ゲー世界はモブに厳しい世界です").unwrap(),
+            None
+        );
     }
 }
