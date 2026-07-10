@@ -45,6 +45,16 @@ CREATE TABLE series
 CREATE INDEX idx_series_title
 ON series(title);
 
+CREATE TABLE series_release_date
+(
+    series_id   INTEGER PRIMARY KEY,
+    air_date    TEXT NOT NULL,
+
+    FOREIGN KEY(series_id)
+        REFERENCES series(id)
+        ON DELETE CASCADE
+);
+
 CREATE TABLE episode
 (
     id          INTEGER PRIMARY KEY,
@@ -254,6 +264,7 @@ pub struct LibraryIndexRecord {
     pub sort_title: Option<String>,
     pub summary: Option<String>,
     pub year: Option<i64>,
+    pub air_date: Option<String>,
     pub series_type: i64,
     pub season: i64,
     pub episode: f64,
@@ -354,6 +365,7 @@ impl LibraryIndexRecord {
             sort_title: None,
             summary: None,
             year: None,
+            air_date: None,
             series_type: 1,
             season,
             episode,
@@ -385,6 +397,7 @@ impl LibraryIndexRecord {
             self.summary = Some(meta.summary.clone());
         }
         self.year = meta.air_date.as_deref().and_then(parse_year).map(i64::from);
+        self.air_date = meta.air_date.clone();
         self.genres = meta.genre.clone();
         self.external_ids
             .push(ExternalId::new(ExternalProvider::Bangumi, meta.bangumi_id));
@@ -482,6 +495,7 @@ fn write_records(
     records: &[LibraryIndexRecord],
     include_static_meta: bool,
 ) -> Result<()> {
+    ensure_schema_extensions(conn)?;
     let tx = conn
         .transaction()
         .map_err(|e| AppError::LibraryIndexError(format!("开始事务失败: {e}")))?;
@@ -495,6 +509,17 @@ fn write_records(
 
     tx.commit()
         .map_err(|e| AppError::LibraryIndexError(format!("提交事务失败: {e}")))?;
+    Ok(())
+}
+
+fn ensure_schema_extensions(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS series_release_date (\
+         series_id INTEGER PRIMARY KEY, \
+         air_date TEXT NOT NULL, \
+         FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE)",
+    )
+    .map_err(|e| AppError::LibraryIndexError(format!("创建 MLIP 扩展表失败: {e}")))?;
     Ok(())
 }
 
@@ -535,6 +560,7 @@ fn upsert_capabilities(conn: &Connection) -> Result<()> {
         ("artwork", 1),
         ("genre", 1),
         ("external_id", 1),
+        ("release_date", 1),
         ("people", 0),
         ("subtitle", 0),
         ("media_technical", 0),
@@ -583,6 +609,8 @@ fn insert_record(conn: &Connection, record: &LibraryIndexRecord) -> Result<()> {
             |row| row.get(0),
         )
         .map_err(|e| AppError::LibraryIndexError(format!("读取 series id 失败: {e}")))?;
+
+    upsert_release_date(conn, series_id, record.air_date.as_deref())?;
 
     let episode_uuid = stable_uuid(
         "episode",
@@ -656,6 +684,19 @@ fn insert_record(conn: &Connection, record: &LibraryIndexRecord) -> Result<()> {
         &record.episode_artwork,
     )?;
 
+    Ok(())
+}
+
+fn upsert_release_date(conn: &Connection, series_id: i64, air_date: Option<&str>) -> Result<()> {
+    let Some(air_date) = air_date.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    conn.execute(
+        "INSERT INTO series_release_date (series_id, air_date) VALUES (?1, ?2) \
+         ON CONFLICT(series_id) DO UPDATE SET air_date = excluded.air_date",
+        params![series_id, air_date],
+    )
+    .map_err(|e| AppError::LibraryIndexError(format!("写入 series_release_date 失败: {e}")))?;
     Ok(())
 }
 

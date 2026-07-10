@@ -23,6 +23,24 @@ fn external_id_count(db_path: &std::path::Path) -> i64 {
     .unwrap()
 }
 
+fn bangumi_id(db_path: &std::path::Path) -> String {
+    let conn = Connection::open(db_path).unwrap();
+    conn.query_row(
+        "SELECT value FROM series_external_id WHERE provider = 1",
+        [],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn air_date(db_path: &std::path::Path) -> String {
+    let conn = Connection::open(db_path).unwrap();
+    conn.query_row("SELECT air_date FROM series_release_date", [], |row| {
+        row.get(0)
+    })
+    .unwrap()
+}
+
 #[test]
 fn library_index_flag_creates_target_root_database() {
     let source = tempfile::tempdir().unwrap();
@@ -103,6 +121,8 @@ fn mlip_flag_creates_metadata_library_without_nfo() {
     assert!(db_path.exists());
     assert_eq!(media_count(&db_path), 1);
     assert_eq!(external_id_count(&db_path), 1);
+    assert_eq!(bangumi_id(&db_path), "431767");
+    assert_eq!(air_date(&db_path), "2024-01-01");
     assert!(!target.path().join("MLIP Test").join("tvshow.nfo").exists());
     assert!(!target
         .path()

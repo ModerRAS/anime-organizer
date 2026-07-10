@@ -315,6 +315,16 @@ CREATE TABLE series
 
 CREATE INDEX idx_series_title ON series(title);
 
+CREATE TABLE series_release_date
+(
+    series_id   INTEGER PRIMARY KEY,
+    air_date    TEXT NOT NULL, -- YYYY-MM-DD when known
+
+    FOREIGN KEY(series_id)
+        REFERENCES series(id)
+        ON DELETE CASCADE
+);
+
 CREATE TABLE episode
 (
     id          INTEGER PRIMARY KEY,
@@ -456,6 +466,7 @@ CREATE TABLE capability
 -- artwork = 1
 -- genre = 1
 -- external_id = 1
+-- release_date = 1
 -- people = 0
 -- subtitle = 0
 -- media_technical = 0
