@@ -4,7 +4,9 @@ use anime_organizer::metadata::{
     AliasLookup, BangumiClient, TmdbClient,
 };
 use anime_organizer::nfo::{EpisodeNfo, NfoWriter, UniqueId};
-use anime_organizer::{AnimeFileInfo, AnimeMetadata, LibraryIndexRecord};
+use anime_organizer::{
+    parser::split_series_and_season, AnimeFileInfo, AnimeMetadata, LibraryIndexRecord,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -527,7 +529,7 @@ fn metadata_search_queries(
 
     for title in titles {
         if let Some(season) = season_hint.filter(|season| *season > 1) {
-            if title_season_hint(&title).is_some() {
+            if title_season_hint(&title).is_some() || split_series_and_season(&title).1.is_some() {
                 push_unique_title(&mut queries, title);
             } else {
                 if let Some(number) = cjk_season_number(season) {
@@ -1146,6 +1148,27 @@ mod tests {
         assert!(!queries
             .iter()
             .any(|query| query == "女性向遊戲世界對路人角色很不友好"));
+
+        let named_season = metadata_search_queries("妖怪旅館營業中 貳", None, None, Some(2));
+        assert!(named_season
+            .iter()
+            .any(|query| query == "妖怪旅館營業中 貳"));
+        assert!(named_season
+            .iter()
+            .all(|query| !query.ends_with("第二季") && !query.ends_with("Season 2")));
+
+        let numeric_season = metadata_search_queries(
+            "關於我在無意間被隔壁的天使變成廢柴這件事 2",
+            None,
+            None,
+            Some(2),
+        );
+        assert!(numeric_season
+            .iter()
+            .any(|query| query == "關於我在無意間被隔壁的天使變成廢柴這件事 2"));
+        assert!(numeric_season
+            .iter()
+            .all(|query| !query.ends_with("2 第二季") && !query.ends_with("2 Season 2")));
     }
 
     #[test]
