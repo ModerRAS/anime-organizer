@@ -732,7 +732,12 @@ impl BangumiClient {
     fn subject_to_metadata(&self, subject: &BangumiSubject) -> AnimeMetadata {
         let mut metadata = AnimeMetadata::new(subject.id, subject.name.clone());
 
-        metadata.title_cn = subject.name_cn.clone();
+        metadata.title_cn = subject
+            .name_cn
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string);
         metadata.original_title = subject.name.clone();
         metadata.summary = subject.summary.clone().unwrap_or_default();
         metadata.air_date = subject.date.clone();
@@ -840,6 +845,17 @@ mod tests {
         assert_eq!(response.data[0].display_title().as_deref(), Some("天界"));
         assert_eq!(response.data[0].cleaned_summary().as_deref(), Some("简介"));
         assert_eq!(response.data[0].duration_seconds, Some(1420));
+    }
+
+    #[test]
+    fn subject_to_metadata_ignores_blank_chinese_title() {
+        let client = BangumiClient::new(None);
+        let mut subject = sample_subject(None);
+        subject.name_cn = Some("  ".to_string());
+
+        let metadata = client.subject_to_metadata(&subject);
+
+        assert_eq!(metadata.title_cn, None);
     }
 
     #[test]

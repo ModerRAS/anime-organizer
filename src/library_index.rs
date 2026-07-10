@@ -373,7 +373,13 @@ impl LibraryIndexRecord {
 
     #[cfg(feature = "metadata")]
     pub fn apply_metadata(&mut self, meta: &crate::metadata::AnimeMetadata) {
-        self.series_title = meta.title_cn.clone().unwrap_or_else(|| meta.title.clone());
+        self.series_title = meta
+            .title_cn
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| meta.title.clone());
         self.original_title = Some(meta.original_title.clone());
         if !meta.summary.is_empty() {
             self.summary = Some(meta.summary.clone());

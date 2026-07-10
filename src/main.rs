@@ -1000,13 +1000,12 @@ async fn resolve_alias_db_path(
     }
 
     let animeatlas_path = bangumi.cache_dir().join(ANIMEATLAS_SQLITE_FILENAME);
-    if animeatlas_path.is_file() {
-        return Some(animeatlas_path);
-    }
-
     let bangumi_path = bangumi.cache_dir().join("bangumi.db");
     if metadata_source.is_some() {
-        return bangumi_path.is_file().then_some(bangumi_path);
+        return animeatlas_path
+            .is_file()
+            .then_some(animeatlas_path)
+            .or_else(|| bangumi_path.is_file().then_some(bangumi_path));
     }
 
     match download_animeatlas_alias_db(bangumi.cache_dir()).await {
@@ -1018,9 +1017,12 @@ async fn resolve_alias_db_path(
         }
         Err(error) => {
             if verbose {
-                eprintln!("AnimeAtlas 别名库下载失败，将回退到本地 bangumi.db 或在线搜索: {error}");
+                eprintln!("AnimeAtlas 别名库下载失败，将回退到本地缓存、本地 bangumi.db 或在线搜索: {error}");
             }
-            bangumi_path.is_file().then_some(bangumi_path)
+            animeatlas_path
+                .is_file()
+                .then_some(animeatlas_path)
+                .or_else(|| bangumi_path.is_file().then_some(bangumi_path))
         }
     }
 }
@@ -1045,9 +1047,6 @@ async fn download_animeatlas_alias_db(cache_dir: &Path) -> Result<PathBuf, AppEr
         .map_err(|e| AppError::MetadataFetchError(format!("创建缓存目录失败: {e}")))?;
 
     let db_path = cache_dir.join(ANIMEATLAS_SQLITE_FILENAME);
-    if db_path.is_file() {
-        return Ok(db_path);
-    }
 
     let client = reqwest::Client::builder()
         .user_agent(HTTP_USER_AGENT)
@@ -1075,6 +1074,11 @@ async fn download_animeatlas_alias_db(cache_dir: &Path) -> Result<PathBuf, AppEr
     let tmp_path = db_path.with_extension("sqlite.tmp");
     std::fs::write(&tmp_path, &bytes)
         .map_err(|e| AppError::MetadataFetchError(format!("写入 AnimeAtlas 临时文件失败: {e}")))?;
+    if db_path.is_file() {
+        std::fs::remove_file(&db_path).map_err(|e| {
+            AppError::MetadataFetchError(format!("替换旧 AnimeAtlas 别名库失败: {e}"))
+        })?;
+    }
     std::fs::rename(&tmp_path, &db_path)
         .map_err(|e| AppError::MetadataFetchError(format!("保存 AnimeAtlas 别名库失败: {e}")))?;
 
