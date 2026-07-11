@@ -94,6 +94,10 @@ fn target_path_parser_reads_flat_and_season_layouts() {
         .join("Seasonal Show")
         .join("Season 2")
         .join("03.5 [WEB-DL].mkv");
+    let raw_in_season = target
+        .join("Seasonal Show")
+        .join("Season 2")
+        .join("[ANi] Wrong Filename S3 - 04 [1080P].mp4");
     let title_season = target
         .join("終究，與你相戀。第二季")
         .join("13 [1080P][Baha].mp4");
@@ -102,6 +106,7 @@ fn target_path_parser_reads_flat_and_season_layouts() {
     fs::create_dir_all(title_season.parent().unwrap()).unwrap();
     fs::write(&flat, b"flat").unwrap();
     fs::write(&seasonal, b"seasonal").unwrap();
+    fs::write(&raw_in_season, b"raw-seasonal").unwrap();
     fs::write(&title_season, b"title-season").unwrap();
 
     let flat_record = LibraryIndexRecord::from_target_path(target, &flat)
@@ -122,6 +127,13 @@ fn target_path_parser_reads_flat_and_season_layouts() {
         seasonal_record.relative_path,
         "Seasonal Show/Season 2/03.5 [WEB-DL].mkv"
     );
+
+    let raw_in_season_record = LibraryIndexRecord::from_target_path(target, &raw_in_season)
+        .unwrap()
+        .unwrap();
+    assert_eq!(raw_in_season_record.series_title, "Seasonal Show");
+    assert_eq!(raw_in_season_record.season, 2);
+    assert_eq!(raw_in_season_record.episode, 4.0);
 
     let title_season_record = LibraryIndexRecord::from_target_path(target, &title_season)
         .unwrap()

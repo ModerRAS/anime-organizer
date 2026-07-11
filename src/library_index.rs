@@ -282,17 +282,6 @@ impl LibraryIndexRecord {
         }
 
         let relative_path = relative_path(target_root, path)?;
-        if let Some(info) = FilenameParser::parse(path) {
-            let episode = parse_episode_number(&info.episode)?;
-            return Ok(Some(Self::new(
-                info.series_name(),
-                info.season_number().unwrap_or(1) as i64,
-                episode,
-                relative_path,
-                path,
-            )));
-        }
-
         let relative = path.strip_prefix(target_root).map_err(|_| {
             AppError::LibraryIndexError(format!("媒体文件不在目标目录内: {}", path.display()))
         })?;
@@ -300,34 +289,29 @@ impl LibraryIndexRecord {
         let Some(file_name) = components.last() else {
             return Ok(None);
         };
+        let directory_identity = season_directory_identity(&components);
+
+        if let Some(info) = FilenameParser::parse(path) {
+            let episode = parse_episode_number(&info.episode)?;
+            let (series_title, season) = directory_identity
+                .unwrap_or_else(|| (info.series_name(), info.season_number().unwrap_or(1) as i64));
+            return Ok(Some(Self::new(
+                series_title,
+                season,
+                episode,
+                relative_path,
+                path,
+            )));
+        }
+
         let Some((episode, _tags)) = parse_target_filename(file_name) else {
             return Ok(None);
         };
-
-        let (series_title, season) = match components.as_slice() {
-            [series, file] if file == file_name => {
-                (series.clone(), title_season_number(series).unwrap_or(1))
-            }
-            [series, season_dir, file] if file == file_name => {
-                if let Some(season) = parse_season_dir(season_dir) {
-                    (series.clone(), season)
-                } else {
-                    (season_dir.clone(), 1)
-                }
-            }
-            components if components.len() >= 2 => {
-                let parent = components[components.len() - 2].clone();
-                if let Some(season) = parse_season_dir(&parent) {
-                    let series = components
-                        .get(components.len().saturating_sub(3))
-                        .cloned()
-                        .unwrap_or(parent);
-                    (series, season)
-                } else {
-                    (parent, 1)
-                }
-            }
-            _ => return Ok(None),
+        let Some((series_title, season)) = directory_identity.or_else(|| {
+            let parent = components.get(components.len().checked_sub(2)?)?.clone();
+            Some((parent.clone(), title_season_number(&parent).unwrap_or(1)))
+        }) else {
+            return Ok(None);
         };
 
         Ok(Some(Self::new(
@@ -787,6 +771,13 @@ fn parse_target_filename(file_name: &str) -> Option<(f64, String)> {
     let episode = episode_raw.parse::<f64>().ok()?;
     let tags = parts.next().unwrap_or_default().trim().to_string();
     Some((episode, tags))
+}
+
+fn season_directory_identity(components: &[String]) -> Option<(String, i64)> {
+    let season_dir = components.get(components.len().checked_sub(2)?)?;
+    let season = parse_season_dir(season_dir)?;
+    let series = components.get(components.len().checked_sub(3)?)?.clone();
+    Some((series, season))
 }
 
 fn parse_season_dir(value: &str) -> Option<i64> {
