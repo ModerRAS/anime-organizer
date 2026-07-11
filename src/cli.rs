@@ -84,7 +84,7 @@ pub(crate) struct OrganizeArgs {
     #[arg(long, value_name = "PATH")]
     pub(crate) alias_file: Option<PathBuf>,
 
-    /// 跳过图片下载
+    /// 跳过 Kodi/MLIP 图片下载（仍写入可用的元数据）
     #[arg(long)]
     pub(crate) no_images: bool,
 
@@ -96,11 +96,11 @@ pub(crate) struct OrganizeArgs {
     #[arg(long)]
     pub(crate) force_overwrite: bool,
 
-    /// Bangumi 缓存目录
+    /// Bangumi/AnimeAtlas 缓存目录（默认使用系统缓存目录，不写入媒体库）
     #[arg(long, value_name = "PATH")]
     pub(crate) bangumi_cache: Option<PathBuf>,
 
-    /// Bangumi 元数据源路径（subject.jsonlines 或包含该文件的目录）
+    /// 本地 Bangumi 元数据源（subject.jsonlines 或其目录；启用后保持离线）
     #[arg(long, value_name = "PATH")]
     pub(crate) metadata_source: Option<PathBuf>,
 
@@ -112,11 +112,11 @@ pub(crate) struct OrganizeArgs {
     #[arg(long)]
     pub(crate) library_index: bool,
 
-    /// 生成 MiruPlay 可直接导入的 MLIP 媒体库（含 Bangumi 元数据和 library.db）
+    /// 生成 MiruPlay MLIP 媒体库（library.db、Bangumi 元数据和缺失海报）
     #[arg(long)]
     pub(crate) mlip: bool,
 
-    /// 强制重新扫描目标目录并重建 MLIP 媒体库索引
+    /// 全量扫描目标目录并重建索引；与 --mlip 合用时补元数据和缺失图片
     #[arg(long)]
     pub(crate) rebuild_library_index: bool,
 
