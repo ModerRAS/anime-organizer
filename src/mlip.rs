@@ -622,15 +622,14 @@ fn bangumi_subject_match_score(
                 .or_else(|| {
                     query_season.filter(|season| has_trailing_season_number(title, *season))
                 });
-            let score =
-                title_match_score_with_known_seasons(query, title, query_season, candidate_season);
-            if score < 0.75
+            let lexical_score = title_match_score(query, title);
+            if lexical_score < 0.8
                 && !ascii_tokens.is_empty()
                 && !candidate_has_any_ascii_token(title, &ascii_tokens)
             {
                 return 0.0;
             }
-            score
+            title_match_score_with_known_seasons(query, title, query_season, candidate_season)
         })
         .fold(0.0, f32::max)
 }
@@ -1272,6 +1271,19 @@ mod tests {
             )]
         )
         .is_some());
+        let unrelated_season = bangumi_subject(
+            568800,
+            "MUZIK TIGER In the Forest 第2期",
+            "MUZIK TIGER In the Forest 第二季",
+        );
+        assert_eq!(
+            bangumi_subject_match_score(
+                "Maou Gakuin no Futekigousha Season 2",
+                &unrelated_season,
+                true,
+            ),
+            0.0
+        );
     }
 
     fn bangumi_episode(ep: f64, sort: f64, title: &str, duration_seconds: u32) -> BangumiEpisode {

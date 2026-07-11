@@ -791,7 +791,7 @@ async fn enrich_library_index_records(
             } else {
                 None
             };
-            let anime_root = target.join(&lookup_title);
+            let anime_root = library_series_root(target, record, &lookup_title);
             if context.download_images {
                 download_images(
                     meta,
@@ -816,6 +816,21 @@ async fn enrich_library_index_records(
         }
         apply_runtime_probe(record, target, context.probe_runtime, context.verbose);
     }
+}
+
+#[cfg(feature = "metadata")]
+fn library_series_root(
+    target: &Path,
+    record: &LibraryIndexRecord,
+    fallback_title: &str,
+) -> PathBuf {
+    let directory = record
+        .relative_path
+        .split('/')
+        .next()
+        .filter(|component| !component.is_empty())
+        .unwrap_or(fallback_title);
+    target.join(directory)
 }
 
 #[cfg(feature = "metadata")]
@@ -1095,4 +1110,25 @@ fn has_valid_extension(path: &Path, extensions: &HashSet<String>) -> bool {
         .and_then(|ext| ext.to_str())
         .map(|ext| extensions.contains(&format!(".{}", ext.to_lowercase())))
         .unwrap_or(false)
+}
+
+#[cfg(all(test, feature = "metadata"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn library_artwork_uses_physical_series_directory() {
+        let record = LibraryIndexRecord::new(
+            "Parsed Title".to_string(),
+            1,
+            1.0,
+            "Physical Folder/[ANi] Parsed Title - 01.mkv".to_string(),
+            Path::new("unused.mkv"),
+        );
+
+        assert_eq!(
+            library_series_root(Path::new("library"), &record, "Parsed Title"),
+            Path::new("library").join("Physical Folder")
+        );
+    }
 }
