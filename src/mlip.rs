@@ -9,6 +9,11 @@ use anime_organizer::{
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::{LazyLock, Mutex};
+use zhhz::{Config, Converter};
+
+static TRADITIONAL_TO_SIMPLIFIED: LazyLock<Mutex<Converter>> =
+    LazyLock::new(|| Mutex::new(Converter::new(Config::T2s)));
 
 #[cfg(feature = "metadata")]
 pub(crate) async fn fetch_anime_metadata(
@@ -848,7 +853,13 @@ fn normalized_match_text(value: &str) -> String {
 
 #[cfg(feature = "metadata")]
 fn simplify_title_text(value: &str) -> String {
-    value.chars().map(simplify_title_char).collect()
+    TRADITIONAL_TO_SIMPLIFIED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .convert(value)
+        .chars()
+        .map(simplify_title_char)
+        .collect()
 }
 
 #[cfg(feature = "metadata")]
@@ -1168,6 +1179,29 @@ mod tests {
         assert!(numeric_season
             .iter()
             .all(|query| !query.ends_with("2 第二季") && !query.ends_with("2 Season 2")));
+    }
+
+    #[test]
+    fn local_search_matches_traditional_movie_title() {
+        let query = "劇場版 關於我轉生變成史萊姆這檔事 蒼海之淚篇";
+        let subject = bangumi_subject(
+            515595,
+            "劇場版 転生したらスライムだった件 蒼海の涙編",
+            "剧场版 关于我转生变成史莱姆这档事 苍海之泪篇",
+        );
+
+        assert_eq!(
+            simplify_title_text(query),
+            "剧场版 关于我转生变成史莱姆这档事 苍海之泪篇"
+        );
+        assert_eq!(bangumi_subject_match_score(query, &subject, false), 1.0);
+        assert_eq!(
+            choose_local_bangumi_subject(query, vec![(subject, 1.0)])
+                .unwrap()
+                .0
+                .id,
+            515595
+        );
     }
 
     #[test]

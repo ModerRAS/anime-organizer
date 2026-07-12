@@ -44,6 +44,7 @@ tokio-stream = { version = "0.1", optional = true }
 url = { version = "2", optional = true }
 time = { version = "0.3", features = ["formatting"] }
 uuid = { version = "1", features = ["v5"] }
+zhhz = { version = "0.7.7", optional = true }
 
 [build-dependencies]
 tonic-build = "0.12"
@@ -57,7 +58,7 @@ default = ["metadata"]
 anifilebert = ["dep:flate2", "dep:ndarray", "dep:ort"]
 anifilebert-directml = ["anifilebert", "ort/directml"]
 anifilebert-amd-npu = ["anifilebert-directml"]
-metadata = ["dep:reqwest", "dep:tokio", "dep:zip"]
+metadata = ["dep:reqwest", "dep:tokio", "dep:zip", "dep:zhhz"]
 scraper = ["metadata", "dep:zip", "dep:tempfile"]
 torrent-scraper = ["dep:tokio", "dep:reqwest", "dep:urlencoding"]
 llm-api = []

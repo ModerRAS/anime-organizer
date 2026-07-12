@@ -61,6 +61,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "walkdir",
+ "zhhz",
  "zip",
 ]
 
@@ -1208,9 +1209,9 @@ dependencies = [
 
 [[package]]
 name = "memchr"
-version = "2.8.0"
+version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
+checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mime"
@@ -3302,6 +3303,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "zhhz"
+version = "0.7.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "498f7534da98ac5232cce2aa5f9010a33f1f51d6b41b431cfda99d9beff4ffeb"
+dependencies = [
+ "anyhow",
+ "memchr",
+ "serde_json",
 ]
 
 [[package]]
