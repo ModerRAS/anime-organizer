@@ -291,6 +291,18 @@ impl FilenameParser {
             return Some((anime_name, episode, after_episode));
         }
 
+        for marker in [" - 電影", " - 电影", " - Movie"] {
+            if let Some(marker_pos) = input.rfind(marker) {
+                let after_marker = input[marker_pos + marker.len()..].trim_start();
+                if after_marker.starts_with('[') || after_marker.starts_with('.') {
+                    let anime_name = input[..marker_pos].trim().to_string();
+                    if !anime_name.is_empty() {
+                        return Some((anime_name, "01".to_string(), after_marker));
+                    }
+                }
+            }
+        }
+
         // Try to find "[XX]" pattern (dmhy.org format with episode in brackets)
         // Look for last occurrence of "[" followed by digits and "]"
         for i in (0..bytes.len()).rev() {
