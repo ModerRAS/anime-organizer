@@ -86,6 +86,48 @@ fn rebuild_creates_mlip_v1_schema_with_real_foreign_keys() {
 }
 
 #[test]
+fn incremental_update_stages_locally_and_replaces_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path();
+    let series = target.join("Incremental Show");
+    fs::create_dir_all(&series).unwrap();
+
+    let first_path = series.join("01 [1080P].mkv");
+    fs::write(&first_path, b"one").unwrap();
+    let first = LibraryIndexRecord::from_target_path(target, &first_path)
+        .unwrap()
+        .unwrap();
+    LibraryIndex::rebuild(target, &[first]).unwrap();
+
+    let second_path = series.join("02 [1080P].mkv");
+    fs::write(&second_path, b"two").unwrap();
+    let second = LibraryIndexRecord::from_target_path(target, &second_path)
+        .unwrap()
+        .unwrap();
+    let stats = LibraryIndex::update(target, &[second]).unwrap();
+    assert_eq!(stats.media_files, 2);
+
+    let conn = Connection::open(target.join("library.db")).unwrap();
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
+    drop(conn);
+
+    let leftovers: Vec<_> = fs::read_dir(target)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".library.db")
+        })
+        .collect();
+    assert!(leftovers.is_empty());
+}
+
+#[test]
 fn target_path_parser_reads_flat_and_season_layouts() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path();

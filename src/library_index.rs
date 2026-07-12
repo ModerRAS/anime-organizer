@@ -8,6 +8,7 @@ use crate::parser::{split_series_and_season, FilenameParser};
 use rusqlite::{params, Connection};
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -17,6 +18,7 @@ use uuid::Uuid;
 pub const DATABASE_FILENAME: &str = "library.db";
 
 const MLIP_NAMESPACE: Uuid = Uuid::from_u128(0x3f1a60c1_0f29_4f54_96bd_2068841e14c1);
+static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// MLIP v1 schema. This is the protocol source of truth.
 pub const MLIP_SCHEMA_SQL: &str = r#"
@@ -405,31 +407,27 @@ impl LibraryIndex {
         records: &[LibraryIndexRecord],
     ) -> Result<LibraryIndexStats> {
         let db_path = Self::database_path(target_root);
-        let temp_path =
-            target_root.join(format!(".{}.{}.tmp", DATABASE_FILENAME, std::process::id()));
-        if temp_path.exists() {
-            std::fs::remove_file(&temp_path)
-                .map_err(|e| AppError::LibraryIndexError(format!("删除临时数据库失败: {e}")))?;
-        }
+        let paths = staging_paths(target_root);
+        let result = (|| {
+            {
+                let mut conn = Connection::open(&paths.local)
+                    .map_err(|e| AppError::LibraryIndexError(format!("打开临时数据库失败: {e}")))?;
+                conn.execute_batch(MLIP_SCHEMA_SQL).map_err(|e| {
+                    AppError::LibraryIndexError(format!("创建 MLIP schema 失败: {e}"))
+                })?;
+                write_records(&mut conn, target_root, records, true)?;
+            }
 
-        {
-            let mut conn = Connection::open(&temp_path)
-                .map_err(|e| AppError::LibraryIndexError(format!("打开临时数据库失败: {e}")))?;
-            conn.execute_batch(MLIP_SCHEMA_SQL)
-                .map_err(|e| AppError::LibraryIndexError(format!("创建 MLIP schema 失败: {e}")))?;
-            write_records(&mut conn, target_root, records, true)?;
-        }
-
-        if db_path.exists() {
-            std::fs::remove_file(&db_path)
-                .map_err(|e| AppError::LibraryIndexError(format!("替换旧媒体库索引失败: {e}")))?;
-        }
-        std::fs::rename(&temp_path, &db_path)
-            .map_err(|e| AppError::LibraryIndexError(format!("写入媒体库索引失败: {e}")))?;
-
-        let conn = Connection::open(&db_path)
-            .map_err(|e| AppError::LibraryIndexError(format!("打开媒体库索引失败: {e}")))?;
-        read_stats(&conn)
+            let stats = {
+                let conn = Connection::open(&paths.local)
+                    .map_err(|e| AppError::LibraryIndexError(format!("校验临时数据库失败: {e}")))?;
+                read_stats(&conn)?
+            };
+            install_staged_database(&paths, &db_path)?;
+            Ok(stats)
+        })();
+        let _ = std::fs::remove_file(&paths.local);
+        result
     }
 
     pub fn update(target_root: &Path, records: &[LibraryIndexRecord]) -> Result<LibraryIndexStats> {
@@ -438,14 +436,83 @@ impl LibraryIndex {
             return Self::rebuild(target_root, records);
         }
 
-        let mut conn = Connection::open(&db_path)
-            .map_err(|e| AppError::LibraryIndexError(format!("打开媒体库索引失败: {e}")))?;
-        conn.execute_batch("PRAGMA foreign_keys = ON;")
-            .map_err(|e| AppError::LibraryIndexError(format!("设置 PRAGMA 失败: {e}")))?;
-        validate_user_version(&conn)?;
-        write_records(&mut conn, target_root, records, false)?;
-        read_stats(&conn)
+        let paths = staging_paths(target_root);
+        let result = (|| {
+            std::fs::copy(&db_path, &paths.local).map_err(|e| {
+                AppError::LibraryIndexError(format!("复制媒体库索引到本地失败: {e}"))
+            })?;
+
+            let stats = {
+                let mut conn = Connection::open(&paths.local).map_err(|e| {
+                    AppError::LibraryIndexError(format!("打开本地媒体库索引失败: {e}"))
+                })?;
+                conn.execute_batch("PRAGMA foreign_keys = ON;")
+                    .map_err(|e| AppError::LibraryIndexError(format!("设置 PRAGMA 失败: {e}")))?;
+                validate_user_version(&conn)?;
+                write_records(&mut conn, target_root, records, false)?;
+                read_stats(&conn)?
+            };
+
+            install_staged_database(&paths, &db_path)?;
+            Ok(stats)
+        })();
+        let _ = std::fs::remove_file(&paths.local);
+        result
     }
+}
+
+struct StagingPaths {
+    local: PathBuf,
+    upload: PathBuf,
+    backup: PathBuf,
+}
+
+fn staging_paths(target_root: &Path) -> StagingPaths {
+    let suffix = format!(
+        "{}-{}-{}",
+        std::process::id(),
+        STAGING_COUNTER.fetch_add(1, Ordering::Relaxed),
+        std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    StagingPaths {
+        local: std::env::temp_dir().join(format!("aniorg-{DATABASE_FILENAME}-{suffix}.tmp")),
+        upload: target_root.join(format!(".{DATABASE_FILENAME}.{suffix}.tmp")),
+        backup: target_root.join(format!(".{DATABASE_FILENAME}.{suffix}.bak")),
+    }
+}
+
+fn install_staged_database(paths: &StagingPaths, db_path: &Path) -> Result<()> {
+    std::fs::copy(&paths.local, &paths.upload)
+        .map_err(|e| AppError::LibraryIndexError(format!("上传媒体库索引失败: {e}")))?;
+
+    let had_database = db_path.exists();
+    if had_database {
+        if let Err(error) = std::fs::rename(db_path, &paths.backup) {
+            let _ = std::fs::remove_file(&paths.upload);
+            return Err(AppError::LibraryIndexError(format!(
+                "备份旧媒体库索引失败: {error}"
+            )));
+        }
+    }
+
+    if let Err(error) = std::fs::rename(&paths.upload, db_path) {
+        let restore_error = had_database
+            .then(|| std::fs::rename(&paths.backup, db_path).err())
+            .flatten();
+        let _ = std::fs::remove_file(&paths.upload);
+        return Err(AppError::LibraryIndexError(match restore_error {
+            Some(restore) => format!("替换媒体库索引失败: {error}; 恢复旧索引也失败: {restore}"),
+            None => format!("替换媒体库索引失败: {error}"),
+        }));
+    }
+
+    if had_database {
+        let _ = std::fs::remove_file(&paths.backup);
+    }
+    Ok(())
 }
 
 fn validate_user_version(conn: &Connection) -> Result<()> {

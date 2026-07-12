@@ -220,7 +220,7 @@ aniorg \
         └── 01 [1080P].mkv
 ```
 
-以后继续整理新下载时，仍然使用同一个命令。只要 `library.db` 已存在，默认就是增量更新：只把本次整理成功的文件写入索引，不会重新扫描整个目标目录。
+以后继续整理新下载时，仍然使用同一个命令。只要 `library.db` 已存在，默认就是增量更新：只把本次整理成功的文件写入索引，不会重新扫描整个目标目录。为兼容 NAS、WebDAV 和 CloudDrive，程序会先把 `library.db` 复制到系统临时目录完成 SQLite 事务，再顺序上传并替换远程数据库，避免在远程文件上随机写入。
 
 ```bash
 aniorg \
@@ -803,7 +803,7 @@ aniorg \
   --library-index
 ```
 
-Later runs with the same command are incremental when `library.db` already exists: only files successfully organized in the current run are upserted.
+Later runs with the same command are incremental when `library.db` already exists: only files successfully organized in the current run are upserted. For NAS, WebDAV, and CloudDrive targets, `library.db` is copied to the system temp directory, updated locally, then uploaded and replaced sequentially instead of being randomly written in place.
 
 ```bash
 aniorg \
