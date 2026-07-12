@@ -11,7 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 use time::format_description::well_known::Rfc3339;
-use time::OffsetDateTime;
+use time::{Date, Month, OffsetDateTime};
 use uuid::Uuid;
 
 /// Fixed MLIP database filename in the target library root.
@@ -258,6 +258,36 @@ impl ExternalId {
     }
 }
 
+/// A validated Gregorian release date stored as MLIP `YYYY-MM-DD`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReleaseDate(Date);
+
+impl ReleaseDate {
+    #[must_use]
+    pub fn parse_iso(value: &str) -> Option<Self> {
+        let mut parts = value.trim().split('-');
+        let year = parts.next()?.parse().ok()?;
+        let month = Month::try_from(parts.next()?.parse::<u8>().ok()?).ok()?;
+        let day = parts.next()?.parse().ok()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        Date::from_calendar_date(year, month, day).ok().map(Self)
+    }
+}
+
+impl std::fmt::Display for ReleaseDate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{:04}-{:02}-{:02}",
+            self.0.year(),
+            u8::from(self.0.month()),
+            self.0.day()
+        )
+    }
+}
+
 /// One indexed media file plus its logical series/episode metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LibraryIndexRecord {
@@ -266,7 +296,7 @@ pub struct LibraryIndexRecord {
     pub sort_title: Option<String>,
     pub summary: Option<String>,
     pub year: Option<i64>,
-    pub air_date: Option<String>,
+    pub air_date: Option<ReleaseDate>,
     pub series_type: i64,
     pub season: i64,
     pub episode: f64,
@@ -383,7 +413,7 @@ impl LibraryIndexRecord {
             self.summary = Some(meta.summary.clone());
         }
         self.year = meta.air_date.as_deref().and_then(parse_year).map(i64::from);
-        self.air_date = meta.air_date.clone();
+        self.air_date = meta.air_date.as_deref().and_then(ReleaseDate::parse_iso);
         self.genres = meta.genre.clone();
         self.external_ids
             .push(ExternalId::new(ExternalProvider::Bangumi, meta.bangumi_id));
@@ -661,7 +691,7 @@ fn insert_record(conn: &Connection, record: &LibraryIndexRecord) -> Result<()> {
         )
         .map_err(|e| AppError::LibraryIndexError(format!("读取 series id 失败: {e}")))?;
 
-    upsert_release_date(conn, series_id, record.air_date.as_deref())?;
+    upsert_release_date(conn, series_id, record.air_date.as_ref())?;
 
     let episode_uuid = stable_uuid(
         "episode",
@@ -738,8 +768,12 @@ fn insert_record(conn: &Connection, record: &LibraryIndexRecord) -> Result<()> {
     Ok(())
 }
 
-fn upsert_release_date(conn: &Connection, series_id: i64, air_date: Option<&str>) -> Result<()> {
-    let Some(air_date) = air_date.map(str::trim).filter(|value| !value.is_empty()) else {
+fn upsert_release_date(
+    conn: &Connection,
+    series_id: i64,
+    air_date: Option<&ReleaseDate>,
+) -> Result<()> {
+    let Some(air_date) = air_date.map(ToString::to_string) else {
         return Ok(());
     };
     conn.execute(

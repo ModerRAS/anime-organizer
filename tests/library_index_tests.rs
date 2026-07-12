@@ -1,5 +1,5 @@
 use anime_organizer::library_index::{
-    ArtworkKind, ExternalId, ExternalProvider, LibraryIndex, LibraryIndexRecord,
+    ArtworkKind, ExternalId, ExternalProvider, LibraryIndex, LibraryIndexRecord, ReleaseDate,
 };
 use rusqlite::Connection;
 use std::fs;
@@ -187,6 +187,17 @@ fn target_path_parser_reads_flat_and_season_layouts() {
 }
 
 #[test]
+fn release_date_requires_a_valid_iso_calendar_date() {
+    assert_eq!(
+        ReleaseDate::parse_iso("2024-02-29").unwrap().to_string(),
+        "2024-02-29"
+    );
+    assert!(ReleaseDate::parse_iso("2024-02-30").is_none());
+    assert!(ReleaseDate::parse_iso("2024").is_none());
+    assert!(ReleaseDate::parse_iso("2024-2-03-extra").is_none());
+}
+
+#[test]
 fn incremental_update_adds_release_date_table_to_legacy_v1_database() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path();
@@ -203,7 +214,7 @@ fn incremental_update_adds_release_date_table_to_legacy_v1_database() {
     let mut record = LibraryIndexRecord::from_target_path(target, &media_path)
         .unwrap()
         .unwrap();
-    record.air_date = Some("2024-07-05".to_string());
+    record.air_date = ReleaseDate::parse_iso("2024-07-05");
     LibraryIndex::update(target, &[record]).unwrap();
 
     let conn = Connection::open(target.join("library.db")).unwrap();
@@ -232,7 +243,7 @@ fn records_store_metadata_genres_external_ids_and_artwork() {
     record.original_title = Some("Original Meta Show".to_string());
     record.summary = Some("Summary".to_string());
     record.year = Some(2026);
-    record.air_date = Some("2026-04-03".to_string());
+    record.air_date = ReleaseDate::parse_iso("2026-04-03");
     record.genres = vec![
         "Action".to_string(),
         "Action".to_string(),
