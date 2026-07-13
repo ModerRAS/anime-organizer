@@ -4,6 +4,7 @@
 //! state such as playback history or favorites belongs in the player database.
 
 use crate::error::{AppError, Result};
+use crate::organizer::FileOrganizer;
 use crate::parser::{split_series_and_season, FilenameParser};
 use rusqlite::{params, Connection};
 use std::collections::HashSet;
@@ -20,7 +21,7 @@ pub const DATABASE_FILENAME: &str = "library.db";
 const MLIP_NAMESPACE: Uuid = Uuid::from_u128(0x3f1a60c1_0f29_4f54_96bd_2068841e14c1);
 static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// MLIP v1 schema. This is the protocol source of truth.
+/// MLIP v2 schema. This is the protocol source of truth.
 pub const MLIP_SCHEMA_SQL: &str = r#"
 PRAGMA foreign_keys = ON;
 
@@ -100,6 +101,25 @@ ON media_file(path);
 
 CREATE INDEX idx_media_episode
 ON media_file(episode_id);
+
+CREATE TABLE media_subtitle
+(
+    id              INTEGER PRIMARY KEY,
+    media_file_id   INTEGER NOT NULL,
+    path            TEXT NOT NULL,
+    language        TEXT,
+    title           TEXT,
+    sort_order      INTEGER NOT NULL DEFAULT 0,
+
+    FOREIGN KEY(media_file_id)
+        REFERENCES media_file(id)
+        ON DELETE CASCADE,
+
+    UNIQUE(media_file_id, path)
+);
+
+CREATE INDEX idx_media_subtitle_file
+ON media_subtitle(media_file_id);
 
 CREATE TABLE series_artwork
 (
@@ -189,7 +209,7 @@ CREATE TABLE capability
     enabled     INTEGER NOT NULL
 );
 
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 "#;
 
 /// MLIP artwork kind integer enum.
@@ -307,6 +327,7 @@ pub struct LibraryIndexRecord {
     pub relative_path: String,
     pub size: Option<i64>,
     pub modified_time: Option<i64>,
+    pub subtitle_paths: Vec<String>,
     pub genres: Vec<String>,
     pub external_ids: Vec<ExternalId>,
     pub series_artwork: Vec<Artwork>,
@@ -338,13 +359,9 @@ impl LibraryIndexRecord {
             let episode = parse_episode_number(&info.episode)?;
             let (series_title, season) = directory_identity
                 .unwrap_or_else(|| (info.series_name(), info.season_number().unwrap_or(1) as i64));
-            return Ok(Some(Self::new(
-                series_title,
-                season,
-                episode,
-                relative_path,
-                path,
-            )));
+            return Self::new(series_title, season, episode, relative_path, path)
+                .with_external_subtitles(target_root, path)
+                .map(Some);
         }
 
         let Some((episode, _tags)) = parse_target_filename(file_name) else {
@@ -357,13 +374,9 @@ impl LibraryIndexRecord {
             return Ok(None);
         };
 
-        Ok(Some(Self::new(
-            series_title,
-            season,
-            episode,
-            relative_path,
-            path,
-        )))
+        Self::new(series_title, season, episode, relative_path, path)
+            .with_external_subtitles(target_root, path)
+            .map(Some)
     }
 
     #[must_use]
@@ -392,11 +405,20 @@ impl LibraryIndexRecord {
             relative_path,
             size,
             modified_time,
+            subtitle_paths: Vec::new(),
             genres: Vec::new(),
             external_ids: Vec::new(),
             series_artwork: Vec::new(),
             episode_artwork: Vec::new(),
         }
+    }
+
+    fn with_external_subtitles(mut self, target_root: &Path, path: &Path) -> Result<Self> {
+        self.subtitle_paths = FileOrganizer::find_external_subtitles(path)
+            .iter()
+            .map(|subtitle_path| relative_path(target_root, subtitle_path))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(self)
     }
 
     #[cfg(feature = "metadata")]
@@ -562,7 +584,7 @@ fn validate_user_version(conn: &Connection) -> Result<()> {
     let user_version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(|e| AppError::LibraryIndexError(format!("读取 schema 版本失败: {e}")))?;
-    if user_version != 1 {
+    if !matches!(user_version, 1 | 2) {
         return Err(AppError::LibraryIndexError(format!(
             "不支持的 MLIP schema 版本: {user_version}"
         )));
@@ -598,7 +620,19 @@ fn ensure_schema_extensions(conn: &Connection) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS series_release_date (\
          series_id INTEGER PRIMARY KEY, \
          air_date TEXT NOT NULL, \
-         FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE)",
+         FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE); \
+         CREATE TABLE IF NOT EXISTS media_subtitle (\
+         id INTEGER PRIMARY KEY, \
+         media_file_id INTEGER NOT NULL, \
+         path TEXT NOT NULL, \
+         language TEXT, \
+         title TEXT, \
+         sort_order INTEGER NOT NULL DEFAULT 0, \
+         FOREIGN KEY(media_file_id) REFERENCES media_file(id) ON DELETE CASCADE, \
+         UNIQUE(media_file_id, path)); \
+         CREATE INDEX IF NOT EXISTS idx_media_subtitle_file ON media_subtitle(media_file_id); \
+         PRAGMA user_version = 2; \
+         UPDATE meta SET value = '2' WHERE key = 'schema'",
     )
     .map_err(|e| AppError::LibraryIndexError(format!("创建 MLIP 扩展表失败: {e}")))?;
     Ok(())
@@ -613,10 +647,9 @@ fn upsert_meta(conn: &Connection, target_root: &Path, include_static_meta: bool)
         .unwrap_or_else(|_| target_root.to_path_buf());
     let library_uuid = stable_uuid("library", &canonical_root.to_string_lossy());
 
-    let mut entries = vec![("generated_at", generated_at)];
+    let mut entries = vec![("generated_at", generated_at), ("schema", "2".to_string())];
     if include_static_meta {
         entries.extend([
-            ("schema", "1".to_string()),
             ("protocol", "MLIP".to_string()),
             ("generator", "AnimeOrganizer".to_string()),
             ("generator_version", env!("CARGO_PKG_VERSION").to_string()),
@@ -643,7 +676,7 @@ fn upsert_capabilities(conn: &Connection) -> Result<()> {
         ("external_id", 1),
         ("release_date", 1),
         ("people", 0),
-        ("subtitle", 0),
+        ("subtitle", 1),
         ("media_technical", 0),
         ("multi_file", 1),
     ];
@@ -747,6 +780,25 @@ fn insert_record(conn: &Connection, record: &LibraryIndexRecord) -> Result<()> {
         ],
     )
     .map_err(|e| AppError::LibraryIndexError(format!("写入 media_file 失败: {e}")))?;
+    let media_file_id: i64 = conn
+        .query_row(
+            "SELECT id FROM media_file WHERE path = ?1",
+            params![record.relative_path],
+            |row| row.get(0),
+        )
+        .map_err(|e| AppError::LibraryIndexError(format!("读取 media_file id 失败: {e}")))?;
+    conn.execute(
+        "DELETE FROM media_subtitle WHERE media_file_id = ?1",
+        params![media_file_id],
+    )
+    .map_err(|e| AppError::LibraryIndexError(format!("清理 media_subtitle 失败: {e}")))?;
+    for (sort_order, path) in record.subtitle_paths.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO media_subtitle (media_file_id, path, sort_order) VALUES (?1, ?2, ?3)",
+            params![media_file_id, path, sort_order as i64],
+        )
+        .map_err(|e| AppError::LibraryIndexError(format!("写入 media_subtitle 失败: {e}")))?;
+    }
 
     insert_genres(conn, series_id, &record.genres)?;
     insert_external_ids(conn, series_id, &record.external_ids)?;

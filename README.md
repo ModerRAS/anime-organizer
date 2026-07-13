@@ -308,7 +308,7 @@ CREATE TABLE meta
 );
 
 -- meta keys:
--- schema = 1
+-- schema = 2
 -- protocol = MLIP
 -- generator = AnimeOrganizer
 -- generator_version = <cargo package version>
@@ -383,6 +383,25 @@ CREATE TABLE media_file
 
 CREATE INDEX idx_media_path ON media_file(path);
 CREATE INDEX idx_media_episode ON media_file(episode_id);
+
+-- Required in MLIP v2. Each subtitle belongs to one concrete media file.
+CREATE TABLE media_subtitle
+(
+    id              INTEGER PRIMARY KEY,
+    media_file_id   INTEGER NOT NULL,
+    path            TEXT NOT NULL,
+    language        TEXT,
+    title           TEXT,
+    sort_order      INTEGER NOT NULL DEFAULT 0,
+
+    FOREIGN KEY(media_file_id)
+        REFERENCES media_file(id)
+        ON DELETE CASCADE,
+
+    UNIQUE(media_file_id, path)
+);
+
+CREATE INDEX idx_media_subtitle_file ON media_subtitle(media_file_id);
 
 CREATE TABLE series_artwork
 (
@@ -484,20 +503,20 @@ CREATE TABLE capability
     enabled     INTEGER NOT NULL
 );
 
--- v1 capabilities:
+-- v2 capabilities:
 -- artwork = 1
 -- genre = 1
 -- external_id = 1
 -- release_date = 1
 -- people = 0
--- subtitle = 0
+-- subtitle = 1
 -- media_technical = 0
 -- multi_file = 1
 
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 ```
 
-v1 明确不包含 `tag`、`person`、`credit`、字幕、hash、codec、分辨率。以后需要时加新表，不改这些表。
+v2 新增必需表 `media_subtitle`，并将 `subtitle` capability 设为 `1`。每条字幕关联到具体 `media_file`；整理器会同步处理与视频同目录、同 stem 或带语言后缀的 `.srt`、`.ass`、`.ssa`、`.vtt` 文件。`.sub` 因需要配对 `.idx`，暂不支持。对既有 v1 数据库执行增量更新时会自动升级为 v2。
 
 ### 🎨 文件命名格式
 
@@ -842,6 +861,8 @@ aniorg \
 ```
 
 The source directory must exist. An empty source performs no move, copy, or hard-link operations; it only scans the target. `--dry-run --library-index` does not create or modify `library.db`; it only reports whether the command would initialize, incrementally update, or rebuild the index. `media_file.path` values are stored relative to the directory containing `library.db` and always use `/` separators.
+
+Matching `.srt`, `.ass`, `.ssa`, and `.vtt` sidecars are organized with their video and exported through the required MLIP v2 `media_subtitle` table. A sidecar must share the video stem or append a language-style suffix; `.sub` is excluded because VobSub requires a paired `.idx`. Incremental writes migrate existing v1 databases to v2.
 
 ### 🔗 Hard Link Notes
 

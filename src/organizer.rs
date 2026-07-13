@@ -135,6 +135,7 @@ impl FileOrganizer {
         let target_filename = anime_file.target_filename();
         let target_path = target_dir.join(&target_filename);
         let source_path = Path::new(&anime_file.original_path);
+        let subtitle_paths = Self::find_external_subtitles(source_path);
 
         if dry_run {
             println!(
@@ -142,31 +143,107 @@ impl FileOrganizer {
                 anime_file.original_path,
                 target_path.display()
             );
+            for subtitle_path in subtitle_paths {
+                println!(
+                    "[DRY-RUN] {} -> {}",
+                    subtitle_path.display(),
+                    Self::subtitle_target_path(source_path, &subtitle_path, &target_path).display(),
+                );
+            }
             return Ok(target_path);
         }
 
         fs::create_dir_all(target_dir)?;
-
-        if target_path.exists() {
-            fs::remove_file(&target_path)?;
+        Self::organize_path(source_path, &target_path, mode)?;
+        for subtitle_path in subtitle_paths {
+            let subtitle_target =
+                Self::subtitle_target_path(source_path, &subtitle_path, &target_path);
+            Self::organize_path(&subtitle_path, &subtitle_target, mode)?;
         }
 
+        Ok(target_path)
+    }
+
+    /// 查找与视频同目录、同名或带语言后缀的外部字幕。
+    pub fn find_external_subtitles(video_path: &Path) -> Vec<PathBuf> {
+        let Some(directory) = video_path.parent() else {
+            return Vec::new();
+        };
+        let Some(video_stem) = video_path.file_stem().and_then(|value| value.to_str()) else {
+            return Vec::new();
+        };
+        let video_stem_lower = video_stem.to_lowercase();
+        let mut paths = fs::read_dir(directory)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok().map(|item| item.path()))
+            .filter(|path| path != video_path)
+            .filter(|path| {
+                matches!(
+                    path.extension()
+                        .and_then(|value| value.to_str())
+                        .map(|value| value.to_ascii_lowercase())
+                        .as_deref(),
+                    Some("srt" | "ass" | "ssa" | "vtt")
+                )
+            })
+            .filter(|path| {
+                let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+                    return false;
+                };
+                let stem_lower = stem.to_lowercase();
+                let Some(suffix) = stem_lower.strip_prefix(&video_stem_lower) else {
+                    return false;
+                };
+                suffix.is_empty() || suffix.starts_with(['.', ' ', '_', '-', '['])
+            })
+            .collect::<Vec<_>>();
+        paths.sort_by_key(|path| path.to_string_lossy().to_lowercase());
+        paths
+    }
+
+    fn subtitle_target_path(
+        source_video: &Path,
+        source_subtitle: &Path,
+        target_video: &Path,
+    ) -> PathBuf {
+        let source_stem = source_video
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        let subtitle_stem = source_subtitle
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        let suffix = subtitle_stem.get(source_stem.len()..).unwrap_or_default();
+        let target_stem = target_video
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        let extension = source_subtitle
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        target_video.with_file_name(format!("{target_stem}{suffix}.{extension}"))
+    }
+
+    fn organize_path(source_path: &Path, target_path: &Path, mode: OperationMode) -> Result<()> {
+        if target_path.exists() {
+            fs::remove_file(target_path)?;
+        }
         match mode {
             OperationMode::Move => {
-                if fs::rename(source_path, &target_path).is_err() {
-                    fs::copy(source_path, &target_path)?;
+                if fs::rename(source_path, target_path).is_err() {
+                    fs::copy(source_path, target_path)?;
                     fs::remove_file(source_path)?;
                 }
             }
             OperationMode::Copy => {
-                fs::copy(source_path, &target_path)?;
+                fs::copy(source_path, target_path)?;
             }
-            OperationMode::Link => {
-                Self::create_hard_link(source_path, &target_path)?;
-            }
+            OperationMode::Link => Self::create_hard_link(source_path, target_path)?,
         }
-
-        Ok(target_path)
+        Ok(())
     }
 
     /// 创建硬链接
@@ -274,6 +351,34 @@ mod tests {
         assert!(source_file.exists());
         assert_eq!(fs::read_to_string(&expected_path).unwrap(), "test content");
         assert_eq!(fs::read_to_string(&source_file).unwrap(), "test content");
+    }
+
+    #[test]
+    fn test_organize_copy_mode_includes_matching_external_subtitles() {
+        let source_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let source_file = create_test_file(source_dir.path(), "test.mp4", "video");
+        create_test_file(source_dir.path(), "test.zh-CN.ass", "subtitle");
+        create_test_file(source_dir.path(), "test10.srt", "other episode");
+        create_test_file(source_dir.path(), "test.sub", "unsupported vobsub");
+        let anime_info = create_test_anime_info(&source_file);
+
+        FileOrganizer::organize(
+            &anime_info,
+            target_dir.path(),
+            OperationMode::Copy,
+            false,
+            false,
+        )
+        .unwrap();
+
+        let anime_dir = target_dir.path().join("测试");
+        assert_eq!(
+            fs::read_to_string(anime_dir.join("01 [1080P].zh-CN.ass")).unwrap(),
+            "subtitle",
+        );
+        assert!(!anime_dir.join("01 [1080P]10.srt").exists());
+        assert!(!anime_dir.join("01 [1080P].sub").exists());
     }
 
     #[test]

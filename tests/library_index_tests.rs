@@ -19,7 +19,7 @@ fn table_names(conn: &Connection) -> Vec<String> {
 }
 
 #[test]
-fn rebuild_creates_mlip_v1_schema_with_real_foreign_keys() {
+fn rebuild_creates_mlip_v2_schema_with_real_foreign_keys() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path();
     fs::create_dir_all(target.join("Test Show")).unwrap();
@@ -41,7 +41,13 @@ fn rebuild_creates_mlip_v1_schema_with_real_foreign_keys() {
     let user_version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 1);
+    assert_eq!(user_version, 2);
+    let schema: String = conn
+        .query_row("SELECT value FROM meta WHERE key = 'schema'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(schema, "2");
 
     assert_eq!(
         table_names(&conn),
@@ -52,6 +58,7 @@ fn rebuild_creates_mlip_v1_schema_with_real_foreign_keys() {
             "episode_external_id",
             "genre",
             "media_file",
+            "media_subtitle",
             "meta",
             "series",
             "series_artwork",
@@ -84,6 +91,41 @@ fn rebuild_creates_mlip_v1_schema_with_real_foreign_keys() {
         [],
     );
     assert!(invalid_media.is_err());
+}
+
+#[test]
+fn rebuild_exports_external_subtitle_relations() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path();
+    let series = target.join("Subtitle Show");
+    fs::create_dir_all(&series).unwrap();
+    let video = series.join("01 [1080P].mkv");
+    fs::write(&video, b"video").unwrap();
+    fs::write(series.join("01 [1080P].zh-CN.ass"), b"subtitle").unwrap();
+    fs::write(series.join("010 [1080P].srt"), b"other").unwrap();
+
+    let record = LibraryIndexRecord::from_target_path(target, &video)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        record.subtitle_paths,
+        vec!["Subtitle Show/01 [1080P].zh-CN.ass"]
+    );
+    LibraryIndex::rebuild(target, &[record]).unwrap();
+
+    let conn = Connection::open(target.join("library.db")).unwrap();
+    let subtitle_path: String = conn
+        .query_row("SELECT path FROM media_subtitle", [], |row| row.get(0))
+        .unwrap();
+    let subtitle_capability: i64 = conn
+        .query_row(
+            "SELECT enabled FROM capability WHERE name = 'subtitle'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(subtitle_path, "Subtitle Show/01 [1080P].zh-CN.ass");
+    assert_eq!(subtitle_capability, 1);
 }
 
 #[test]
@@ -198,7 +240,7 @@ fn release_date_requires_a_valid_iso_calendar_date() {
 }
 
 #[test]
-fn incremental_update_adds_release_date_table_to_legacy_v1_database() {
+fn incremental_update_adds_optional_tables_to_legacy_v1_database() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path();
     let media_path = target.join("Legacy Show").join("01.mkv");
@@ -206,10 +248,17 @@ fn incremental_update_adds_release_date_table_to_legacy_v1_database() {
     fs::write(&media_path, b"video").unwrap();
 
     LibraryIndex::rebuild(target, &[]).unwrap();
-    Connection::open(target.join("library.db"))
-        .unwrap()
-        .execute("DROP TABLE series_release_date", [])
+    let legacy = Connection::open(target.join("library.db")).unwrap();
+    legacy
+        .execute_batch(
+            "DROP TABLE series_release_date; \
+         DROP TABLE media_subtitle; \
+         PRAGMA user_version = 1; \
+         UPDATE meta SET value = '1' WHERE key = 'schema';",
+        )
         .unwrap();
+    drop(legacy);
+    fs::write(target.join("Legacy Show").join("01.zh-CN.ass"), b"subtitle").unwrap();
 
     let mut record = LibraryIndexRecord::from_target_path(target, &media_path)
         .unwrap()
@@ -224,6 +273,20 @@ fn incremental_update_adds_release_date_table_to_legacy_v1_database() {
         })
         .unwrap();
     assert_eq!(air_date, "2024-07-05");
+    let subtitle_path: String = conn
+        .query_row("SELECT path FROM media_subtitle", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(subtitle_path, "Legacy Show/01.zh-CN.ass");
+    let user_version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    let schema: String = conn
+        .query_row("SELECT value FROM meta WHERE key = 'schema'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(user_version, 2);
+    assert_eq!(schema, "2");
 }
 
 #[test]
