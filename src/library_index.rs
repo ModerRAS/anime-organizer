@@ -353,6 +353,12 @@ impl LibraryIndexRecord {
         let Some(file_name) = components.last() else {
             return Ok(None);
         };
+        if components[..components.len() - 1]
+            .iter()
+            .any(|component| is_supplemental_directory(component))
+        {
+            return Ok(None);
+        }
         let directory_identity = season_directory_identity(&components);
 
         if let Some(info) = FilenameParser::parse(path) {
@@ -956,6 +962,13 @@ fn normal_components(path: &Path) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+fn is_supplemental_directory(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "menu" | "ncop&nced" | "图集" | "圖集" | "特典映像"
+    )
 }
 
 fn parse_target_filename(file_name: &str) -> Option<(f64, String)> {

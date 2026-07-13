@@ -229,6 +229,35 @@ fn target_path_parser_reads_flat_and_season_layouts() {
 }
 
 #[test]
+fn target_scan_skips_known_supplemental_video_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path();
+    let collection = target.join("Boruto Collection");
+    let main = collection.join(
+        "[DBD-Raws][Boruto Naruto Next Generations][001][1080P][BDRip][HEVC-10bit][FLAC].mkv",
+    );
+    fs::create_dir_all(&collection).unwrap();
+    fs::write(&main, b"main").unwrap();
+    assert!(LibraryIndexRecord::from_target_path(target, &main)
+        .unwrap()
+        .is_some());
+
+    for directory in ["menu", "NCOP&NCED", "图集", "特典映像"] {
+        let extra = collection
+            .join(directory)
+            .join("[DBD-Raws][Boruto Naruto Next Generations][Images][01][1080P].mkv");
+        fs::create_dir_all(extra.parent().unwrap()).unwrap();
+        fs::write(&extra, b"extra").unwrap();
+        assert!(
+            LibraryIndexRecord::from_target_path(target, &extra)
+                .unwrap()
+                .is_none(),
+            "{directory} should be skipped"
+        );
+    }
+}
+
+#[test]
 fn release_date_requires_a_valid_iso_calendar_date() {
     assert_eq!(
         ReleaseDate::parse_iso("2024-02-29").unwrap().to_string(),

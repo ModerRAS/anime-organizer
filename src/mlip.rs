@@ -627,14 +627,20 @@ fn bangumi_subject_match_score(
                 .or_else(|| {
                     query_season.filter(|season| has_trailing_season_number(title, *season))
                 });
-            let lexical_score = title_match_score(query, title);
-            if lexical_score < 0.8
-                && !ascii_tokens.is_empty()
-                && !candidate_has_any_ascii_token(title, &ascii_tokens)
+            if query_season.is_none() && candidate_season.is_some()
+                || query_season.is_some()
+                    && candidate_season.is_some()
+                    && query_season != candidate_season
             {
                 return 0.0;
             }
-            title_match_score_with_known_seasons(query, title, query_season, candidate_season)
+            let ascii_score = distinctive_ascii_match_score(title, &ascii_tokens);
+            if ascii_score == Some(0.0) {
+                return 0.0;
+            }
+            let score =
+                title_match_score_with_known_seasons(query, title, query_season, candidate_season);
+            ascii_score.map_or(score, |ascii| score.max(ascii))
         })
         .fold(0.0, f32::max)
 }
@@ -662,11 +668,21 @@ fn distinctive_ascii_tokens(value: &str) -> Vec<String> {
 }
 
 #[cfg(feature = "metadata")]
-fn candidate_has_any_ascii_token(candidate: &str, tokens: &[String]) -> bool {
-    let candidate = distinctive_ascii_tokens(candidate);
-    tokens
-        .iter()
-        .any(|token| candidate.iter().any(|item| item == token))
+fn distinctive_ascii_match_score(candidate: &str, query_tokens: &[String]) -> Option<f32> {
+    let candidate_tokens = distinctive_ascii_tokens(candidate);
+    if query_tokens.is_empty() || candidate_tokens.is_empty() {
+        return None;
+    }
+
+    let query: HashSet<&str> = query_tokens.iter().map(String::as_str).collect();
+    let candidate: HashSet<&str> = candidate_tokens.iter().map(String::as_str).collect();
+    let overlap = query.intersection(&candidate).count() as f32;
+    if overlap == 0.0 {
+        return Some(0.0);
+    }
+    let query_coverage = overlap / query.len() as f32;
+    let candidate_coverage = overlap / candidate.len() as f32;
+    Some(2.0 * query_coverage * candidate_coverage / (query_coverage + candidate_coverage))
 }
 
 #[cfg(feature = "metadata")]
@@ -710,6 +726,10 @@ fn title_match_score_with_known_seasons(
         return 0.0;
     }
 
+    if query_season.is_none() && candidate_season.is_some() {
+        return 0.0;
+    }
+
     if query_season.is_some() && candidate_season.is_none() {
         let query_text = normalized_match_text(query);
         let candidate_text = normalized_match_text(candidate);
@@ -743,7 +763,7 @@ fn title_season_hint(value: &str) -> Option<u32> {
         }
         let Some(end) = chars[index + 1..]
             .iter()
-            .position(|item| *item == '季' || *item == '期')
+            .position(|item| *item == '季' || *item == '期' || *item == '部')
         else {
             continue;
         };
@@ -777,7 +797,7 @@ fn title_season_hint(value: &str) -> Option<u32> {
 fn parse_season_hint_number(value: &str) -> Option<u32> {
     value.parse::<u32>().ok().or(match value {
         "一" => Some(1),
-        "二" => Some(2),
+        "二" | "ニ" => Some(2),
         "三" => Some(3),
         "四" => Some(4),
         "五" => Some(5),
@@ -1179,6 +1199,36 @@ mod tests {
         assert!(numeric_season
             .iter()
             .all(|query| !query.ends_with("2 第二季") && !query.ends_with("2 Season 2")));
+    }
+
+    #[test]
+    fn local_search_prefers_exact_ascii_tokens_for_boruto() {
+        let query = "[Boruto Naruto Next Generations]";
+        let correct = bangumi_subject(
+            202661,
+            "BORUTO-ボルト- NARUTO NEXT GENERATIONS",
+            "博人传-火影次世代-",
+        );
+        let unrelated = bangumi_subject(999999, "Dragon Age: Absolution", "龙腾世纪：赦免");
+        let sequel = bangumi_subject(
+            423621,
+            "BORUTO-ボルト- NARUTO NEXT GENERATIONS 第ニ部",
+            "博人传-火影次世代- 第二部",
+        );
+
+        assert_eq!(bangumi_subject_match_score(query, &unrelated, false), 0.0);
+        assert_eq!(bangumi_subject_match_score(query, &sequel, false), 0.0);
+        assert_eq!(bangumi_subject_match_score(query, &correct, false), 1.0);
+        assert_eq!(
+            choose_local_bangumi_subject(
+                query,
+                vec![(unrelated, 0.85), (sequel, 1.0), (correct, 0.75)],
+            )
+            .unwrap()
+            .0
+            .id,
+            202661
+        );
     }
 
     #[test]
