@@ -1,5 +1,6 @@
 use anime_organizer::library_index::{
-    ArtworkKind, ExternalId, ExternalProvider, LibraryIndex, LibraryIndexRecord, ReleaseDate,
+    ArtworkKind, ExternalId, ExternalProvider, ExtraKind, LibraryExtraRecord, LibraryIndex,
+    LibraryIndexRecord, ReleaseDate,
 };
 use rusqlite::Connection;
 use std::fs;
@@ -19,7 +20,7 @@ fn table_names(conn: &Connection) -> Vec<String> {
 }
 
 #[test]
-fn rebuild_creates_mlip_v2_schema_with_real_foreign_keys() {
+fn rebuild_creates_mlip_v3_schema_with_real_foreign_keys() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path();
     fs::create_dir_all(target.join("Test Show")).unwrap();
@@ -41,13 +42,13 @@ fn rebuild_creates_mlip_v2_schema_with_real_foreign_keys() {
     let user_version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 2);
+    assert_eq!(user_version, 3);
     let schema: String = conn
         .query_row("SELECT value FROM meta WHERE key = 'schema'", [], |row| {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(schema, "2");
+    assert_eq!(schema, "3");
 
     assert_eq!(
         table_names(&conn),
@@ -57,6 +58,7 @@ fn rebuild_creates_mlip_v2_schema_with_real_foreign_keys() {
             "episode_artwork",
             "episode_external_id",
             "genre",
+            "media_extra",
             "media_file",
             "media_subtitle",
             "meta",
@@ -255,6 +257,148 @@ fn target_scan_skips_known_supplemental_video_directories() {
             "{directory} should be skipped"
         );
     }
+    let root_menu =
+        collection.join("[DBD-Raws][Boruto Naruto Next Generations][menu][S5][D2][01].mkv");
+    fs::write(&root_menu, b"menu").unwrap();
+    assert!(LibraryIndexRecord::from_target_path(target, &root_menu)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn rebuild_classifies_local_extras_and_ignores_disc_menus() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path();
+    let collection = target.join("Boruto Collection");
+    let main_path =
+        collection.join("[DBD-Raws][Boruto Naruto Next Generations][001][1080P][BDRip].mkv");
+    fs::create_dir_all(&collection).unwrap();
+    fs::write(&main_path, b"main").unwrap();
+    let main = LibraryIndexRecord::from_target_path(target, &main_path)
+        .unwrap()
+        .unwrap();
+
+    let paths = [
+        (
+            "[DBD-Raws][Boruto Naruto Next Generations][OVA][1080P].mkv",
+            ExtraKind::Ova,
+            "OVA",
+        ),
+        (
+            "[DBD-Raws][Boruto Naruto Next Generations][OVA][02][1080P].mkv",
+            ExtraKind::Ova,
+            "OVA 02",
+        ),
+        (
+            "NCOP&NCED/[DBD-Raws][Boruto Naruto Next Generations][NCOP01][1080P].mkv",
+            ExtraKind::Ncop,
+            "NCOP 01",
+        ),
+        (
+            "NCOP&NCED/[DBD-Raws][Boruto Naruto Next Generations][NCED10][1080P].mkv",
+            ExtraKind::Nced,
+            "NCED 10",
+        ),
+        (
+            "特典映像/[DBD-Raws][Boruto Naruto Next Generations][Tokuten][08][1080P].mkv",
+            ExtraKind::Special,
+            "特典映像 08",
+        ),
+        (
+            "图集/[DBD-Raws][Boruto Naruto Next Generations][Images][39][1080P].mkv",
+            ExtraKind::Gallery,
+            "图集 39",
+        ),
+    ];
+    let mut extras = Vec::new();
+    for (relative, kind, title) in paths {
+        let path = collection.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"extra").unwrap();
+        let extra = LibraryExtraRecord::from_target_path(target, &path, main.series_title.clone())
+            .unwrap()
+            .unwrap();
+        assert_eq!(extra.kind, kind);
+        assert_eq!(extra.title, title);
+        extras.push(extra);
+    }
+    let menu = collection
+        .join("menu")
+        .join("[DBD-Raws][Boruto Naruto Next Generations][menu][S5][D2][01].mkv");
+    fs::create_dir_all(menu.parent().unwrap()).unwrap();
+    fs::write(&menu, b"menu").unwrap();
+    assert!(
+        LibraryExtraRecord::from_target_path(target, &menu, main.series_title.clone())
+            .unwrap()
+            .is_none()
+    );
+
+    let stats = LibraryIndex::rebuild_with_extras(target, &[main], &extras).unwrap();
+    assert_eq!(stats.extras, 6);
+    let conn = Connection::open(target.join("library.db")).unwrap();
+    let rows = conn
+        .prepare("SELECT extra_kind, ordinal, title FROM media_extra ORDER BY extra_kind, ordinal")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(rows.len(), 6);
+    assert_eq!(rows[0], (1, 1, "OVA".to_string()));
+    assert_eq!(rows[1], (1, 2, "OVA 02".to_string()));
+}
+
+#[test]
+fn incremental_update_keeps_series_identity_after_metadata_title_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path();
+    let collection = target.join("原始合集");
+    fs::create_dir_all(&collection).unwrap();
+    let first_path = collection.join("01.mkv");
+    let extra_path = collection.join("[Group][Show][OVA].mkv");
+    fs::write(&first_path, b"one").unwrap();
+    fs::write(&extra_path, b"extra").unwrap();
+    let first = LibraryIndexRecord::from_target_path(target, &first_path)
+        .unwrap()
+        .unwrap();
+    let extra =
+        LibraryExtraRecord::from_target_path(target, &extra_path, first.series_title.clone())
+            .unwrap()
+            .unwrap();
+    LibraryIndex::rebuild_with_extras(target, &[first], &[extra]).unwrap();
+
+    let second_path = collection.join("02.mkv");
+    fs::write(&second_path, b"two").unwrap();
+    let mut second = LibraryIndexRecord::from_target_path(target, &second_path)
+        .unwrap()
+        .unwrap();
+    second.series_title = "规范标题".to_string();
+    second.external_ids = vec![ExternalId::new(ExternalProvider::Bangumi, 123)];
+    LibraryIndex::update(target, &[second]).unwrap();
+
+    let conn = Connection::open(target.join("library.db")).unwrap();
+    let series_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM series", [], |row| row.get(0))
+        .unwrap();
+    let title: String = conn
+        .query_row("SELECT title FROM series", [], |row| row.get(0))
+        .unwrap();
+    let extra_owner: String = conn
+        .query_row(
+            "SELECT series.title FROM media_extra INNER JOIN series ON series.id = media_extra.series_id",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(series_count, 1);
+    assert_eq!(title, "规范标题");
+    assert_eq!(extra_owner, "规范标题");
 }
 
 #[test]
@@ -282,6 +426,7 @@ fn incremental_update_adds_optional_tables_to_legacy_v1_database() {
         .execute_batch(
             "DROP TABLE series_release_date; \
          DROP TABLE media_subtitle; \
+         DROP TABLE media_extra; \
          PRAGMA user_version = 1; \
          UPDATE meta SET value = '1' WHERE key = 'schema';",
         )
@@ -314,8 +459,8 @@ fn incremental_update_adds_optional_tables_to_legacy_v1_database() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(user_version, 2);
-    assert_eq!(schema, "2");
+    assert_eq!(user_version, 3);
+    assert_eq!(schema, "3");
 }
 
 #[test]

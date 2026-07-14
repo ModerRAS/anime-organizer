@@ -22,8 +22,8 @@ use crate::mlip::{
 #[cfg(feature = "metadata")]
 use anime_organizer::library_index::{Artwork, ArtworkKind};
 use anime_organizer::{
-    error::AppError, AnimeFileInfo, FileOrganizer, FilenameParser, LibraryIndex,
-    LibraryIndexRecord, OperationMode,
+    error::AppError, AnimeFileInfo, FileOrganizer, FilenameParser, LibraryExtraRecord,
+    LibraryIndex, LibraryIndexRecord, OperationMode,
 };
 #[cfg(feature = "metadata")]
 use anime_organizer::{
@@ -528,7 +528,9 @@ fn finish_library_index(
             mode,
             LibraryIndexWriteMode::Initialize | LibraryIndexWriteMode::Rebuild
         ) {
-            collect_target_library_records(target, extensions, args.verbose)?.len()
+            let records = collect_target_library_records(target, extensions, args.verbose)?;
+            let extras = collect_target_library_extras(target, extensions, &records)?;
+            records.len() + extras.len()
         } else {
             current_records.len()
         };
@@ -546,17 +548,19 @@ fn finish_library_index(
             let mut records = collect_target_library_records(target, extensions, args.verbose)?;
             let probe_runtime = runtime_probe_enabled(args);
             apply_runtime_probe_to_records(&mut records, target, probe_runtime, args.verbose);
-            LibraryIndex::rebuild(target, &records)?
+            let extras = collect_target_library_extras(target, extensions, &records)?;
+            LibraryIndex::rebuild_with_extras(target, &records, &extras)?
         }
         LibraryIndexWriteMode::Incremental => LibraryIndex::update(target, current_records)?,
     };
 
     println!(
-        "媒体库索引{}完成：{} 部作品，{} 集，{} 个文件 ({})",
+        "媒体库索引{}完成：{} 部作品，{} 集，{} 个文件，{} 个特典 ({})",
         mode.label(),
         stats.series,
         stats.episodes,
         stats.media_files,
+        stats.extras,
         LibraryIndex::database_path(target).display()
     );
     Ok(())
@@ -597,6 +601,55 @@ fn collect_target_library_records(
     }
 
     Ok(records)
+}
+
+fn collect_target_library_extras(
+    target: &Path,
+    extensions: &HashSet<String>,
+    records: &[LibraryIndexRecord],
+) -> Result<Vec<LibraryExtraRecord>, AppError> {
+    let mut titles_by_root: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for record in records {
+        let Some(root) = record.relative_path.split('/').next() else {
+            continue;
+        };
+        titles_by_root
+            .entry(root)
+            .or_default()
+            .insert(&record.series_title);
+    }
+    let owners: HashMap<&str, &str> = titles_by_root
+        .into_iter()
+        .filter_map(|(root, titles)| {
+            (titles.len() == 1).then(|| (root, *titles.iter().next().expect("one title")))
+        })
+        .collect();
+    let mut extras = Vec::new();
+    for entry in WalkDir::new(target)
+        .into_iter()
+        .filter_map(|item| item.ok())
+        .filter(|item| item.file_type().is_file())
+    {
+        let path = entry.path();
+        if !has_valid_extension(path, extensions) {
+            continue;
+        }
+        let Some(root) = path
+            .strip_prefix(target)
+            .ok()
+            .and_then(|relative| relative.components().next())
+            .and_then(|component| component.as_os_str().to_str())
+        else {
+            continue;
+        };
+        let Some(series_title) = owners.get(root) else {
+            continue;
+        };
+        if let Some(extra) = LibraryExtraRecord::from_target_path(target, path, *series_title)? {
+            extras.push(extra);
+        }
+    }
+    Ok(extras)
 }
 
 fn runtime_probe_enabled(args: &OrganizeArgs) -> bool {
@@ -716,7 +769,9 @@ async fn finish_library_index_with_metadata(
             mode,
             LibraryIndexWriteMode::Initialize | LibraryIndexWriteMode::Rebuild
         ) {
-            collect_target_library_records(target, extensions, args.verbose)?.len()
+            let records = collect_target_library_records(target, extensions, args.verbose)?;
+            let extras = collect_target_library_extras(target, extensions, &records)?;
+            records.len() + extras.len()
         } else {
             current_records.len()
         };
@@ -733,17 +788,19 @@ async fn finish_library_index_with_metadata(
         LibraryIndexWriteMode::Initialize | LibraryIndexWriteMode::Rebuild => {
             let mut records = collect_target_library_records(target, extensions, args.verbose)?;
             enrich_library_index_records(&mut records, target, &mut context).await;
-            LibraryIndex::rebuild(target, &records)?
+            let extras = collect_target_library_extras(target, extensions, &records)?;
+            LibraryIndex::rebuild_with_extras(target, &records, &extras)?
         }
         LibraryIndexWriteMode::Incremental => LibraryIndex::update(target, current_records)?,
     };
 
     println!(
-        "媒体库索引{}完成：{} 部作品，{} 集，{} 个文件 ({})",
+        "媒体库索引{}完成：{} 部作品，{} 集，{} 个文件，{} 个特典 ({})",
         mode.label(),
         stats.series,
         stats.episodes,
         stats.media_files,
+        stats.extras,
         LibraryIndex::database_path(target).display()
     );
     Ok(())

@@ -308,7 +308,7 @@ CREATE TABLE meta
 );
 
 -- meta keys:
--- schema = 2
+-- schema = 3
 -- protocol = MLIP
 -- generator = AnimeOrganizer
 -- generator_version = <cargo package version>
@@ -402,6 +402,28 @@ CREATE TABLE media_subtitle
 );
 
 CREATE INDEX idx_media_subtitle_file ON media_subtitle(media_file_id);
+
+-- Required in MLIP v3. Extras belong directly to a series, never to a fake episode.
+CREATE TABLE media_extra
+(
+    id              INTEGER PRIMARY KEY,
+    uuid            TEXT UNIQUE NOT NULL,
+    series_id       INTEGER NOT NULL,
+    extra_kind      INTEGER NOT NULL, -- 1 OVA, 2 special, 3 NCOP, 4 NCED, 5 gallery
+    ordinal         INTEGER NOT NULL,
+    sort_order      INTEGER NOT NULL,
+    title           TEXT NOT NULL,
+    path            TEXT NOT NULL UNIQUE,
+    size            INTEGER,
+    modified_time   INTEGER,
+    runtime         INTEGER, -- seconds
+
+    FOREIGN KEY(series_id)
+        REFERENCES series(id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX idx_media_extra_series ON media_extra(series_id, extra_kind, sort_order);
 
 CREATE TABLE series_artwork
 (
@@ -503,20 +525,23 @@ CREATE TABLE capability
     enabled     INTEGER NOT NULL
 );
 
--- v2 capabilities:
+-- v3 capabilities:
 -- artwork = 1
 -- genre = 1
 -- external_id = 1
 -- release_date = 1
 -- people = 0
 -- subtitle = 1
+-- extra = 1
 -- media_technical = 0
 -- multi_file = 1
 
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
 ```
 
-v2 新增必需表 `media_subtitle`，并将 `subtitle` capability 设为 `1`。每条字幕关联到具体 `media_file`；整理器会同步处理与视频同目录、同 stem 或带语言后缀的 `.srt`、`.ass`、`.ssa`、`.vtt` 文件。`.sub` 因需要配对 `.idx`，暂不支持。对既有 v1 数据库执行增量更新时会自动升级为 v2。
+v2 新增必需表 `media_subtitle`，并将 `subtitle` capability 设为 `1`。每条字幕关联到具体 `media_file`；整理器会同步处理与视频同目录、同 stem 或带语言后缀的 `.srt`、`.ass`、`.ssa`、`.vtt` 文件。`.sub` 因需要配对 `.idx`，暂不支持。
+
+v3 新增必需表 `media_extra` 和 `extra` capability。完整目标扫描会把 OVA、`NCOP`、`NCED`、`Tokuten` 和 `Images` 文件作为所属作品的本地特典编目；BD `menu` 文件仍会忽略。特典不创建伪造的 episode，也不参与正片集数。对既有 v1/v2 数据库执行写入时会自动升级为 v3。
 
 ### 🎨 文件命名格式
 
@@ -862,7 +887,9 @@ aniorg \
 
 The source directory must exist. An empty source performs no move, copy, or hard-link operations; it only scans the target. `--dry-run --library-index` does not create or modify `library.db`; it only reports whether the command would initialize, incrementally update, or rebuild the index. `media_file.path` values are stored relative to the directory containing `library.db` and always use `/` separators.
 
-Matching `.srt`, `.ass`, `.ssa`, and `.vtt` sidecars are organized with their video and exported through the required MLIP v2 `media_subtitle` table. A sidecar must share the video stem or append a language-style suffix; `.sub` is excluded because VobSub requires a paired `.idx`. Incremental writes migrate existing v1 databases to v2.
+Matching `.srt`, `.ass`, `.ssa`, and `.vtt` sidecars are organized with their video and exported through the required MLIP v2 `media_subtitle` table. A sidecar must share the video stem or append a language-style suffix; `.sub` is excluded because VobSub requires a paired `.idx`.
+
+MLIP v3 adds the required `media_extra` table. Full target scans classify OVA, NCOP, NCED, Tokuten, and Images videos as series-owned extras while ignoring Blu-ray menu videos. Extras never create fake episode rows or change the normal episode count. Existing v1/v2 databases migrate to v3 on the next write.
 
 ### 🔗 Hard Link Notes
 

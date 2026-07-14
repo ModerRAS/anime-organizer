@@ -89,7 +89,7 @@ fn library_index_flag_creates_target_root_database() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(subtitle_path, "Test Show/01 [1080P].zh-CN.ass");
-    assert_eq!(user_version, 2);
+    assert_eq!(user_version, 3);
     assert!(target
         .path()
         .join("Test Show")

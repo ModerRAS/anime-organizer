@@ -6,7 +6,7 @@
 use crate::error::{AppError, Result};
 use crate::organizer::FileOrganizer;
 use crate::parser::{split_series_and_season, FilenameParser};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,7 +21,7 @@ pub const DATABASE_FILENAME: &str = "library.db";
 const MLIP_NAMESPACE: Uuid = Uuid::from_u128(0x3f1a60c1_0f29_4f54_96bd_2068841e14c1);
 static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// MLIP v2 schema. This is the protocol source of truth.
+/// MLIP v3 schema. This is the protocol source of truth.
 pub const MLIP_SCHEMA_SQL: &str = r#"
 PRAGMA foreign_keys = ON;
 
@@ -121,6 +121,28 @@ CREATE TABLE media_subtitle
 CREATE INDEX idx_media_subtitle_file
 ON media_subtitle(media_file_id);
 
+CREATE TABLE media_extra
+(
+    id              INTEGER PRIMARY KEY,
+    uuid            TEXT UNIQUE NOT NULL,
+    series_id       INTEGER NOT NULL,
+    extra_kind      INTEGER NOT NULL,
+    ordinal         INTEGER NOT NULL,
+    sort_order      INTEGER NOT NULL,
+    title           TEXT NOT NULL,
+    path            TEXT NOT NULL UNIQUE,
+    size            INTEGER,
+    modified_time   INTEGER,
+    runtime         INTEGER,
+
+    FOREIGN KEY(series_id)
+        REFERENCES series(id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX idx_media_extra_series
+ON media_extra(series_id, extra_kind, sort_order);
+
 CREATE TABLE series_artwork
 (
     id              INTEGER PRIMARY KEY,
@@ -209,7 +231,7 @@ CREATE TABLE capability
     enabled     INTEGER NOT NULL
 );
 
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
 "#;
 
 /// MLIP artwork kind integer enum.
@@ -225,6 +247,22 @@ pub enum ArtworkKind {
 }
 
 impl ArtworkKind {
+    fn as_i64(self) -> i64 {
+        self as i64
+    }
+}
+
+/// MLIP series-extra kind integer enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExtraKind {
+    Ova = 1,
+    Special = 2,
+    Ncop = 3,
+    Nced = 4,
+    Gallery = 5,
+}
+
+impl ExtraKind {
     fn as_i64(self) -> i64 {
         self as i64
     }
@@ -353,9 +391,10 @@ impl LibraryIndexRecord {
         let Some(file_name) = components.last() else {
             return Ok(None);
         };
-        if components[..components.len() - 1]
-            .iter()
-            .any(|component| is_supplemental_directory(component))
+        if has_bracket_token(file_name, "menu")
+            || components[..components.len() - 1]
+                .iter()
+                .any(|component| is_supplemental_directory(component))
         {
             return Ok(None);
         }
@@ -456,12 +495,65 @@ impl LibraryIndexRecord {
     }
 }
 
+/// One locally classified extra attached to a series.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryExtraRecord {
+    pub series_title: String,
+    pub kind: ExtraKind,
+    pub ordinal: i64,
+    pub sort_order: i64,
+    pub title: String,
+    pub relative_path: String,
+    pub size: Option<i64>,
+    pub modified_time: Option<i64>,
+    pub runtime: Option<i64>,
+}
+
+impl LibraryExtraRecord {
+    /// Classify an extra path already located under the target library.
+    pub fn from_target_path(
+        target_root: &Path,
+        path: &Path,
+        series_title: impl Into<String>,
+    ) -> Result<Option<Self>> {
+        let relative = path.strip_prefix(target_root).map_err(|_| {
+            AppError::LibraryIndexError(format!("媒体文件不在目标目录内: {}", path.display()))
+        })?;
+        let components = normal_components(relative);
+        let Some(file_name) = components.last() else {
+            return Ok(None);
+        };
+        if components[..components.len() - 1]
+            .iter()
+            .any(|component| component.eq_ignore_ascii_case("menu"))
+        {
+            return Ok(None);
+        }
+        let Some((kind, ordinal, title)) = classify_extra(file_name) else {
+            return Ok(None);
+        };
+        let (size, modified_time) = file_metadata(path);
+        Ok(Some(Self {
+            series_title: series_title.into(),
+            kind,
+            ordinal,
+            sort_order: ordinal,
+            title,
+            relative_path: relative_path(target_root, path)?,
+            size,
+            modified_time,
+            runtime: None,
+        }))
+    }
+}
+
 /// Counts returned after a library index write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LibraryIndexStats {
     pub series: i64,
     pub episodes: i64,
     pub media_files: i64,
+    pub extras: i64,
 }
 
 /// MLIP database writer.
@@ -477,6 +569,14 @@ impl LibraryIndex {
         target_root: &Path,
         records: &[LibraryIndexRecord],
     ) -> Result<LibraryIndexStats> {
+        Self::rebuild_with_extras(target_root, records, &[])
+    }
+
+    pub fn rebuild_with_extras(
+        target_root: &Path,
+        records: &[LibraryIndexRecord],
+        extras: &[LibraryExtraRecord],
+    ) -> Result<LibraryIndexStats> {
         let db_path = Self::database_path(target_root);
         let paths = staging_paths(target_root);
         let result = (|| {
@@ -486,7 +586,7 @@ impl LibraryIndex {
                 conn.execute_batch(MLIP_SCHEMA_SQL).map_err(|e| {
                     AppError::LibraryIndexError(format!("创建 MLIP schema 失败: {e}"))
                 })?;
-                write_records(&mut conn, target_root, records, true)?;
+                write_records(&mut conn, target_root, records, extras, true)?;
             }
 
             let stats = {
@@ -520,7 +620,7 @@ impl LibraryIndex {
                 conn.execute_batch("PRAGMA foreign_keys = ON;")
                     .map_err(|e| AppError::LibraryIndexError(format!("设置 PRAGMA 失败: {e}")))?;
                 validate_user_version(&conn)?;
-                write_records(&mut conn, target_root, records, false)?;
+                write_records(&mut conn, target_root, records, &[], false)?;
                 read_stats(&conn)?
             };
 
@@ -590,7 +690,7 @@ fn validate_user_version(conn: &Connection) -> Result<()> {
     let user_version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(|e| AppError::LibraryIndexError(format!("读取 schema 版本失败: {e}")))?;
-    if !matches!(user_version, 1 | 2) {
+    if !matches!(user_version, 1..=3) {
         return Err(AppError::LibraryIndexError(format!(
             "不支持的 MLIP schema 版本: {user_version}"
         )));
@@ -602,6 +702,7 @@ fn write_records(
     conn: &mut Connection,
     target_root: &Path,
     records: &[LibraryIndexRecord],
+    extras: &[LibraryExtraRecord],
     include_static_meta: bool,
 ) -> Result<()> {
     ensure_schema_extensions(conn)?;
@@ -614,6 +715,9 @@ fn write_records(
 
     for record in records {
         insert_record(&tx, record)?;
+    }
+    for extra in extras {
+        insert_extra(&tx, extra)?;
     }
 
     tx.commit()
@@ -637,8 +741,23 @@ fn ensure_schema_extensions(conn: &Connection) -> Result<()> {
          FOREIGN KEY(media_file_id) REFERENCES media_file(id) ON DELETE CASCADE, \
          UNIQUE(media_file_id, path)); \
          CREATE INDEX IF NOT EXISTS idx_media_subtitle_file ON media_subtitle(media_file_id); \
-         PRAGMA user_version = 2; \
-         UPDATE meta SET value = '2' WHERE key = 'schema'",
+         CREATE TABLE IF NOT EXISTS media_extra (\
+         id INTEGER PRIMARY KEY, \
+         uuid TEXT UNIQUE NOT NULL, \
+         series_id INTEGER NOT NULL, \
+         extra_kind INTEGER NOT NULL, \
+         ordinal INTEGER NOT NULL, \
+         sort_order INTEGER NOT NULL, \
+         title TEXT NOT NULL, \
+         path TEXT NOT NULL UNIQUE, \
+         size INTEGER, \
+         modified_time INTEGER, \
+         runtime INTEGER, \
+         FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE); \
+         CREATE INDEX IF NOT EXISTS idx_media_extra_series \
+         ON media_extra(series_id, extra_kind, sort_order); \
+         PRAGMA user_version = 3; \
+         UPDATE meta SET value = '3' WHERE key = 'schema'",
     )
     .map_err(|e| AppError::LibraryIndexError(format!("创建 MLIP 扩展表失败: {e}")))?;
     Ok(())
@@ -653,7 +772,7 @@ fn upsert_meta(conn: &Connection, target_root: &Path, include_static_meta: bool)
         .unwrap_or_else(|_| target_root.to_path_buf());
     let library_uuid = stable_uuid("library", &canonical_root.to_string_lossy());
 
-    let mut entries = vec![("generated_at", generated_at), ("schema", "2".to_string())];
+    let mut entries = vec![("generated_at", generated_at), ("schema", "3".to_string())];
     if include_static_meta {
         entries.extend([
             ("protocol", "MLIP".to_string()),
@@ -683,6 +802,7 @@ fn upsert_capabilities(conn: &Connection) -> Result<()> {
         ("release_date", 1),
         ("people", 0),
         ("subtitle", 1),
+        ("extra", 1),
         ("media_technical", 0),
         ("multi_file", 1),
     ];
@@ -699,7 +819,7 @@ fn upsert_capabilities(conn: &Connection) -> Result<()> {
 }
 
 fn insert_record(conn: &Connection, record: &LibraryIndexRecord) -> Result<()> {
-    let series_uuid = stable_uuid("series", &normalize_key(&record.series_title));
+    let series_uuid = resolve_series_uuid(conn, record)?;
     conn.execute(
         "INSERT INTO series \
          (uuid, title, original_title, sort_title, summary, year, series_type) \
@@ -826,6 +946,94 @@ fn insert_record(conn: &Connection, record: &LibraryIndexRecord) -> Result<()> {
     Ok(())
 }
 
+fn insert_extra(conn: &Connection, extra: &LibraryExtraRecord) -> Result<()> {
+    let series_uuid = stable_uuid("series", &normalize_key(&extra.series_title));
+    let series_id: i64 = conn
+        .query_row(
+            "SELECT id FROM series WHERE uuid = ?1",
+            params![series_uuid.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(|e| AppError::LibraryIndexError(format!("读取特典 series id 失败: {e}")))?;
+    let extra_uuid = stable_uuid("extra", &extra.relative_path);
+    conn.execute(
+        "INSERT INTO media_extra \
+         (uuid, series_id, extra_kind, ordinal, sort_order, title, path, size, modified_time, runtime) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+         ON CONFLICT(path) DO UPDATE SET \
+         uuid = excluded.uuid, \
+         series_id = excluded.series_id, \
+         extra_kind = excluded.extra_kind, \
+         ordinal = excluded.ordinal, \
+         sort_order = excluded.sort_order, \
+         title = excluded.title, \
+         size = excluded.size, \
+         modified_time = excluded.modified_time, \
+         runtime = COALESCE(excluded.runtime, media_extra.runtime)",
+        params![
+            extra_uuid.to_string(),
+            series_id,
+            extra.kind.as_i64(),
+            extra.ordinal,
+            extra.sort_order,
+            extra.title,
+            extra.relative_path,
+            extra.size,
+            extra.modified_time,
+            extra.runtime,
+        ],
+    )
+    .map_err(|e| AppError::LibraryIndexError(format!("写入 media_extra 失败: {e}")))?;
+    Ok(())
+}
+
+fn resolve_series_uuid(conn: &Connection, record: &LibraryIndexRecord) -> Result<Uuid> {
+    for external_id in &record.external_ids {
+        let uuid = conn
+            .query_row(
+                "SELECT series.uuid FROM series \
+                 INNER JOIN series_external_id ON series_external_id.series_id = series.id \
+                 WHERE series_external_id.provider = ?1 AND series_external_id.value = ?2 \
+                 LIMIT 1",
+                params![external_id.provider.as_i64(), external_id.value],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| {
+                AppError::LibraryIndexError(format!("按 external_id 读取 series 失败: {e}"))
+            })?;
+        if let Some(uuid) = uuid.and_then(|value| Uuid::parse_str(&value).ok()) {
+            return Ok(uuid);
+        }
+    }
+
+    if let Some(root) = record.relative_path.split('/').next() {
+        let prefix = format!("{root}/");
+        let mut statement = conn
+            .prepare(
+                "SELECT DISTINCT series.uuid FROM series \
+                 INNER JOIN episode ON episode.series_id = series.id \
+                 INNER JOIN media_file ON media_file.episode_id = episode.id \
+                 WHERE substr(media_file.path, 1, ?1) = ?2 LIMIT 2",
+            )
+            .map_err(|e| AppError::LibraryIndexError(format!("准备 series 路径查询失败: {e}")))?;
+        let uuids = statement
+            .query_map(params![prefix.chars().count() as i64, prefix], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| AppError::LibraryIndexError(format!("按路径读取 series 失败: {e}")))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| AppError::LibraryIndexError(format!("读取 series 路径结果失败: {e}")))?;
+        if let [uuid] = uuids.as_slice() {
+            if let Ok(uuid) = Uuid::parse_str(uuid) {
+                return Ok(uuid);
+            }
+        }
+    }
+
+    Ok(stable_uuid("series", &normalize_key(&record.series_title)))
+}
+
 fn upsert_release_date(
     conn: &Connection,
     series_id: i64,
@@ -931,6 +1139,7 @@ fn read_stats(conn: &Connection) -> Result<LibraryIndexStats> {
         series: count_table(conn, "series")?,
         episodes: count_table(conn, "episode")?,
         media_files: count_table(conn, "media_file")?,
+        extras: count_table(conn, "media_extra")?,
     })
 }
 
@@ -969,6 +1178,74 @@ fn is_supplemental_directory(value: &str) -> bool {
         value.trim().to_ascii_lowercase().as_str(),
         "menu" | "ncop&nced" | "图集" | "圖集" | "特典映像"
     )
+}
+
+fn classify_extra(file_name: &str) -> Option<(ExtraKind, i64, String)> {
+    let stem = Path::new(file_name).file_stem()?.to_str()?;
+    let tokens = bracket_tokens(stem);
+
+    for (index, token) in tokens.iter().enumerate() {
+        let upper = token.to_ascii_uppercase();
+        let (kind, label, ordinal) = if upper == "OVA" {
+            (
+                ExtraKind::Ova,
+                "OVA",
+                next_extra_ordinal(&tokens, index).unwrap_or(1),
+            )
+        } else if let Some(ordinal) = extra_ordinal(&tokens, index, "NCOP") {
+            (ExtraKind::Ncop, "NCOP", ordinal)
+        } else if let Some(ordinal) = extra_ordinal(&tokens, index, "NCED") {
+            (ExtraKind::Nced, "NCED", ordinal)
+        } else if upper == "TOKUTEN" {
+            (
+                ExtraKind::Special,
+                "特典映像",
+                next_extra_ordinal(&tokens, index)?,
+            )
+        } else if upper == "IMAGES" {
+            (
+                ExtraKind::Gallery,
+                "图集",
+                next_extra_ordinal(&tokens, index)?,
+            )
+        } else {
+            continue;
+        };
+        let title = if kind == ExtraKind::Ova && next_extra_ordinal(&tokens, index).is_none() {
+            label.to_string()
+        } else {
+            format!("{label} {ordinal:02}")
+        };
+        return Some((kind, ordinal, title));
+    }
+    None
+}
+
+fn bracket_tokens(value: &str) -> Vec<&str> {
+    value
+        .split('[')
+        .skip(1)
+        .filter_map(|part| part.split_once(']').map(|(token, _)| token.trim()))
+        .collect()
+}
+
+fn has_bracket_token(value: &str, expected: &str) -> bool {
+    bracket_tokens(value)
+        .iter()
+        .any(|token| token.eq_ignore_ascii_case(expected))
+}
+
+fn extra_ordinal(tokens: &[&str], index: usize, prefix: &str) -> Option<i64> {
+    let token = tokens.get(index)?.to_ascii_uppercase();
+    let suffix = token.strip_prefix(prefix)?;
+    if !suffix.is_empty() {
+        return suffix.parse().ok();
+    }
+    next_extra_ordinal(tokens, index)
+}
+
+fn next_extra_ordinal(tokens: &[&str], index: usize) -> Option<i64> {
+    tokens.get(index + 1)?.trim().parse().ok()
 }
 
 fn parse_target_filename(file_name: &str) -> Option<(f64, String)> {

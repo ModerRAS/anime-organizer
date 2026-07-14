@@ -50,7 +50,7 @@ pub mod scraper;
 pub mod torrent;
 
 pub use error::{AppError, Result};
-pub use library_index::{LibraryIndex, LibraryIndexRecord};
+pub use library_index::{ExtraKind, LibraryExtraRecord, LibraryIndex, LibraryIndexRecord};
 pub use metadata::AnimeMetadata;
 pub use nfo::{EpisodeNfo, NfoWriter, TvShowNfo};
 pub use organizer::{FileOrganizer, OperationMode};
