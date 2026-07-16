@@ -26,3 +26,5 @@ bangumi-archive
 *.db
 
 .playwright-mcp/
+
+.pi/

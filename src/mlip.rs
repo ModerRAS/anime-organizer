@@ -1,3 +1,4 @@
+use crate::title_resolver::{is_latin_title, resolve_latin_title};
 use anime_organizer::metadata::{
     bangumi::{BangumiEpisode, BangumiSubject},
     tmdb::TmdbTvShow,
@@ -16,18 +17,33 @@ static TRADITIONAL_TO_SIMPLIFIED: LazyLock<Mutex<Converter>> =
     LazyLock::new(|| Mutex::new(Converter::new(Config::T2s)));
 
 #[cfg(feature = "metadata")]
+pub(crate) struct MetadataLookup<'a> {
+    pub(crate) anime_name: &'a str,
+    pub(crate) series_name: &'a str,
+    pub(crate) publisher_hint: Option<&'a str>,
+    pub(crate) season_hint: Option<u32>,
+    pub(crate) allow_online_title_resolution: bool,
+}
+
+#[cfg(feature = "metadata")]
 pub(crate) async fn fetch_anime_metadata(
-    anime_name: &str,
-    series_name: &str,
-    season_hint: Option<u32>,
+    lookup: MetadataLookup<'_>,
     alias_lookup: &AliasLookup,
     bangumi: &BangumiClient,
     tmdb: Option<&TmdbClient>,
     verbose: bool,
 ) -> Option<AnimeMetadata> {
+    let MetadataLookup {
+        anime_name,
+        series_name,
+        publisher_hint,
+        season_hint,
+        allow_online_title_resolution,
+    } = lookup;
     let mut metadata = None;
     let mut anidb_id = None;
-    let lookup_queries = metadata_search_queries(series_name, Some(anime_name), None, season_hint);
+    let mut lookup_queries =
+        metadata_search_queries(series_name, Some(anime_name), None, season_hint);
 
     let alias = lookup_queries.iter().find_map(|query| {
         alias_lookup
@@ -70,6 +86,65 @@ pub(crate) async fn fetch_anime_metadata(
             if let Ok(meta) = bangumi.fetch_metadata(subject.id).await {
                 metadata = Some(meta);
             }
+        }
+    }
+
+    if metadata.is_none() && is_latin_title(series_name) {
+        let resolved = if allow_online_title_resolution {
+            resolve_latin_title(anime_name, publisher_hint, season_hint, verbose).await
+        } else {
+            None
+        };
+
+        if let Some(resolved) = resolved {
+            if verbose {
+                eprintln!(
+                    "{} 标题解析: {} -> {}",
+                    resolved.source,
+                    anime_name,
+                    resolved.titles.join(" / ")
+                );
+            }
+            lookup_queries.clear();
+            for title in &resolved.titles {
+                for query in metadata_search_queries(title, None, None, season_hint) {
+                    push_unique_title(&mut lookup_queries, query);
+                }
+            }
+
+            let alias = lookup_queries.iter().find_map(|query| {
+                alias_lookup
+                    .find(query)
+                    .or_else(|| alias_lookup.find_fuzzy(query))
+            });
+            if let Some(entry) = alias {
+                if let Ok(mut meta) = bangumi.fetch_metadata(entry.bangumi_id).await {
+                    meta.tmdb_id = entry.tmdb_id;
+                    meta.anidb_id = entry.anidb_id;
+                    anidb_id = entry.anidb_id;
+                    metadata = Some(meta);
+                }
+            }
+
+            if metadata.is_none() {
+                let subject = lookup_queries
+                    .iter()
+                    .find_map(|query| bangumi.find_by_name(query).ok().flatten());
+                if let Some(subject) = subject {
+                    if let Ok(meta) = bangumi.fetch_metadata(subject.id).await {
+                        metadata = Some(meta);
+                    }
+                }
+            }
+
+            if metadata.is_none() && resolved.titles.iter().all(|title| is_latin_title(title)) {
+                lookup_queries.clear();
+            }
+        } else {
+            if verbose {
+                eprintln!("跳过不安全的拉丁标题模糊匹配: {anime_name}");
+            }
+            lookup_queries.clear();
         }
     }
 
@@ -617,6 +692,7 @@ fn bangumi_subject_match_score(
 ) -> f32 {
     let query_season = title_season_hint(query)
         .or_else(|| use_bert_season.then(|| bert_season_hint(query)).flatten());
+    let query_has_han = contains_han(query);
     let ascii_tokens = distinctive_ascii_tokens(query);
     [Some(subject.name.as_str()), subject.name_cn.as_deref()]
         .into_iter()
@@ -640,7 +716,13 @@ fn bangumi_subject_match_score(
             }
             let score =
                 title_match_score_with_known_seasons(query, title, query_season, candidate_season);
-            ascii_score.map_or(score, |ascii| score.max(ascii))
+            ascii_score.map_or(score, |ascii| {
+                if query_has_han {
+                    score * 0.8 + ascii * 0.2
+                } else {
+                    score.max(ascii)
+                }
+            })
         })
         .fold(0.0, f32::max)
 }
@@ -655,6 +737,13 @@ fn bert_season_hint(value: &str) -> Option<u32> {
 #[cfg(all(feature = "metadata", not(feature = "anifilebert")))]
 fn bert_season_hint(_value: &str) -> Option<u32> {
     None
+}
+
+#[cfg(feature = "metadata")]
+fn contains_han(value: &str) -> bool {
+    value
+        .chars()
+        .any(|ch| matches!(ch, '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}'))
 }
 
 #[cfg(feature = "metadata")]
@@ -754,6 +843,9 @@ fn title_match_score_with_known_seasons(
 
 #[cfg(feature = "metadata")]
 fn title_season_hint(value: &str) -> Option<u32> {
+    if let Some(season) = split_series_and_season(value).1 {
+        return Some(season);
+    }
     let normalized = simplify_title_text(value).to_ascii_lowercase();
     let chars: Vec<char> = normalized.chars().collect();
 
@@ -1304,6 +1396,25 @@ mod tests {
         let minimums = min_episode_by_series(&records);
         assert_eq!(minimums.get(&("Anime".to_string(), 1)), Some(&13.0));
         assert_eq!(minimums.get(&("Anime".to_string(), 2)), Some(&1.0));
+    }
+
+    #[test]
+    fn mixed_cjk_title_does_not_match_on_ascii_token_alone() {
+        let query = "悲剧元凶的最强外道最终BOSS女王为民竭力 S2";
+        let unrelated = bangumi_subject(
+            999_998,
+            "穿进赛博游戏后干掉Boss成功上位",
+            "穿进赛博游戏后干掉Boss成功上位",
+        );
+        let correct = bangumi_subject(
+            999_999,
+            "悲劇の元凶となる最強外道ラスボス女王は民の為に尽くします。Season 2",
+            "悲剧元凶的最强外道最终BOSS女王为民竭力 第二季",
+        );
+
+        assert!(bangumi_subject_match_score(query, &unrelated, false) < 0.72);
+        assert!(bangumi_subject_match_score(query, &correct, false) >= 0.72);
+        assert_eq!(title_season_hint("异世界悠闲农家 2"), Some(2));
     }
 
     #[test]

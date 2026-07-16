@@ -6,6 +6,8 @@ mod cli;
 mod commands;
 #[cfg(feature = "metadata")]
 mod mlip;
+#[cfg(feature = "metadata")]
+mod title_resolver;
 
 use crate::cli::*;
 #[cfg(any(
@@ -17,7 +19,7 @@ use crate::commands::run_command;
 #[cfg(feature = "metadata")]
 use crate::mlip::{
     anime_group_min_episode, apply_bangumi_episode_details, create_episode_nfo, download_images,
-    fetch_anime_metadata, fetch_bangumi_episodes_cached, min_episode_by_series,
+    fetch_anime_metadata, fetch_bangumi_episodes_cached, min_episode_by_series, MetadataLookup,
 };
 #[cfg(feature = "metadata")]
 use anime_organizer::library_index::{Artwork, ArtworkKind};
@@ -219,6 +221,7 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
         }
     }
 
+    let allow_online_title_resolution = args.metadata_source.is_none();
     let tmdb = args.tmdb_api_key.clone().map(TmdbClient::new);
     if !args.no_images && tmdb.is_none() && args.verbose {
         eprintln!("未提供 TMDB API Key，将跳过 TMDB 图片下载");
@@ -248,9 +251,13 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
             cached.clone()
         } else {
             let fetched = fetch_anime_metadata(
-                &anime_name,
-                &series_name,
-                first_file.season_number(),
+                MetadataLookup {
+                    anime_name: &anime_name,
+                    series_name: &series_name,
+                    publisher_hint: Some(&first_file.publisher),
+                    season_hint: first_file.season_number(),
+                    allow_online_title_resolution,
+                },
                 &alias_lookup,
                 &bangumi,
                 tmdb.as_ref(),
@@ -397,6 +404,7 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
             download_images: !args.no_images,
             force_overwrite: args.force_overwrite,
             fetch_episode_metadata: !args.no_episode_metadata,
+            allow_online_title_resolution,
             probe_runtime,
             verbose: args.verbose,
         },
@@ -748,6 +756,7 @@ struct MetadataIndexContext<'a> {
     download_images: bool,
     force_overwrite: bool,
     fetch_episode_metadata: bool,
+    allow_online_title_resolution: bool,
     probe_runtime: bool,
     verbose: bool,
 }
@@ -822,10 +831,16 @@ async fn enrich_library_index_records(
         let metadata = if let Some(cached) = context.metadata_cache.get(&cache_key) {
             cached.clone()
         } else {
+            let publisher = FilenameParser::parse(target.join(&record.relative_path))
+                .map(|file| file.publisher);
             let fetched = fetch_anime_metadata(
-                &lookup_title,
-                &lookup_title,
-                season_hint,
+                MetadataLookup {
+                    anime_name: &lookup_title,
+                    series_name: &lookup_title,
+                    publisher_hint: publisher.as_deref(),
+                    season_hint,
+                    allow_online_title_resolution: context.allow_online_title_resolution,
+                },
                 context.alias_lookup,
                 context.bangumi,
                 context.tmdb,

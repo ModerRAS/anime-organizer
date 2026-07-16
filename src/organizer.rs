@@ -30,6 +30,7 @@ use crate::error::{AppError, Result};
 use crate::parser::AnimeFileInfo;
 use std::fs;
 use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 /// 文件操作模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -169,7 +170,7 @@ impl FileOrganizer {
         Ok(target_path)
     }
 
-    /// 查找与视频同目录、同名或带语言后缀的外部字幕。
+    /// 查找视频附近三层目录内同名或带语言后缀的外部字幕。
     pub fn find_external_subtitles(video_path: &Path) -> Vec<PathBuf> {
         let Some(directory) = video_path.parent() else {
             return Vec::new();
@@ -178,10 +179,13 @@ impl FileOrganizer {
             return Vec::new();
         };
         let video_stem_lower = video_stem.to_lowercase();
-        let mut paths = fs::read_dir(directory)
+        let mut paths = WalkDir::new(directory)
+            .min_depth(1)
+            .max_depth(3)
             .into_iter()
-            .flatten()
-            .filter_map(|entry| entry.ok().map(|item| item.path()))
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| entry.into_path())
             .filter(|path| path != video_path)
             .filter(|path| {
                 matches!(
@@ -200,7 +204,7 @@ impl FileOrganizer {
                 let Some(suffix) = stem_lower.strip_prefix(&video_stem_lower) else {
                     return false;
                 };
-                suffix.is_empty() || suffix.starts_with(['.', ' ', '_', '-', '['])
+                suffix.is_empty() || suffix.starts_with(['.', ' ', '_', '-', '[', '(', '（'])
             })
             .collect::<Vec<_>>();
         paths.sort_by_key(|path| path.to_string_lossy().to_lowercase());
@@ -370,6 +374,9 @@ mod tests {
         let target_dir = TempDir::new().unwrap();
         let source_file = create_test_file(source_dir.path(), "test.mp4", "video");
         create_test_file(source_dir.path(), "test.zh-CN.ass", "subtitle");
+        let subtitle_dir = source_dir.path().join("Subs");
+        fs::create_dir(&subtitle_dir).unwrap();
+        create_test_file(&subtitle_dir, "test(zh-TW).srt", "nested subtitle");
         create_test_file(source_dir.path(), "test10.srt", "other episode");
         create_test_file(source_dir.path(), "test.sub", "unsupported vobsub");
         let anime_info = create_test_anime_info(&source_file);
@@ -387,6 +394,10 @@ mod tests {
         assert_eq!(
             fs::read_to_string(anime_dir.join("test.zh-CN.ass")).unwrap(),
             "subtitle",
+        );
+        assert_eq!(
+            fs::read_to_string(anime_dir.join("test(zh-TW).srt")).unwrap(),
+            "nested subtitle",
         );
         assert!(!anime_dir.join("test10.srt").exists());
         assert!(!anime_dir.join("test.sub").exists());

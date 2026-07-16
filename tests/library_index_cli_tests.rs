@@ -50,8 +50,10 @@ fn library_index_flag_creates_target_root_database() {
         b"video",
     )
     .unwrap();
+    let subtitle_dir = source.path().join("Subs");
+    fs::create_dir(&subtitle_dir).unwrap();
     fs::write(
-        source.path().join("[ANi] Test Show - 01 [1080P].zh-CN.ass"),
+        subtitle_dir.join("[ANi] Test Show - 01 [1080P](zh-CN).ass"),
         b"subtitle",
     )
     .unwrap();
@@ -90,13 +92,13 @@ fn library_index_flag_creates_target_root_database() {
         .unwrap();
     assert_eq!(
         subtitle_path,
-        "Test Show/[ANi] Test Show - 01 [1080P].zh-CN.ass"
+        "Test Show/[ANi] Test Show - 01 [1080P](zh-CN).ass"
     );
     assert_eq!(user_version, 3);
     assert!(target
         .path()
         .join("Test Show")
-        .join("[ANi] Test Show - 01 [1080P].zh-CN.ass")
+        .join("[ANi] Test Show - 01 [1080P](zh-CN).ass")
         .exists());
 }
 
