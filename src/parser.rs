@@ -268,6 +268,7 @@ impl FilenameParser {
                             || after_digits == b'['
                             || after_digits == b'-'
                             || after_digits == b'.'
+                            || after_digits == b'('
                             || num_end >= bytes.len()
                         {
                             episode_info = Some((i, num_start, num_end));

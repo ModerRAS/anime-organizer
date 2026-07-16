@@ -334,3 +334,16 @@ fn test_parse_loli_kaguya_03() {
     assert_eq!(i.anime_name, "Kaguya-sama wa Kurasu wo Shitbori");
     assert_eq!(i.episode, "03");
 }
+
+#[test]
+fn test_parse_loli_beansub_slime_overall_episode_in_parentheses() {
+    let path = PathBuf::from(
+        "[BeanSub&LoliHouse] Tensei Shitara Slime Datta Ken 4th Season - 06(78) [WebRip 1080p HEVC-10bit AAC ASSx2].mkv",
+    );
+    let r = FilenameParser::parse(&path);
+    let i = r.expect("parse failed: overall series episode (78) should not block parsing");
+    assert_eq!(i.publisher, "BeanSub&LoliHouse");
+    assert_eq!(i.episode, "06");
+    assert!(i.tags.contains("WebRip"), "tags should contain quality info");
+    assert!(i.tags.contains("78"), "overall episode number should remain in tags");
+}
