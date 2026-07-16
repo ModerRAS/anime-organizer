@@ -344,6 +344,12 @@ fn test_parse_loli_beansub_slime_overall_episode_in_parentheses() {
     let i = r.expect("parse failed: overall series episode (78) should not block parsing");
     assert_eq!(i.publisher, "BeanSub&LoliHouse");
     assert_eq!(i.episode, "06");
-    assert!(i.tags.contains("WebRip"), "tags should contain quality info");
-    assert!(i.tags.contains("78"), "overall episode number should remain in tags");
+    assert!(
+        i.tags.contains("WebRip"),
+        "tags should contain quality info"
+    );
+    assert!(
+        i.tags.contains("78"),
+        "overall episode number should remain in tags"
+    );
 }
