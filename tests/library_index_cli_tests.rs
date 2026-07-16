@@ -81,19 +81,22 @@ fn library_index_flag_creates_target_root_database() {
     let media_path: String = conn
         .query_row("SELECT path FROM media_file", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(media_path, "Test Show/01 [1080P].mkv");
+    assert_eq!(media_path, "Test Show/[ANi] Test Show - 01 [1080P].mkv");
     let subtitle_path: String = conn
         .query_row("SELECT path FROM media_subtitle", [], |row| row.get(0))
         .unwrap();
     let user_version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(subtitle_path, "Test Show/01 [1080P].zh-CN.ass");
+    assert_eq!(
+        subtitle_path,
+        "Test Show/[ANi] Test Show - 01 [1080P].zh-CN.ass"
+    );
     assert_eq!(user_version, 3);
     assert!(target
         .path()
         .join("Test Show")
-        .join("01 [1080P].zh-CN.ass")
+        .join("[ANi] Test Show - 01 [1080P].zh-CN.ass")
         .exists());
 }
 
@@ -146,7 +149,7 @@ fn mlip_flag_creates_metadata_library_without_nfo() {
         .path()
         .join("MLIP Test")
         .join("Season 1")
-        .join("01 [1080P].nfo")
+        .join("[ANi] MLIP Test - 01 [1080P].nfo")
         .exists());
 }
 

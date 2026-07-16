@@ -96,13 +96,13 @@ impl FileOrganizer {
     ///     episode: "01".to_string(),
     ///     tags: "[1080P]".to_string(),
     ///     extension: ".mp4".to_string(),
-    ///     original_path: "/downloads/test.mp4".to_string(),
+    ///     original_path: "/downloads/[ANi] 测试 - 01 [1080P].mp4".to_string(),
     /// };
     ///
-    /// // 常规模式：`/anime/测试/01 [1080P].mp4`
+    /// // 常规模式：`/anime/测试/[ANi] 测试 - 01 [1080P].mp4`
     /// FileOrganizer::organize(&info, "/anime", OperationMode::Copy, false, false)?;
     ///
-    /// // Kodi 两层目录模式：`/anime/测试/Season 1/01 [1080P].mp4`
+    /// // Kodi 两层目录模式：`/anime/测试/Season 1/[ANi] 测试 - 01 [1080P].mp4`
     /// FileOrganizer::organize(&info, "/anime", OperationMode::Copy, false, true)?;
     /// # Ok::<(), anime_organizer::error::AppError>(())
     /// ```
@@ -132,9 +132,14 @@ impl FileOrganizer {
         dry_run: bool,
     ) -> Result<PathBuf> {
         let target_dir = target_dir.as_ref();
-        let target_filename = anime_file.target_filename();
-        let target_path = target_dir.join(&target_filename);
         let source_path = Path::new(&anime_file.original_path);
+        let target_filename = source_path
+            .file_name()
+            .ok_or_else(|| AppError::FileOperation {
+                path: source_path.to_path_buf(),
+                message: "源路径缺少文件名".to_string(),
+            })?;
+        let target_path = target_dir.join(target_filename);
         let subtitle_paths = Self::find_external_subtitles(source_path);
 
         if dry_run {
@@ -228,6 +233,12 @@ impl FileOrganizer {
     }
 
     fn organize_path(source_path: &Path, target_path: &Path, mode: OperationMode) -> Result<()> {
+        if source_path == target_path
+            || target_path.exists()
+                && fs::canonicalize(source_path)? == fs::canonicalize(target_path)?
+        {
+            return Ok(());
+        }
         if target_path.exists() {
             fs::remove_file(target_path)?;
         }
@@ -323,7 +334,7 @@ mod tests {
         );
 
         assert!(result.is_ok());
-        let expected_path = target_dir.path().join("测试").join("01 [1080P].mp4");
+        let expected_path = target_dir.path().join("测试").join("test.mp4");
         assert!(expected_path.exists());
         assert!(!source_file.exists());
         assert_eq!(fs::read_to_string(&expected_path).unwrap(), "test content");
@@ -346,7 +357,7 @@ mod tests {
         );
 
         assert!(result.is_ok());
-        let expected_path = target_dir.path().join("测试").join("01 [1080P].mp4");
+        let expected_path = target_dir.path().join("测试").join("test.mp4");
         assert!(expected_path.exists());
         assert!(source_file.exists());
         assert_eq!(fs::read_to_string(&expected_path).unwrap(), "test content");
@@ -374,11 +385,11 @@ mod tests {
 
         let anime_dir = target_dir.path().join("测试");
         assert_eq!(
-            fs::read_to_string(anime_dir.join("01 [1080P].zh-CN.ass")).unwrap(),
+            fs::read_to_string(anime_dir.join("test.zh-CN.ass")).unwrap(),
             "subtitle",
         );
-        assert!(!anime_dir.join("01 [1080P]10.srt").exists());
-        assert!(!anime_dir.join("01 [1080P].sub").exists());
+        assert!(!anime_dir.join("test10.srt").exists());
+        assert!(!anime_dir.join("test.sub").exists());
     }
 
     #[test]
@@ -434,7 +445,7 @@ mod tests {
         // 创建已存在的目标文件
         let target_anime_dir = target_dir.path().join("测试");
         fs::create_dir_all(&target_anime_dir).unwrap();
-        create_test_file(&target_anime_dir, "01 [1080P].mp4", "old content");
+        create_test_file(&target_anime_dir, "test.mp4", "old content");
 
         let result = FileOrganizer::organize(
             &anime_info,
@@ -445,8 +456,26 @@ mod tests {
         );
 
         assert!(result.is_ok());
-        let expected_path = target_dir.path().join("测试").join("01 [1080P].mp4");
+        let expected_path = target_dir.path().join("测试").join("test.mp4");
         assert_eq!(fs::read_to_string(&expected_path).unwrap(), "new content");
+    }
+
+    #[test]
+    fn test_organize_to_same_path_keeps_file() {
+        let directory = TempDir::new().unwrap();
+        let source_file = create_test_file(directory.path(), "test.mp4", "test content");
+        let anime_info = create_test_anime_info(&source_file);
+
+        let target_path = FileOrganizer::organize_to_dir(
+            &anime_info,
+            directory.path(),
+            OperationMode::Copy,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(target_path, source_file);
+        assert_eq!(fs::read_to_string(target_path).unwrap(), "test content");
     }
 
     #[test]
@@ -467,14 +496,15 @@ mod tests {
         let target_dir = TempDir::new().unwrap();
         let season_dir = target_dir.path().join("测试").join("Season 2");
 
-        let source_file = create_test_file(source_dir.path(), "test.mp4", "test content");
+        let filename = "[ANi] Test Anime Season 2 - 01 [1080P].mp4";
+        let source_file = create_test_file(source_dir.path(), filename, "test content");
         let anime_info = create_test_anime_info(&source_file);
 
         let target_path =
             FileOrganizer::organize_to_dir(&anime_info, &season_dir, OperationMode::Copy, false)
                 .unwrap();
 
-        assert_eq!(target_path, season_dir.join("01 [1080P].mp4"));
+        assert_eq!(target_path, season_dir.join(filename));
         assert!(target_path.exists());
     }
 
@@ -506,7 +536,7 @@ mod tests {
             .path()
             .join("Test Anime")
             .join("Season 2")
-            .join("01 [1080P].mp4");
+            .join("test.mp4");
         assert!(expected_path.exists());
     }
 
@@ -534,10 +564,7 @@ mod tests {
         );
 
         assert!(result.is_ok());
-        let expected_path = target_dir
-            .path()
-            .join("Test Anime 第2季")
-            .join("01 [1080P].mp4");
+        let expected_path = target_dir.path().join("Test Anime 第2季").join("test.mp4");
         assert!(expected_path.exists());
     }
 
@@ -569,7 +596,7 @@ mod tests {
             .path()
             .join("異世界悠閒農家")
             .join("Season 2")
-            .join("03 [1080P].mp4");
+            .join("test.mp4");
         assert!(expected_path.exists());
     }
 }
