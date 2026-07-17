@@ -13,6 +13,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $apiUrl = 'http://127.0.0.1:32145/api/v1/jobs'
+$targetDir = 'S:\' + [char]0x52A8 + [char]0x6F2B
 $logDir = Join-Path $env:LOCALAPPDATA 'anime-organizer'
 $logPath = Join-Path $logDir 'qb_aniorg.log'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
@@ -48,7 +49,7 @@ $payload = @{
         type = 'organize'
         args = @{
             source = $ContentPath
-            target = 'S:\动漫'
+            target = $targetDir
             mode = 'copy'
             mlip = $true
             verbose = $true
