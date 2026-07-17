@@ -80,7 +80,10 @@ jobs:
         run: |
           $path = 'Cargo.toml'
           $content = Get-Content $path -Raw
-          $updated = [regex]::Replace($content, '(?m)^version = ".*"$', "version = `"$env:BUILD_VERSION`"", 1)
+          $updated = [regex]::Replace($content, '(?m)^version = ".*"\r?$', "version = `"$env:BUILD_VERSION`"")
+          if ($updated -eq $content -or $updated -notmatch [regex]::Escape("version = `"$env:BUILD_VERSION`"")) {
+            throw "Failed to apply release build version $env:BUILD_VERSION"
+          }
           $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
           [System.IO.File]::WriteAllText((Resolve-Path $path), $updated, $utf8NoBom)
 
