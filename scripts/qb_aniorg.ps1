@@ -13,7 +13,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $apiUrl = 'http://127.0.0.1:32145/api/v1/jobs'
-$logPath = Join-Path $PSScriptRoot 'qb_aniorg.log'
+$logDir = Join-Path $env:LOCALAPPDATA 'anime-organizer'
+$logPath = Join-Path $logDir 'qb_aniorg.log'
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 function Write-HookLog([string]$Message) {
     $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
