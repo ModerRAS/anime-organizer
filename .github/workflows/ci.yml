@@ -51,6 +51,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: webui/package-lock.json
       - name: Build embedded WebUI
         working-directory: webui
         run: npm ci --no-audit --no-fund && npm run build
