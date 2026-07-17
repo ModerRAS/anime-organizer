@@ -1,0 +1,15 @@
+{
+  "idempotency_key": "qbittorrent:0123456789abcdef",
+  "origin": "qbittorrent",
+  "confirmed": false,
+  "job": {
+    "type": "organize",
+    "args": {
+      "source": "C:\\Downloads\\Ani\\[ANi] Example - 01.mkv",
+      "target": "S:\\动漫",
+      "mode": "copy",
+      "mlip": true,
+      "verbose": true
+    }
+  }
+}

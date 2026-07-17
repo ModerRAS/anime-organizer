@@ -42,6 +42,21 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
+  webui:
+    name: WebUI artifact
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Build embedded WebUI
+        working-directory: webui
+        run: npm ci --no-audit --no-fund && npm run build
+      - name: Verify embedded artifact
+        run: git diff --exit-code -- webui/dist/index.html
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

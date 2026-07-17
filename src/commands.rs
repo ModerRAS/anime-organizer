@@ -16,7 +16,7 @@ use anime_organizer::metadata::AliasLookup;
 use anime_organizer::scraper::{
     db_builder::build_bangumi_db,
     matcher::{format_github_output, match_aliases},
-    ScrapedAnime, Scraper,
+    MatchResult, ScrapedAnime, Scraper,
 };
 #[cfg(feature = "scraper")]
 use serde::{Deserialize, Serialize};
@@ -66,15 +66,18 @@ pub(crate) fn run_command(command: Commands) -> Result<(), AppError> {
 }
 
 #[cfg(feature = "scraper")]
-async fn run_scrape(args: ScrapeArgs) -> Result<(), AppError> {
+pub(crate) async fn scrape_result(args: &ScrapeArgs) -> Result<Vec<ScrapedAnime>, AppError> {
     let scraper = Scraper::new();
     let tmdb_api_key = args
         .tmdb_api_key
         .clone()
         .or_else(|| std::env::var("TMDB_API_KEY").ok());
-    let scraped = scraper
-        .scrape_all(args.days, tmdb_api_key.as_deref())
-        .await?;
+    scraper.scrape_all(args.days, tmdb_api_key.as_deref()).await
+}
+
+#[cfg(feature = "scraper")]
+async fn run_scrape(args: ScrapeArgs) -> Result<(), AppError> {
+    let scraped = scrape_result(&args).await?;
 
     match args.format {
         ScrapeOutputFormat::Json => {
@@ -102,7 +105,7 @@ async fn run_scrape(args: ScrapeArgs) -> Result<(), AppError> {
 }
 
 #[cfg(feature = "scraper")]
-fn run_match(args: MatchArgs) -> Result<(), AppError> {
+pub(crate) fn match_result(args: &MatchArgs) -> Result<MatchResult, AppError> {
     let input = std::fs::read_to_string(&args.input)
         .map_err(|e| AppError::MetadataFetchError(format!("读取刮削输入失败: {e}")))?;
     let scraped: Vec<ScrapedAnime> = serde_json::from_str(&input)
@@ -110,7 +113,12 @@ fn run_match(args: MatchArgs) -> Result<(), AppError> {
 
     let db_path = PathBuf::from("./bangumi.db");
     let aliases = AliasLookup::load(&db_path)?;
-    let result = match_aliases(&scraped, aliases.entries());
+    Ok(match_aliases(&scraped, aliases.entries()))
+}
+
+#[cfg(feature = "scraper")]
+fn run_match(args: MatchArgs) -> Result<(), AppError> {
+    let result = match_result(&args)?;
 
     match args.format {
         MatchOutputFormat::Json => {
@@ -131,13 +139,7 @@ fn run_match(args: MatchArgs) -> Result<(), AppError> {
 
 #[cfg(feature = "scraper")]
 fn run_build_db(args: BuildDbArgs) -> Result<(), AppError> {
-    let runtime = tokio::runtime::Runtime::new()
-        .map_err(|e| AppError::MetadataFetchError(format!("创建异步运行时失败: {e}")))?;
-    let stats = runtime.block_on(build_bangumi_db(
-        &args.output,
-        args.include_relations,
-        args.verbose,
-    ))?;
+    let stats = build_db_result(&args)?;
 
     println!("=== Database Build Stats ===");
     println!("Subjects: {}", stats.subjects_count);
@@ -160,9 +162,23 @@ fn run_build_db(args: BuildDbArgs) -> Result<(), AppError> {
 }
 
 #[cfg(feature = "scraper")]
-fn run_extract_aliases(args: ExtractAliasesArgs) -> Result<(), AppError> {
+pub(crate) fn build_db_result(
+    args: &BuildDbArgs,
+) -> Result<anime_organizer::scraper::BuildDbStats, AppError> {
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| AppError::MetadataFetchError(format!("创建异步运行时失败: {e}")))?;
+    runtime.block_on(build_bangumi_db(
+        &args.output,
+        args.include_relations,
+        args.verbose,
+    ))
+}
+
+#[cfg(feature = "scraper")]
+pub(crate) fn extract_aliases_result(
+    args: &ExtractAliasesArgs,
+) -> Result<std::collections::HashMap<String, AliasEntry>, AppError> {
     use anime_organizer::metadata::wiki::WikiParser;
-    use std::collections::HashMap;
     use std::io::{BufRead, BufReader};
 
     let dump_path = if args.download {
@@ -186,8 +202,7 @@ fn run_extract_aliases(args: ExtractAliasesArgs) -> Result<(), AppError> {
     let file = std::fs::File::open(&dump_path)
         .map_err(|e| AppError::BangumiParseError(format!("打开 dump 文件失败: {e}")))?;
     let reader = BufReader::new(file);
-
-    let mut aliases_map: HashMap<String, AliasEntry> = HashMap::new();
+    let mut aliases_map = std::collections::HashMap::new();
     let parser = WikiParser::new();
 
     for line in reader.lines() {
@@ -196,43 +211,41 @@ fn run_extract_aliases(args: ExtractAliasesArgs) -> Result<(), AppError> {
         if line.is_empty() {
             continue;
         }
-
         let subject: anime_organizer::metadata::bangumi::BangumiSubject =
             match serde_json::from_str(line) {
-                Ok(s) => s,
+                Ok(subject) => subject,
                 Err(_) => continue,
             };
-
         if subject.subject_type != 2 {
             continue;
         }
-
         let Some(ref infobox) = subject.infobox else {
             continue;
         };
-
         let anime_info = match parser.parse_anime_infobox(infobox) {
             Ok(info) => info,
             Err(_) => continue,
         };
-
         if anime_info.aliases.is_empty() {
             continue;
         }
-
         let entry = AliasEntry {
             bangumi_id: subject.id,
             name: subject.name,
             name_cn: subject.name_cn,
         };
-
         for alias in anime_info.aliases {
             if !alias.is_empty() {
                 aliases_map.insert(alias, entry.clone());
             }
         }
     }
+    Ok(aliases_map)
+}
 
+#[cfg(feature = "scraper")]
+fn run_extract_aliases(args: ExtractAliasesArgs) -> Result<(), AppError> {
+    let aliases_map = extract_aliases_result(&args)?;
     let output: Box<dyn std::io::Write> = if let Some(ref path) = args.output {
         Box::new(
             std::fs::File::create(path)
@@ -241,39 +254,58 @@ fn run_extract_aliases(args: ExtractAliasesArgs) -> Result<(), AppError> {
     } else {
         Box::new(std::io::stdout())
     };
-
     let mut writer = std::io::BufWriter::new(output);
     serde_json::to_writer(&mut writer, &aliases_map)
         .map_err(|e| AppError::MetadataFetchError(format!("序列化别名失败: {e}")))?;
     writer
         .flush()
         .map_err(|e| AppError::MetadataFetchError(format!("写入输出失败: {e}")))?;
-
     eprintln!("成功提取 {} 个别名", aliases_map.len());
-
     Ok(())
 }
 
 #[cfg(feature = "scraper")]
-fn run_merge_aliases(args: MergeAliasesArgs) -> Result<(), AppError> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AliasMutationItem {
+    pub(crate) alias: String,
+    pub(crate) subject_id: u32,
+    pub(crate) added: bool,
+}
+
+#[cfg(feature = "scraper")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AliasMutationResult {
+    pub(crate) added: usize,
+    pub(crate) processed: usize,
+    pub(crate) target: String,
+    pub(crate) items: Vec<AliasMutationItem>,
+}
+
+#[cfg(feature = "scraper")]
+pub(crate) fn merge_aliases_result(
+    args: &MergeAliasesArgs,
+) -> Result<AliasMutationResult, AppError> {
     use rusqlite::Connection;
 
-    let db_path = PathBuf::from("bangumi.db");
+    let db_path = args
+        .target
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("bangumi.db"));
     if !db_path.exists() {
         return Err(AppError::AliasLoadError(
             "数据库不存在，请先运行 build-db".to_string(),
         ));
     }
-
     let conn = Connection::open(&db_path)
         .map_err(|e| AppError::AliasLoadError(format!("打开数据库失败: {e}")))?;
-
     let content = std::fs::read_to_string(&args.input)
         .map_err(|e| AppError::AliasLoadError(format!("读取输入文件失败: {e}")))?;
     let aliases: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&content)
         .map_err(|e| AppError::AliasLoadError(format!("解析输入文件失败: {e}")))?;
 
-    let mut new_count = 0;
+    let mut added = 0;
+    let mut processed = 0;
+    let mut items = Vec::new();
     for (alias, value) in aliases {
         if alias.is_empty() {
             continue;
@@ -285,100 +317,191 @@ fn run_merge_aliases(args: MergeAliasesArgs) -> Result<(), AppError> {
         if bangumi_id == 0 {
             continue;
         }
-        let result = conn.execute(
-            "INSERT OR IGNORE INTO aliases (subject_id, alias) VALUES (?1, ?2)",
-            rusqlite::params![bangumi_id, alias],
-        );
-        if result.is_ok() {
-            new_count += 1;
+        processed += 1;
+        let inserted = conn
+            .execute(
+                "INSERT OR IGNORE INTO aliases (subject_id, alias) VALUES (?1, ?2)",
+                rusqlite::params![bangumi_id, alias],
+            )
+            .map_err(|e| AppError::AliasLoadError(format!("写入别名失败: {e}")))?
+            == 1;
+        if inserted {
+            added += 1;
         }
+        items.push(AliasMutationItem {
+            alias,
+            subject_id: bangumi_id,
+            added: inserted,
+        });
     }
+    Ok(AliasMutationResult {
+        added,
+        processed,
+        target: db_path.to_string_lossy().into_owned(),
+        items,
+    })
+}
 
-    println!("新增 {} 个别名到数据库", new_count);
+#[cfg(feature = "scraper")]
+fn run_merge_aliases(args: MergeAliasesArgs) -> Result<(), AppError> {
+    let result = merge_aliases_result(&args)?;
+    println!("新增 {} 个别名到数据库", result.added);
     Ok(())
 }
 
 #[cfg(feature = "scraper")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct AliasEntry {
+pub(crate) struct AliasEntry {
     bangumi_id: u32,
     name: String,
     name_cn: Option<String>,
 }
 
 #[cfg(feature = "scraper")]
-fn run_apply_matches(args: ApplyMatchesArgs) -> Result<(), AppError> {
+pub(crate) fn apply_matches_result(
+    args: &ApplyMatchesArgs,
+) -> Result<AliasMutationResult, AppError> {
     use anime_organizer::scraper::matcher::Proposal;
     use rusqlite::Connection;
 
-    let db_path = PathBuf::from("bangumi.db");
+    let db_path = args
+        .target
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("bangumi.db"));
     if !db_path.exists() {
         return Err(AppError::AliasLoadError(
             "数据库不存在，请先运行 build-db".to_string(),
         ));
     }
-
     let conn = Connection::open(&db_path)
         .map_err(|e| AppError::AliasLoadError(format!("打开数据库失败: {e}")))?;
-
     let content = std::fs::read_to_string(&args.input)
         .map_err(|e| AppError::AliasLoadError(format!("读取提案文件失败: {e}")))?;
     let proposals: Vec<Proposal> = serde_json::from_str(&content)
         .map_err(|e| AppError::AliasLoadError(format!("解析提案文件失败: {e}")))?;
 
-    let mut new_count = 0;
+    let mut added = 0;
+    let mut processed = 0;
+    let mut items = Vec::new();
     for proposal in proposals {
         let alias = proposal.fan_translation;
         if alias.is_empty() {
             continue;
         }
+        processed += 1;
         let subject_id = proposal.alias_entry.bangumi_id;
-        let result = conn.execute(
-            "INSERT OR IGNORE INTO aliases (subject_id, alias) VALUES (?1, ?2)",
-            rusqlite::params![subject_id, alias],
-        );
-        if result.is_ok() {
-            new_count += 1;
+        let inserted = conn
+            .execute(
+                "INSERT OR IGNORE INTO aliases (subject_id, alias) VALUES (?1, ?2)",
+                rusqlite::params![subject_id, alias],
+            )
+            .map_err(|e| AppError::AliasLoadError(format!("写入匹配别名失败: {e}")))?
+            == 1;
+        if inserted {
+            added += 1;
         }
+        items.push(AliasMutationItem {
+            alias,
+            subject_id,
+            added: inserted,
+        });
     }
+    Ok(AliasMutationResult {
+        added,
+        processed,
+        target: db_path.to_string_lossy().into_owned(),
+        items,
+    })
+}
 
-    println!("新增 {} 个别名到数据库", new_count);
+#[cfg(feature = "scraper")]
+fn run_apply_matches(args: ApplyMatchesArgs) -> Result<(), AppError> {
+    let result = apply_matches_result(&args)?;
+    println!("新增 {} 个别名到数据库", result.added);
     Ok(())
 }
 
 #[cfg(feature = "scraper")]
-fn run_create_alias_issues(args: CreateAliasIssuesArgs) -> Result<(), AppError> {
+pub(crate) fn gh_preflight() -> Result<String, AppError> {
+    use std::process::Command;
+
+    let version = Command::new("gh")
+        .arg("--version")
+        .output()
+        .map_err(|_| AppError::AliasLoadError("gh is not installed".to_string()))?;
+    if !version.status.success() {
+        return Err(AppError::AliasLoadError(
+            "gh version check failed".to_string(),
+        ));
+    }
+    let version_text = String::from_utf8_lossy(&version.stdout)
+        .lines()
+        .next()
+        .unwrap_or("gh")
+        .to_string();
+    let auth = Command::new("gh")
+        .args(["auth", "status"])
+        .output()
+        .map_err(|_| AppError::AliasLoadError("gh authentication check failed".to_string()))?;
+    if !auth.status.success() {
+        return Err(AppError::AliasLoadError(
+            "gh is not authenticated".to_string(),
+        ));
+    }
+    Ok(version_text)
+}
+
+#[cfg(feature = "scraper")]
+pub(crate) fn gh_available() -> bool {
+    gh_preflight().is_ok()
+}
+
+#[cfg(feature = "scraper")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AliasIssueResult {
+    pub(crate) index: usize,
+    pub(crate) fan_translation: String,
+    pub(crate) success: bool,
+    pub(crate) issue_url: Option<String>,
+    pub(crate) error: Option<String>,
+}
+
+#[cfg(feature = "scraper")]
+pub(crate) fn create_alias_issues_result(
+    args: &CreateAliasIssuesArgs,
+) -> Result<Vec<AliasIssueResult>, AppError> {
     use anime_organizer::scraper::matcher::Proposal;
     use std::process::Command;
 
+    gh_preflight()?;
     let content = std::fs::read_to_string(&args.input)
         .map_err(|e| AppError::AliasLoadError(format!("读取提案文件失败: {e}")))?;
     let proposals: Vec<Proposal> = serde_json::from_str(&content)
         .map_err(|e| AppError::AliasLoadError(format!("解析提案文件失败: {e}")))?;
-
-    let repo = args.repo.unwrap_or_else(|| {
+    let repo = args.repo.clone().unwrap_or_else(|| {
         std::env::var("GITHUB_REPOSITORY")
             .unwrap_or_else(|_| "ModerRAS/anime-organizer".to_string())
     });
+    let mut results = Vec::new();
 
-    let mut created = 0;
-    for proposal in proposals {
-        let fan = &proposal.fan_translation;
-        if fan.is_empty() {
+    for (index, proposal) in proposals.into_iter().enumerate() {
+        if proposal.fan_translation.is_empty() {
             continue;
         }
-        let bgm_id = proposal.alias_entry.bangumi_id;
-        let name = &proposal.alias_entry.name;
-        let confidence = proposal.confidence.to_string();
-        let reasoning = &proposal.reasoning;
-
-        let title = format!("[Alias Request] {} -> {} (bgm:{})", fan, name, bgm_id);
+        let fan = proposal.fan_translation;
+        let title = format!(
+            "[Alias Request] {} -> {} (bgm:{})",
+            fan, proposal.alias_entry.name, proposal.alias_entry.bangumi_id
+        );
         let body = format!(
             "## Anime Information\n\n- **Bangumi ID**: {}\n- **Bangumi Name**: {}\n- **Fan Translation**: {}\n\n## LLM Analysis\n\n- **Confidence**: {}\n- **Reasoning**: {}\n\n## User Action Required\n\nReply with:\n- `confirm` - approve as-is\n- `correct: {{...}}` - provide correction\n- `reject` - discard",
-            bgm_id, name, fan, confidence, reasoning
+            proposal.alias_entry.bangumi_id,
+            proposal.alias_entry.name,
+            fan,
+            proposal.confidence,
+            proposal.reasoning
         );
-
-        let output = Command::new("gh")
+        let result = Command::new("gh")
             .args([
                 "issue",
                 "create",
@@ -391,15 +514,41 @@ fn run_create_alias_issues(args: CreateAliasIssuesArgs) -> Result<(), AppError> 
                 "--label",
                 "alias-request",
             ])
-            .output()
-            .map_err(|e| AppError::AliasLoadError(format!("执行 gh 命令失败: {e}")))?;
-
-        if output.status.success() {
-            created += 1;
+            .output();
+        match result {
+            Ok(output) if output.status.success() => results.push(AliasIssueResult {
+                index,
+                fan_translation: fan,
+                success: true,
+                issue_url: Some(String::from_utf8_lossy(&output.stdout).trim().to_string()),
+                error: None,
+            }),
+            Ok(_) => results.push(AliasIssueResult {
+                index,
+                fan_translation: fan,
+                success: false,
+                issue_url: None,
+                error: Some("gh issue create failed".to_string()),
+            }),
+            Err(_) => results.push(AliasIssueResult {
+                index,
+                fan_translation: fan,
+                success: false,
+                issue_url: None,
+                error: Some("failed to execute gh issue create".to_string()),
+            }),
         }
     }
+    Ok(results)
+}
 
-    println!("创建了 {} 个 issue", created);
+#[cfg(feature = "scraper")]
+fn run_create_alias_issues(args: CreateAliasIssuesArgs) -> Result<(), AppError> {
+    let results = create_alias_issues_result(&args)?;
+    println!(
+        "创建了 {} 个 issue",
+        results.iter().filter(|result| result.success).count()
+    );
     Ok(())
 }
 
@@ -631,7 +780,7 @@ async fn run_torrent_scrape(args: TorrentScrapeArgs) -> Result<(), AppError> {
     use anime_organizer::torrent::dmhy;
     use anime_organizer::torrent::nyaa;
 
-    let pages = args.pages.clamp(1, 2000);
+    let pages = anime_organizer::torrent::clamp_pages(args.pages);
     if args.headed {
         eprintln!("--headed 仅适用于旧 Playwright 后端；当前使用 HTTP 抓取");
     }
@@ -681,4 +830,90 @@ async fn run_torrent_scrape(args: TorrentScrapeArgs) -> Result<(), AppError> {
 
     println!("\n共爬取 {} 个文件名", unique_lines.len());
     Ok(())
+}
+
+#[cfg(all(test, feature = "scraper"))]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn alias_db(path: &std::path::Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE aliases (subject_id INTEGER NOT NULL, alias TEXT NOT NULL, UNIQUE(subject_id, alias));",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn merge_uses_explicit_target_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("selected.db");
+        let input = directory.path().join("aliases.json");
+        alias_db(&target);
+        std::fs::write(
+            &input,
+            r#"{"New Alias":{"bangumi_id":1,"name":"Example","name_cn":null}}"#,
+        )
+        .unwrap();
+
+        let result = merge_aliases_result(&crate::cli::MergeAliasesArgs {
+            input,
+            target: Some(target.clone()),
+        })
+        .unwrap();
+        assert_eq!(result.added, 1);
+        let count: i64 = Connection::open(target)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM aliases", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn merge_reports_database_write_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("broken.db");
+        let input = directory.path().join("aliases.json");
+        Connection::open(&target)
+            .unwrap()
+            .execute_batch("CREATE TABLE aliases (unexpected INTEGER);")
+            .unwrap();
+        std::fs::write(
+            &input,
+            r#"{"New Alias":{"bangumi_id":1,"name":"Example","name_cn":null}}"#,
+        )
+        .unwrap();
+
+        assert!(merge_aliases_result(&crate::cli::MergeAliasesArgs {
+            input,
+            target: Some(target),
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn apply_uses_explicit_target_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("selected.db");
+        let input = directory.path().join("matches.json");
+        alias_db(&target);
+        std::fs::write(
+            &input,
+            r#"[{"fan_translation":"New Match","alias_entry":{"bangumi_id":1,"name":"Example","tmdb_id":null,"anidb_id":null},"confidence":"High","reasoning":"test","source":"test"}]"#,
+        )
+        .unwrap();
+
+        let result = apply_matches_result(&crate::cli::ApplyMatchesArgs {
+            input,
+            target: Some(target.clone()),
+        })
+        .unwrap();
+        assert_eq!(result.added, 1);
+        let count: i64 = Connection::open(target)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM aliases", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
 }

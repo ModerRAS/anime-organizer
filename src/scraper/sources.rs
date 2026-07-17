@@ -461,6 +461,18 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_mock_source_fixture_deduplicates_titles() {
+        let results = parse_dmhy_rss(include_str!("../../tests/fixtures/dmhy-rss.xml"));
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Fixture Anime");
+        assert_eq!(
+            results[0].source_url.as_deref(),
+            Some("https://example.test/fixture/1")
+        );
+        assert_eq!(results[1].title, "Second Fixture");
+    }
+
+    #[test]
     fn test_scraped_source_display() {
         assert_eq!(ScrapedSource::Bangumi.to_string(), "Bangumi");
         assert_eq!(ScrapedSource::Tmdb.to_string(), "TMDB");

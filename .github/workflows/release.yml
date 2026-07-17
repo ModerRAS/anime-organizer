@@ -19,28 +19,37 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
+            features: --features scraper,clouddrive,torrent-scraper
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             archive: tar.gz
+            features: --features scraper,clouddrive,torrent-scraper
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
+            features: --features scraper,clouddrive,torrent-scraper
 
           # Windows
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             archive: zip
+            features: --all-features
+            extra_files: DirectML.dll
           - target: aarch64-pc-windows-msvc
             os: windows-latest
             archive: zip
+            features: --features scraper,clouddrive,torrent-scraper
+            extra_files: ""
 
           # macOS
           - target: x86_64-apple-darwin
             os: macos-latest
             archive: tar.gz
+            features: --features scraper,clouddrive,torrent-scraper
           - target: aarch64-apple-darwin
             os: macos-latest
             archive: tar.gz
+            features: --features scraper,clouddrive,torrent-scraper
 
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +59,11 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "29.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install cross-compilation tools (Linux)
         if: matrix.os == 'ubuntu-latest'
@@ -62,7 +76,7 @@ jobs:
           fi
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
@@ -78,7 +92,7 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
-          7z a ../../../aniorg-${{ matrix.target }}.zip aniorg.exe
+          7z a ../../../aniorg-${{ matrix.target }}.zip aniorg.exe ${{ matrix.extra_files }}
           cd ../../..
 
       - name: Upload artifact

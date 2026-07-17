@@ -85,6 +85,16 @@ cargo build --release --features "anifilebert-directml"
 
 如果本机默认是 GNU Rust 工具链，Windows 上验证 AniFileBERT/DirectML 时请显式指定 MSVC `rustc`。若 ONNX Runtime 在本地链接阶段报错，可将 `ORT_LIB_LOCATION` 指向解压后的 ORT 目录，并设置 `ORT_PREFER_DYNAMIC_LINK=1` 改走 import-lib/dll 路线。
 
+### Daemon 与 WebUI
+
+Windows 使用以下唯一入口启动本地 daemon：
+
+```powershell
+aniorg.exe --daemon
+```
+
+WebUI 和 typed WebAPI 仅监听 `http://127.0.0.1:32145/`。有限任务由一个持久化 worker 串行执行；daemon 数据位于 `%LOCALAPPDATA%\anime-organizer\daemon.db`。CloudDrive token、用户名和密码依赖当前 Windows 用户对该目录的 ACL 保护，以明文存储在本地数据库中，但不会由 API 返回，也不会写入浏览器存储。v1 仅适用于受信任的本机单用户环境。
+
 ### 🎯 快速开始
 
 #### 基本用法
@@ -755,6 +765,16 @@ cargo build --release --features "anifilebert-directml"
 The compiled binary is located at `target/release/aniorg`. `ANIORG_BERT_PROVIDER=cpu|auto|directml-gpu|directml-npu|directml-any` controls the ONNX Runtime provider; `ANIORG_DIRECTML_DEVICE_ID=0` pins a DirectML device. Without `anifilebert-directml`, the parser uses CPU. With it, the default is `auto`: try DirectML GPU first, then fall back to CPU. CPU threads can be tuned with `ANIORG_ORT_INTRA_THREADS` and `ANIORG_ORT_INTER_THREADS`; both default to `1`. `anifilebert-amd-npu` remains as a compatibility alias for `anifilebert-directml`; VitisAI requires an additional ONNX Runtime provider package and is not part of the default build.
 
 If your local Windows machine defaults to the GNU Rust toolchain, validate AniFileBERT/DirectML builds with the MSVC `rustc` explicitly. If ONNX Runtime fails during the local link step, point `ORT_LIB_LOCATION` at the extracted ORT directory and set `ORT_PREFER_DYNAMIC_LINK=1` to use the import-lib/dll path.
+
+### Daemon and WebUI
+
+On Windows, start the local daemon through its single entry point:
+
+```powershell
+aniorg.exe --daemon
+```
+
+The WebUI and typed WebAPI listen only on `http://127.0.0.1:32145/`. One durable worker executes finite jobs serially, with daemon state stored in `%LOCALAPPDATA%\anime-organizer\daemon.db`. CloudDrive tokens, usernames, and passwords rely on the current Windows user's ACL and are stored as plaintext in that local database; they are never returned by the API or stored in the browser. v1 is intended only for a trusted, single-user local machine.
 
 ### 🎯 Quick Start
 

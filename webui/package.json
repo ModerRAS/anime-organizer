@@ -1,0 +1,26 @@
+{
+  "name": "anime-organizer-webui",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "@vitejs/plugin-vue": "latest",
+    "lucide-vue-next": "latest",
+    "vue": "latest",
+    "vue-router": "latest"
+  },
+  "devDependencies": {
+    "@playwright/test": "latest",
+    "happy-dom": "latest",
+    "typescript": "^5.9.3",
+    "vite": "latest",
+    "vite-plugin-singlefile": "latest",
+    "vitest": "latest",
+    "vue-tsc": "^3.3.7"
+  }
+}

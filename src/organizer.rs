@@ -28,12 +28,14 @@
 
 use crate::error::{AppError, Result};
 use crate::parser::AnimeFileInfo;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 /// 文件操作模式
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OperationMode {
     /// 移动文件
     #[value(name = "move")]

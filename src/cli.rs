@@ -6,6 +6,7 @@ use anime_organizer::OperationMode;
 ))]
 use clap::Subcommand;
 use clap::{Args, Parser, ValueEnum};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 const APP_LONG_ABOUT: &str = concat!(
@@ -30,6 +31,11 @@ const APP_LONG_ABOUT: &str = concat!(
 #[command(about = "轻量级、跨平台动漫文件整理工具")]
 #[command(long_about = APP_LONG_ABOUT)]
 pub(crate) struct Cli {
+    /// 启动本地 WebAPI 守护进程
+    #[cfg(feature = "daemon")]
+    #[arg(long)]
+    pub(crate) daemon: bool,
+
     #[cfg(any(
         feature = "scraper",
         feature = "clouddrive",
@@ -42,7 +48,8 @@ pub(crate) struct Cli {
     pub(crate) organize: OrganizeArgs,
 }
 
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct OrganizeArgs {
     /// 源目录路径（整理模式必填）
     #[arg(short, long, value_name = "PATH")]
@@ -129,9 +136,11 @@ pub(crate) struct OrganizeArgs {
     pub(crate) filename_parser: FilenameParserMode,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum FilenameParserMode {
     /// 使用内置规则解析器
+    #[default]
     Rules,
     /// 使用嵌入的 AniFileBERT ONNX 模型解析器
     Anifilebert,
@@ -139,7 +148,8 @@ pub(crate) enum FilenameParserMode {
     Auto,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum FallbackMode {
     /// 移动文件
     Move,
@@ -204,10 +214,12 @@ pub(crate) enum Commands {
 }
 
 #[cfg(feature = "scraper")]
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct ScrapeArgs {
     /// 向前回溯的天数
     #[arg(long, default_value_t = 7)]
+    #[serde(default = "default_scrape_days")]
     pub(crate) days: u32,
 
     /// 输出格式
@@ -220,14 +232,22 @@ pub(crate) struct ScrapeArgs {
 }
 
 #[cfg(feature = "scraper")]
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ScrapeOutputFormat {
+    #[default]
     Json,
     Pretty,
 }
 
 #[cfg(feature = "scraper")]
-#[derive(Args, Debug, Clone)]
+fn default_scrape_days() -> u32 {
+    7
+}
+
+#[cfg(feature = "scraper")]
+#[derive(Args, Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct MatchArgs {
     /// scrape 子命令生成的 JSON 文件
     #[arg(long, value_name = "PATH")]
@@ -239,14 +259,17 @@ pub(crate) struct MatchArgs {
 }
 
 #[cfg(feature = "scraper")]
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum MatchOutputFormat {
     Json,
+    #[default]
     Github,
 }
 
 #[cfg(feature = "scraper")]
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct BuildDbArgs {
     #[arg(long, value_name = "PATH")]
     pub(crate) output: PathBuf,
@@ -259,7 +282,8 @@ pub(crate) struct BuildDbArgs {
 }
 
 #[cfg(feature = "scraper")]
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct ExtractAliasesArgs {
     /// 本地 subject.jsonlines 文件路径
     #[arg(long, value_name = "PATH")]
@@ -275,7 +299,8 @@ pub(crate) struct ExtractAliasesArgs {
 }
 
 #[cfg(feature = "scraper")]
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct MergeAliasesArgs {
     /// JSON file containing new aliases to merge
     #[arg(long, value_name = "PATH")]
@@ -287,7 +312,8 @@ pub(crate) struct MergeAliasesArgs {
 }
 
 #[cfg(feature = "scraper")]
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct ApplyMatchesArgs {
     /// JSON file containing confident match proposals
     #[arg(long, value_name = "PATH")]
@@ -299,7 +325,8 @@ pub(crate) struct ApplyMatchesArgs {
 }
 
 #[cfg(feature = "scraper")]
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct CreateAliasIssuesArgs {
     /// JSON file containing uncertain match proposals
     #[arg(long, value_name = "PATH")]
@@ -311,7 +338,8 @@ pub(crate) struct CreateAliasIssuesArgs {
 }
 
 #[cfg(feature = "clouddrive")]
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct RssArgs {
     /// 持续运行的 Daemon 模式
     #[arg(long)]
@@ -331,6 +359,7 @@ pub(crate) struct RssArgs {
 
     /// 轮询间隔（秒）
     #[arg(long, default_value_t = 300, value_name = "SECS")]
+    #[serde(default = "default_rss_interval")]
     pub(crate) rss_interval: u64,
 
     /// 115网盘目标目录
@@ -363,7 +392,8 @@ pub(crate) struct RssArgs {
 }
 
 #[cfg(feature = "clouddrive")]
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct AddOfflineArgs {
     /// magnet 链接或 .torrent 文件 URL
     #[arg(value_name = "MAGNET_OR_URL")]
@@ -383,7 +413,8 @@ pub(crate) struct AddOfflineArgs {
 }
 
 #[cfg(feature = "clouddrive")]
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct ListFolderArgs {
     /// CloudDrive2 服务地址
     #[arg(long, value_name = "URL")]
@@ -399,7 +430,8 @@ pub(crate) struct ListFolderArgs {
 }
 
 #[cfg(feature = "torrent-scraper")]
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct TorrentScrapeArgs {
     /// 数据来源：dmhy、nyaa 或 all
     #[arg(long, default_value = "all")]
@@ -411,6 +443,7 @@ pub(crate) struct TorrentScrapeArgs {
 
     /// 爬取页数（每页约 75 条）
     #[arg(long, default_value_t = 1)]
+    #[serde(default = "default_torrent_pages")]
     pub(crate) pages: u32,
 
     /// 输出文件路径
@@ -423,9 +456,21 @@ pub(crate) struct TorrentScrapeArgs {
 }
 
 #[cfg(feature = "torrent-scraper")]
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum TorrentSource {
     Dmhy,
     Nyaa,
+    #[default]
     All,
+}
+
+#[cfg(feature = "clouddrive")]
+fn default_rss_interval() -> u64 {
+    300
+}
+
+#[cfg(feature = "torrent-scraper")]
+fn default_torrent_pages() -> u32 {
+    1
 }

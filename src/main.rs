@@ -4,6 +4,8 @@
 
 mod cli;
 mod commands;
+#[cfg(feature = "daemon")]
+mod daemon;
 #[cfg(feature = "metadata")]
 mod mlip;
 #[cfg(feature = "metadata")]
@@ -70,6 +72,12 @@ fn main() {
 fn run() -> Result<(), AppError> {
     let cli = Cli::parse();
 
+    #[cfg(feature = "daemon")]
+    if cli.daemon {
+        reject_daemon_conflicts(&cli)?;
+        return daemon::run();
+    }
+
     if let Some(command) = cli.command {
         return run_command(command);
     }
@@ -84,11 +92,61 @@ fn run() -> Result<(), AppError> {
 )))]
 fn run() -> Result<(), AppError> {
     let cli = Cli::parse();
+
+    #[cfg(feature = "daemon")]
+    if cli.daemon {
+        reject_daemon_conflicts(&cli)?;
+        return daemon::run();
+    }
+
     run_organize_entry(cli.organize)
 }
 
+#[cfg(feature = "daemon")]
+fn reject_daemon_conflicts(cli: &Cli) -> Result<(), AppError> {
+    #[cfg(any(
+        feature = "scraper",
+        feature = "clouddrive",
+        feature = "torrent-scraper"
+    ))]
+    if cli.command.is_some() {
+        return Err(AppError::ParseError(
+            "--daemon cannot be combined with a subcommand".to_string(),
+        ));
+    }
+
+    let args = &cli.organize;
+    if args.source.is_some()
+        || args.target.is_some()
+        || args.fallback_on_link_failure.is_some()
+        || args.dry_run
+        || args.include_ext.is_some()
+        || args.verbose
+        || args.scrape_metadata
+        || args.tmdb_api_key.is_some()
+        || args.alias_file.is_some()
+        || args.no_images
+        || args.no_episode_metadata
+        || args.force_overwrite
+        || args.bangumi_cache.is_some()
+        || args.metadata_source.is_some()
+        || args.season_mode
+        || args.library_index
+        || args.mlip
+        || args.rebuild_library_index
+        || args.probe_runtime
+        || args.mode != OperationMode::Link
+        || args.filename_parser != FilenameParserMode::Rules
+    {
+        return Err(AppError::ParseError(
+            "--daemon cannot be combined with organize arguments".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(feature = "metadata")]
-fn run_organize_entry(args: OrganizeArgs) -> Result<(), AppError> {
+pub(crate) fn run_organize_entry(args: OrganizeArgs) -> Result<(), AppError> {
     if args.scrape_metadata || args.mlip {
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| AppError::MetadataFetchError(format!("创建异步运行时失败: {e}")))?;
@@ -99,7 +157,7 @@ fn run_organize_entry(args: OrganizeArgs) -> Result<(), AppError> {
 }
 
 #[cfg(not(feature = "metadata"))]
-fn run_organize_entry(args: OrganizeArgs) -> Result<(), AppError> {
+pub(crate) fn run_organize_entry(args: OrganizeArgs) -> Result<(), AppError> {
     if args.scrape_metadata || args.mlip {
         return Err(AppError::MetadataFetchError(
             "元数据功能未启用，请使用 --features metadata 编译".to_string(),
@@ -1202,5 +1260,74 @@ mod tests {
             library_series_root(Path::new("library"), &record, "Parsed Title"),
             Path::new("library").join("Physical Folder")
         );
+    }
+
+    #[cfg(feature = "daemon")]
+    #[test]
+    fn daemon_flag_parses_without_organize_arguments() {
+        let cli = Cli::try_parse_from(["aniorg", "--daemon"]).unwrap();
+        assert!(cli.daemon);
+        assert!(reject_daemon_conflicts(&cli).is_ok());
+    }
+
+    #[cfg(feature = "daemon")]
+    #[test]
+    fn daemon_rejects_source_arguments() {
+        let cli = Cli::try_parse_from(["aniorg", "--daemon", "--source", "downloads"]).unwrap();
+        assert!(reject_daemon_conflicts(&cli).is_err());
+    }
+
+    #[test]
+    fn organize_entry_copies_nested_subtitles_and_indexes_them() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let source_video = source.path().join("[ANi] Test Anime - 01 [1080P].mkv");
+        std::fs::write(&source_video, b"video").unwrap();
+        let subtitle_dir = source.path().join("Subs");
+        std::fs::create_dir(&subtitle_dir).unwrap();
+        std::fs::write(
+            subtitle_dir.join("[ANi] Test Anime - 01 [1080P].zh.srt"),
+            b"sub",
+        )
+        .unwrap();
+
+        run_organize_entry(OrganizeArgs {
+            source: Some(source.path().to_path_buf()),
+            target: Some(target.path().to_path_buf()),
+            mode: OperationMode::Copy,
+            library_index: true,
+            ..OrganizeArgs::default()
+        })
+        .unwrap();
+
+        let video = target
+            .path()
+            .join("Test Anime")
+            .join("[ANi] Test Anime - 01 [1080P].mkv");
+        assert!(video.exists());
+        assert!(video
+            .with_file_name("[ANi] Test Anime - 01 [1080P].zh.srt")
+            .exists());
+        let conn = rusqlite::Connection::open(LibraryIndex::database_path(target.path())).unwrap();
+        let subtitle_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM media_subtitle", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(subtitle_count, 1);
+    }
+
+    #[test]
+    fn organize_entry_dry_run_does_not_create_media() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("[ANi] Test Anime - 01.mkv"), b"video").unwrap();
+        run_organize_entry(OrganizeArgs {
+            source: Some(source.path().to_path_buf()),
+            target: Some(target.path().to_path_buf()),
+            mode: OperationMode::Copy,
+            dry_run: true,
+            ..OrganizeArgs::default()
+        })
+        .unwrap();
+        assert!(!target.path().join("Test Anime").exists());
     }
 }

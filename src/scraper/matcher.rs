@@ -630,6 +630,33 @@ mod tests {
     }
 
     #[test]
+    fn test_fixture_scrape_payload_matches_without_stdout() {
+        let scraped: Vec<ScrapedAnime> =
+            serde_json::from_str(include_str!("../../tests/fixtures/scraped-anime.json")).unwrap();
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            "Standard Fixture".to_string(),
+            AliasEntry {
+                bangumi_id: 42,
+                name: "Standard Fixture".to_string(),
+                tmdb_id: None,
+                anidb_id: None,
+            },
+        );
+
+        let result = match_aliases(&scraped, &aliases);
+        assert_eq!(result.confident.len(), 2);
+        assert!(result
+            .confident
+            .iter()
+            .any(|proposal| proposal.fan_translation == "Fixture Anime"));
+        assert!(result
+            .confident
+            .iter()
+            .any(|proposal| proposal.fan_translation == "示例动画"));
+    }
+
+    #[test]
     fn test_match_aliases_uses_existing_aliases() {
         let scraped = vec![ScrapedAnime {
             title: "ぼっち・ざ・ろっく！".to_string(),
