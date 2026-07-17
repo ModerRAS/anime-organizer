@@ -42,31 +42,31 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
-            features: scraper clouddrive
+            features: scraper clouddrive torrent-scraper
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             archive: tar.gz
-            features: scraper clouddrive
+            features: scraper clouddrive torrent-scraper
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
-            features: scraper clouddrive
+            features: scraper clouddrive torrent-scraper
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             archive: zip
-            features: scraper clouddrive anifilebert
+            features: scraper clouddrive torrent-scraper anifilebert-directml
           - target: aarch64-pc-windows-msvc
             os: windows-latest
             archive: zip
-            features: scraper clouddrive
+            features: scraper clouddrive torrent-scraper
           - target: x86_64-apple-darwin
             os: macos-latest
             archive: tar.gz
-            features: scraper clouddrive
+            features: scraper clouddrive torrent-scraper
           - target: aarch64-apple-darwin
             os: macos-latest
             archive: tar.gz
-            features: scraper clouddrive
+            features: scraper clouddrive torrent-scraper
 
     env:
       BUILD_VERSION: ${{ needs.meta.outputs.build_version }}
