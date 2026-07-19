@@ -50,6 +50,8 @@ const ANIMEATLAS_SQLITE_FILENAME: &str = "animeatlas.sqlite";
 const ANIMEATLAS_SQLITE_URL: &str =
     "https://github.com/ModerRAS/AnimeAtlas/releases/latest/download/animeatlas.sqlite";
 #[cfg(feature = "metadata")]
+const ANIMEATLAS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+#[cfg(feature = "metadata")]
 const HTTP_USER_AGENT: &str = concat!(
     "ModerRAS/anime-organizer/",
     env!("CARGO_PKG_VERSION"),
@@ -1197,6 +1199,9 @@ async fn download_animeatlas_alias_db(cache_dir: &Path) -> Result<PathBuf, AppEr
         .map_err(|e| AppError::MetadataFetchError(format!("创建缓存目录失败: {e}")))?;
 
     let db_path = cache_dir.join(ANIMEATLAS_SQLITE_FILENAME);
+    if animeatlas_cache_is_fresh(&db_path) {
+        return Ok(db_path);
+    }
 
     let client = reqwest::Client::builder()
         .user_agent(HTTP_USER_AGENT)
@@ -1235,6 +1240,23 @@ async fn download_animeatlas_alias_db(cache_dir: &Path) -> Result<PathBuf, AppEr
     Ok(db_path)
 }
 
+#[cfg(feature = "metadata")]
+fn animeatlas_cache_is_fresh(path: &Path) -> bool {
+    let Ok(modified) = path.metadata().and_then(|metadata| metadata.modified()) else {
+        return false;
+    };
+    animeatlas_timestamp_is_fresh(modified, std::time::SystemTime::now())
+}
+
+#[cfg(feature = "metadata")]
+fn animeatlas_timestamp_is_fresh(
+    modified: std::time::SystemTime,
+    now: std::time::SystemTime,
+) -> bool {
+    now.duration_since(modified)
+        .map_or(true, |age| age < ANIMEATLAS_CACHE_TTL)
+}
+
 fn has_valid_extension(path: &Path, extensions: &HashSet<String>) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -1245,6 +1267,32 @@ fn has_valid_extension(path: &Path, extensions: &HashSet<String>) -> bool {
 #[cfg(all(test, feature = "metadata"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn animeatlas_cache_refreshes_daily() {
+        let now = std::time::UNIX_EPOCH + ANIMEATLAS_CACHE_TTL * 2;
+        assert!(animeatlas_timestamp_is_fresh(
+            now - ANIMEATLAS_CACHE_TTL + std::time::Duration::from_secs(1),
+            now
+        ));
+        assert!(!animeatlas_timestamp_is_fresh(
+            now - ANIMEATLAS_CACHE_TTL,
+            now
+        ));
+        assert!(animeatlas_timestamp_is_fresh(
+            now + std::time::Duration::from_secs(1),
+            now
+        ));
+    }
+
+    #[test]
+    fn animeatlas_existing_cache_is_reused() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(ANIMEATLAS_SQLITE_FILENAME);
+        assert!(!animeatlas_cache_is_fresh(&path));
+        std::fs::write(&path, b"cache").unwrap();
+        assert!(animeatlas_cache_is_fresh(&path));
+    }
 
     #[test]
     fn library_artwork_uses_physical_series_directory() {
