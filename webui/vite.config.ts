@@ -5,5 +5,5 @@ import { viteSingleFile } from 'vite-plugin-singlefile'
 export default defineConfig({
   plugins: [vue(), viteSingleFile()],
   build: { cssCodeSplit: false, assetsInlineLimit: 100000000, rollupOptions: { output: { inlineDynamicImports: true } } },
-  server: { proxy: { '/api': 'http://127.0.0.1:32145' } },
+  server: { proxy: { '/api': { target: 'http://127.0.0.1:32145', changeOrigin: true } } },
 })

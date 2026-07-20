@@ -33,12 +33,17 @@ export class ApiError extends Error {
 export const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error)
 
 export type Subscription = { id: number; url: string; filter_regex: string | null; target_folder: string; interval_secs: number; enabled: boolean; last_checked_at: string | null; connection_id: number | null }
+export type ProcessedItem = { id: number; subscription_id: number; item_hash: string; title: string | null; processed_at: string | null }
+export type DownloadTask = { id: number; subscription_id: number; item_hash: string; cloud_name: string | null; status: string | null; added_at: string | null; completed_at: string | null }
 export type Connection = { id: number; name: string; url: string; has_token: boolean; has_username: boolean; has_password: boolean; created_at: string; updated_at: string }
+export type FolderEntry = { id: string; name: string; path: string; size: number; is_directory: boolean }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api/v1${path}`, { headers: { 'content-type': 'application/json' }, ...init })
+  if (response.status === 204) return undefined as T
   const body = await response.json().catch(() => null)
   if (!response.ok) throw new ApiError(body?.error?.code || 'request_failed', body?.error?.message || `API request failed (${response.status})`, response.status)
+  if (body === null) throw new ApiError('invalid_response', 'API returned an invalid response', response.status)
   return body as T
 }
 
@@ -63,14 +68,15 @@ export const api = {
   subscriptions: () => request<{ subscriptions: Subscription[] }>('/rss/subscriptions'),
   createSubscription: (value: Partial<Subscription> & { url: string; target_folder: string; interval_secs: number; connection_id?: number | null }) => request<Subscription>('/rss/subscriptions', { method: 'POST', body: JSON.stringify(value) }),
   updateSubscription: (id: number, value: Partial<Subscription>) => request<Subscription>(`/rss/subscriptions/${id}`, { method: 'PUT', body: JSON.stringify(value) }),
+  deleteSubscription: (id: number) => request<void>(`/rss/subscriptions/${id}`, { method: 'DELETE' }),
   setEnabled: (id: number, enabled: boolean) => request<Subscription>(`/rss/subscriptions/${id}/${enabled ? 'enable' : 'disable'}`, { method: 'POST' }),
   runSubscription: (id: number) => request<{ job: { id: number } }>(`/rss/subscriptions/${id}/run`, { method: 'POST' }),
   runAll: () => request<{ job: { id: number } }>('/rss/run', { method: 'POST' }),
-  processed: (id?: number) => request<{ items: unknown[] }>(`/rss/processed${id ? `?subscription_id=${id}` : ''}`),
-  tasks: (id?: number) => request<{ tasks: unknown[] }>(`/rss/download-tasks${id ? `?subscription_id=${id}` : ''}`),
+  processed: (id?: number) => request<{ items: ProcessedItem[] }>(`/rss/processed${id ? `?subscription_id=${id}` : ''}`),
+  tasks: (id?: number) => request<{ tasks: DownloadTask[] }>(`/rss/download-tasks${id ? `?subscription_id=${id}` : ''}`),
   connections: () => request<{ connections: Connection[] }>('/cloud/connections'),
   saveConnection: (value: Record<string, unknown>, id?: number) => request<Connection>(id ? `/cloud/connections/${id}` : '/cloud/connections', { method: id ? 'PUT' : 'POST', body: JSON.stringify(value) }),
   deleteConnection: (id: number) => request<void>(`/cloud/connections/${id}`, { method: 'DELETE' }),
   testConnection: (id: number) => request<{ ok: boolean }>(`/cloud/connections/${id}/test`, { method: 'POST' }),
-  listFolder: (id: number, path: string) => request<{ entries: { id: string; name: string; path: string; size: number; is_directory: boolean }[] }>(`/cloud/connections/${id}/list-folder`, { method: 'POST', body: JSON.stringify({ path }) }),
+  listFolder: (id: number, path: string) => request<{ entries: FolderEntry[] }>(`/cloud/connections/${id}/list-folder`, { method: 'POST', body: JSON.stringify({ path }) }),
 }

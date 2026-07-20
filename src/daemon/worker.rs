@@ -174,28 +174,14 @@ fn execute_cloud_add_offline(
         .repository
         .get(args.connection_id)
         .map_err(|error| error.to_string())?;
-    let mut client =
-        (runtime.cloud.client_factory)(&connection).map_err(|error| error.to_string())?;
     let async_runtime = tokio::runtime::Runtime::new()
         .map_err(|error| format!("failed to create CloudDrive runtime: {error}"))?;
     async_runtime.block_on(async {
-        if connection.token.is_none() {
-            let username = connection
-                .username
-                .as_deref()
-                .ok_or_else(|| "CloudDrive connection has no token or username".to_string())?;
-            let password = connection
-                .password
-                .as_deref()
-                .ok_or_else(|| "CloudDrive connection has no password".to_string())?;
-            tokio::time::timeout(
-                Duration::from_secs(super::cloud::CLOUD_OPERATION_TIMEOUT_SECS),
-                client.login(username, password),
-            )
+        let client = runtime
+            .cloud
+            .authenticated_client(&connection)
             .await
-            .map_err(|_| "CloudDrive login timed out".to_string())?
             .map_err(|error| error.to_string())?;
-        }
         tokio::time::timeout(
             Duration::from_secs(super::cloud::CLOUD_OPERATION_TIMEOUT_SECS),
             client.add_offline_files(vec![args.url.clone()], &args.target),

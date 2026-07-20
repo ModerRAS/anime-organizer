@@ -86,22 +86,11 @@ async fn poll_subscription(
         .repository
         .get(connection_id)
         .map_err(|error| error.to_string())?;
-    let mut client =
-        (runtime.cloud.client_factory)(&connection).map_err(|error| error.to_string())?;
-    if connection.token.is_none() {
-        let username = connection
-            .username
-            .as_deref()
-            .ok_or_else(|| "CloudDrive connection has no token or username".to_string())?;
-        let password = connection
-            .password
-            .as_deref()
-            .ok_or_else(|| "CloudDrive connection has no password".to_string())?;
-        client
-            .login(username, password)
-            .await
-            .map_err(|error| error.to_string())?;
-    }
+    let client = runtime
+        .cloud
+        .authenticated_client(&connection)
+        .await
+        .map_err(|error| error.to_string())?;
 
     let filter = subscription
         .filter_regex
@@ -146,6 +135,9 @@ pub(crate) fn start_scheduler(
                 continue;
             };
             for subscription in subscriptions {
+                if subscription.connection_id.is_none() {
+                    continue;
+                }
                 let key = format!("rss:{}:{}", subscription.id, due_window(&subscription));
                 let request = EnqueueRequest {
                     idempotency_key: Some(key),

@@ -2,6 +2,8 @@ use crate::cli::OrganizeArgs;
 use anime_organizer::OperationMode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -306,6 +308,11 @@ pub(crate) struct JobView {
 impl From<StoredJob> for JobView {
     fn from(job: StoredJob) -> Self {
         let mut request = serde_json::from_str(&job.request_json).unwrap_or(Value::Null);
+        if job.kind == "cloud_add_offline" {
+            if let Some(url) = request.pointer_mut("/args/url") {
+                *url = Value::String("[redacted]".to_string());
+            }
+        }
         redact_secrets(&mut request);
         let result = job
             .result_json
@@ -330,11 +337,20 @@ impl From<StoredJob> for JobView {
             progress_message: job.progress_message,
             result,
             error: job.error,
-            created_at: job.created_at,
-            started_at: job.started_at,
-            finished_at: job.finished_at,
+            created_at: format_job_timestamp(job.created_at),
+            started_at: job.started_at.map(format_job_timestamp),
+            finished_at: job.finished_at.map(format_job_timestamp),
         }
     }
+}
+
+fn format_job_timestamp(value: String) -> String {
+    value
+        .parse::<i64>()
+        .ok()
+        .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp).ok())
+        .and_then(|timestamp| timestamp.format(&Rfc3339).ok())
+        .unwrap_or(value)
 }
 
 fn redact_secrets(value: &mut Value) {
@@ -342,8 +358,12 @@ fn redact_secrets(value: &mut Value) {
         Value::Object(object) => {
             for (key, value) in object.iter_mut() {
                 let key = key.to_ascii_lowercase();
-                if key == "url"
-                    || key.contains("token")
+                if key == "url" {
+                    *value = match value.as_str() {
+                        Some(url) => Value::String(redact_url(url)),
+                        None => Value::String("[redacted]".to_string()),
+                    };
+                } else if key.contains("token")
                     || key.contains("password")
                     || key.ends_with("_pass")
                     || key.ends_with("_key")
@@ -357,6 +377,42 @@ fn redact_secrets(value: &mut Value) {
         Value::Array(values) => values.iter_mut().for_each(redact_secrets),
         _ => {}
     }
+}
+
+fn redact_url(value: &str) -> String {
+    let Ok(mut url) = url::Url::parse(value) else {
+        return "[redacted]".to_string();
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_fragment(None);
+    if url.query().is_some() {
+        let retained = url
+            .query_pairs()
+            .filter(|(key, _)| !is_sensitive_url_parameter(key))
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect::<Vec<_>>();
+        url.query_pairs_mut().clear().extend_pairs(retained);
+    }
+    url.to_string()
+}
+
+fn is_sensitive_url_parameter(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.contains("token")
+        || key.contains("apikey")
+        || key.contains("api-key")
+        || key.contains("password")
+        || key.contains("passkey")
+        || key.contains("secret")
+        || key.contains("signature")
+        || key.contains("credential")
+        || key == "auth"
+        || key.ends_with("_auth")
+        || key == "sig"
+        || key.ends_with("_sig")
+        || key == "key"
+        || key.ends_with("_key")
 }
 
 #[cfg(test)]
@@ -425,6 +481,7 @@ mod tests {
         let response = serde_json::to_string(&JobView::from(stored)).unwrap();
         assert!(!response.contains("secret"));
         assert!(response.contains("[redacted]"));
+        assert!(response.contains("1970-01-01T00:00:00Z"));
     }
 
     #[cfg(feature = "clouddrive")]
@@ -458,7 +515,20 @@ mod tests {
         let response = serde_json::to_string(&JobView::from(stored)).unwrap();
         assert!(!response.contains("passkey"));
         assert!(!response.contains("password"));
+        assert!(!response.contains("secret"));
+        assert!(!response.contains("example.test/file"));
         assert!(response.contains("[redacted]"));
+    }
+
+    #[test]
+    fn public_urls_remain_visible_in_job_views() {
+        let mut value = serde_json::json!({
+            "url": "https://example.test/public?id=42&apikey=secret",
+            "password": "secret"
+        });
+        redact_secrets(&mut value);
+        assert_eq!(value["url"], "https://example.test/public?id=42");
+        assert_eq!(value["password"], "[redacted]");
     }
 
     #[test]

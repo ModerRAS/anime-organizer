@@ -10,6 +10,11 @@ describe('API errors and job filters', () => {
     await expect(api.health()).rejects.toEqual(new ApiError('invalid_request', 'target is required', 422))
   })
 
+  it('rejects a successful non-JSON API response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('<html></html>', { status: 200 })))
+    await expect(api.health()).rejects.toEqual(new ApiError('invalid_response', 'API returned an invalid response', 200))
+  })
+
   it('accepts only known URL job states', () => {
     expect(jobQueryState('failed')).toBe('failed')
     expect(jobQueryState('unknown')).toBeUndefined()
@@ -17,7 +22,7 @@ describe('API errors and job filters', () => {
   })
 
   it('submits typed alias maintenance jobs with confirmation', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ job: { id: 8 }, duplicate: false }), { status: 202 }))
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ job: { id: 8 }, duplicate: false }), { status: 202 }))
     vi.stubGlobal('fetch', fetchMock)
     await api.enqueueMergeAliases({ input: 'aliases.json', target: 'selected.db' }, true)
     await api.enqueueApplyMatches({ input: 'matches.json', target: 'selected.db' }, false)
@@ -30,7 +35,7 @@ describe('API errors and job filters', () => {
   })
 
   it('submits typed scraper jobs without reading command output', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ job: { id: 7 }, duplicate: false }), { status: 202 }))
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ job: { id: 7 }, duplicate: false }), { status: 202 }))
     vi.stubGlobal('fetch', fetchMock)
     await api.enqueueScrape({ days: 7, format: 'json', tmdb_api_key: null })
     await api.enqueueMatchAliases({ input: 'scraped.json', format: 'github' })

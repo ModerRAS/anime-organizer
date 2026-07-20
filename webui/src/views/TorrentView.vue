@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 import { Download, FileSearch, Play, RefreshCw } from 'lucide-vue-next'
 import { RouterLink, useRouter } from 'vue-router'
 import { api, errorMessage, type Job, type JobArtifact } from '../api'
+import { formatDateTime, t, valueLabel } from '../i18n'
 
 const router = useRouter()
 const source = ref<'dmhy' | 'nyaa' | 'all'>('all')
@@ -52,44 +53,42 @@ async function submit() {
   } catch (reason) { error.value = errorMessage(reason) }
   finally { submitting.value = false }
 }
-function stateLabel(value: string) { return value.replaceAll('_', ' ') }
-function dateLabel(value: string) { return new Date(value).toLocaleString() }
 onMounted(load)
 </script>
 
 <template>
   <div class="page-header">
-    <div><p class="eyebrow">Torrent sources</p><h1>DMHY and Nyaa</h1><p class="page-subtitle">Queue bounded source scrapes and review unique torrent filenames.</p></div>
-    <button class="icon-button" type="button" title="Refresh torrent jobs" aria-label="Refresh torrent jobs" :disabled="loading" @click="load"><RefreshCw :size="16" :class="{ spinning: loading }" aria-hidden="true" /></button>
+    <div><p class="eyebrow">{{ t('Torrent sources') }}</p><h1>{{ t('DMHY and Nyaa') }}</h1><p class="page-subtitle">{{ t('Queue bounded source scrapes and review unique torrent filenames.') }}</p></div>
+    <button class="icon-button" type="button" :title="t('Refresh torrent jobs')" :aria-label="t('Refresh torrent jobs')" :disabled="loading" @click="load"><RefreshCw :size="16" :class="{ spinning: loading }" aria-hidden="true" /></button>
   </div>
   <p v-if="error" class="alert error" role="alert">{{ error }}</p>
 
   <section class="section-block scraper-form" aria-labelledby="torrent-form-heading">
-    <div class="section-heading"><div><p class="eyebrow">New scrape</p><h2 id="torrent-form-heading">Source parameters</h2></div><FileSearch :size="19" aria-hidden="true" /></div>
+    <div class="section-heading"><div><p class="eyebrow">{{ t('New scrape') }}</p><h2 id="torrent-form-heading">{{ t('Source parameters') }}</h2></div><FileSearch :size="19" aria-hidden="true" /></div>
     <form class="organize-form" @submit.prevent="submit">
       <div class="form-grid">
-        <label class="form-field"><span>Source</span><select v-model="source"><option value="all">DMHY and Nyaa</option><option value="dmhy">DMHY</option><option value="nyaa">Nyaa</option></select></label>
-        <label class="form-field"><span>Pages</span><input v-model.number="pages" type="number" min="1" max="2000" required /></label>
+        <label class="form-field"><span>{{ t('Source') }}</span><select v-model="source"><option value="all">{{ t('DMHY and Nyaa') }}</option><option value="dmhy">{{ t('DMHY') }}</option><option value="nyaa">{{ t('Nyaa') }}</option></select></label>
+        <label class="form-field"><span>{{ t('Pages') }}</span><input v-model.number="pages" type="number" min="1" max="2000" required /></label>
       </div>
-      <label v-if="source === 'nyaa'" class="form-field"><span>Nyaa search query <small>(optional)</small></span><input v-model="query" type="search" placeholder="anime" /></label>
-      <label class="form-field"><span>Output path <small>(optional)</small></span><input v-model="output" type="text" placeholder="C:\\data\\torrent-titles.txt" /></label>
-      <div class="form-actions"><span class="form-hint">Pages are clamped to 1-2000. Results include a text artifact and bounded preview.</span><button class="button primary" type="submit" :disabled="submitting"><Play :size="16" aria-hidden="true" />Queue scrape</button></div>
+      <label v-if="source === 'nyaa'" class="form-field"><span>{{ t('Nyaa search query') }} <small>{{ t('(optional)') }}</small></span><input v-model="query" type="search" placeholder="anime" /></label>
+      <label class="form-field"><span>{{ t('Output path') }} <small>{{ t('(optional)') }}</small></span><input v-model="output" type="text" placeholder="C:\\data\\torrent-titles.txt" /></label>
+      <div class="form-actions"><span class="form-hint">{{ t('Pages are clamped to 1-2000. Results include a text artifact and bounded preview.') }}</span><button class="button primary" type="submit" :disabled="submitting"><Play :size="16" aria-hidden="true" />{{ t('Queue scrape') }}</button></div>
     </form>
   </section>
 
   <section class="section-block" aria-labelledby="torrent-history-heading">
-    <div class="section-heading"><div><p class="eyebrow">History</p><h2 id="torrent-history-heading">Torrent scrape jobs</h2></div><span class="record-count">{{ jobs.length }} records</span></div>
-    <div class="table-wrap"><table><thead><tr><th>Job</th><th>Source</th><th>State</th><th>Unique titles</th><th>Preview</th><th>Artifact</th></tr></thead><tbody>
+    <div class="section-heading"><div><p class="eyebrow">{{ t('History') }}</p><h2 id="torrent-history-heading">{{ t('Torrent scrape jobs') }}</h2></div><span class="record-count">{{ t('{count} records', { count: jobs.length }) }}</span></div>
+    <div class="table-wrap"><table><thead><tr><th>{{ t('Job') }}</th><th>{{ t('Source') }}</th><th>{{ t('State') }}</th><th>{{ t('Unique titles') }}</th><th>{{ t('Preview') }}</th><th>{{ t('Artifact') }}</th></tr></thead><tbody>
       <tr v-for="job in jobs" :key="job.id">
-        <td><RouterLink :to="`/jobs/${job.id}`">#{{ job.id }}</RouterLink><small class="table-subtext">{{ dateLabel(job.created_at) }}</small></td>
+        <td><RouterLink :to="`/jobs/${job.id}`">#{{ job.id }}</RouterLink><small class="table-subtext">{{ formatDateTime(job.created_at) }}</small></td>
         <td>{{ jobSource(job) }}</td>
-        <td><span class="state" :class="job.state">{{ stateLabel(job.state) }}</span></td>
+        <td><span class="state" :class="job.state">{{ valueLabel(job.state) }}</span></td>
         <td>{{ resultData(job)?.count ?? '-' }}</td>
-        <td><ol v-if="resultData(job)?.preview?.length" class="torrent-preview"><li v-for="line in resultData(job)?.preview" :key="line">{{ line }}</li></ol><span v-if="resultData(job)?.preview_truncated" class="table-subtext">Preview truncated</span><span v-if="!resultData(job)?.preview?.length" class="table-subtext">No result yet</span></td>
+        <td><ol v-if="resultData(job)?.preview?.length" class="torrent-preview"><li v-for="line in resultData(job)?.preview" :key="line">{{ line }}</li></ol><span v-if="resultData(job)?.preview_truncated" class="table-subtext">{{ t('Preview truncated') }}</span><span v-if="!resultData(job)?.preview?.length" class="table-subtext">{{ t('No result yet') }}</span></td>
         <td><span v-if="!artifacts(job).length" class="table-subtext">-</span><a v-for="artifact in artifacts(job)" :key="artifact.id" class="download-link" :href="artifact.download_url" :download="artifact.name"><Download :size="14" aria-hidden="true" />{{ artifact.name }}</a></td>
       </tr>
-      <tr v-if="!loading && !jobs.length"><td colspan="6" class="empty-cell">No torrent scrape jobs yet.</td></tr>
+      <tr v-if="!loading && !jobs.length"><td colspan="6" class="empty-cell">{{ t('No torrent scrape jobs yet.') }}</td></tr>
     </tbody></table></div>
-    <p v-if="loading" class="loading-line">Refreshing torrent history...</p>
+    <p v-if="loading" class="loading-line">{{ t('Refreshing torrent history...') }}</p>
   </section>
 </template>

@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
 import { Activity, BriefcaseBusiness, ClipboardList, Cloud, FileSearch, Menu, Monitor, Radio, Tags, X } from 'lucide-vue-next'
+import { locale, setLocale, t } from './i18n'
 import { useStatus } from './stores/status'
 
 const navOpen = ref(false)
@@ -20,7 +21,7 @@ function closeNav() {
 <template>
   <div class="app-shell">
     <header class="topbar">
-      <button class="icon-button menu-button" type="button" aria-label="Open navigation" title="Open navigation" @click="navOpen = !navOpen">
+      <button class="icon-button menu-button" type="button" :aria-label="t(navOpen ? 'Close navigation' : 'Open navigation')" :title="t(navOpen ? 'Close navigation' : 'Open navigation')" :aria-expanded="navOpen" aria-controls="primary-navigation" @click="navOpen = !navOpen">
         <X v-if="navOpen" :size="19" aria-hidden="true" />
         <Menu v-else :size="19" aria-hidden="true" />
       </button>
@@ -28,31 +29,37 @@ function closeNav() {
         <span class="brand-mark"><Activity :size="17" aria-hidden="true" /></span>
         <span>anime-organizer</span>
       </RouterLink>
-      <div class="daemon-indicator" :class="{ online }" role="status">
-        <span class="status-dot" aria-hidden="true"></span>
-        <span>{{ online ? 'Daemon online' : 'Daemon unavailable' }}</span>
-        <span v-if="state.health" class="version">v{{ state.health.version }}</span>
+      <div class="topbar-actions">
+        <div class="locale-switch" role="group" :aria-label="t('Language')">
+          <button type="button" :class="{ active: locale === 'zh-CN' }" :aria-pressed="locale === 'zh-CN'" @click="setLocale('zh-CN')">中文</button>
+          <button type="button" :class="{ active: locale === 'en' }" :aria-pressed="locale === 'en'" @click="setLocale('en')">EN</button>
+        </div>
+        <div class="daemon-indicator" :class="{ online }" role="status">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span>{{ t(online ? 'Daemon online' : 'Daemon unavailable') }}</span>
+          <span v-if="state.health" class="version">v{{ state.health.version }}</span>
+        </div>
       </div>
     </header>
 
     <div class="shell-body">
-      <aside class="sidebar" :class="{ open: navOpen }" aria-label="Primary navigation">
+      <aside id="primary-navigation" class="sidebar" :class="{ open: navOpen }" :aria-label="t('Primary navigation')">
         <nav class="nav-list">
-          <RouterLink to="/" @click="closeNav"><Monitor :size="17" aria-hidden="true" />Dashboard</RouterLink>
-          <RouterLink to="/jobs" @click="closeNav"><BriefcaseBusiness :size="17" aria-hidden="true" />Jobs</RouterLink>
-          <RouterLink to="/organize" @click="closeNav"><ClipboardList :size="17" aria-hidden="true" />Organize</RouterLink>
-          <RouterLink v-if="scraperAvailable" to="/scraper" @click="closeNav"><FileSearch :size="17" aria-hidden="true" />Scraper</RouterLink>
-          <RouterLink v-if="torrentAvailable" to="/torrent" @click="closeNav"><FileSearch :size="17" aria-hidden="true" />Torrents</RouterLink>
-          <RouterLink v-if="aliasesAvailable" to="/aliases" @click="closeNav"><Tags :size="17" aria-hidden="true" />Aliases</RouterLink>
-          <RouterLink v-if="clouddriveAvailable" to="/rss" @click="closeNav"><Radio :size="17" aria-hidden="true" />RSS</RouterLink>
-          <RouterLink v-if="clouddriveAvailable" to="/cloud" @click="closeNav"><Cloud :size="17" aria-hidden="true" />CloudDrive</RouterLink>
+          <RouterLink to="/" @click="closeNav"><Monitor :size="17" aria-hidden="true" />{{ t('Dashboard') }}</RouterLink>
+          <RouterLink to="/jobs" @click="closeNav"><BriefcaseBusiness :size="17" aria-hidden="true" />{{ t('Jobs') }}</RouterLink>
+          <RouterLink to="/organize" @click="closeNav"><ClipboardList :size="17" aria-hidden="true" />{{ t('Organize') }}</RouterLink>
+          <RouterLink v-if="scraperAvailable" to="/scraper" @click="closeNav"><FileSearch :size="17" aria-hidden="true" />{{ t('Scraper') }}</RouterLink>
+          <RouterLink v-if="torrentAvailable" to="/torrent" @click="closeNav"><FileSearch :size="17" aria-hidden="true" />{{ t('Torrents') }}</RouterLink>
+          <RouterLink v-if="aliasesAvailable" to="/aliases" @click="closeNav"><Tags :size="17" aria-hidden="true" />{{ t('Aliases') }}</RouterLink>
+          <RouterLink v-if="clouddriveAvailable" to="/rss" @click="closeNav"><Radio :size="17" aria-hidden="true" />{{ t('RSS') }}</RouterLink>
+          <RouterLink v-if="clouddriveAvailable" to="/cloud" @click="closeNav"><Cloud :size="17" aria-hidden="true" />{{ t('CloudDrive') }}</RouterLink>
         </nav>
         <div class="sidebar-footer">
-          <RouterLink to="/about" @click="closeNav">About</RouterLink>
-          <span v-if="state.capabilities" class="capability-count">{{ state.capabilities.job_types.length }} job types enabled</span>
+          <RouterLink to="/about" @click="closeNav">{{ t('About') }}</RouterLink>
+          <span v-if="state.capabilities" class="capability-count">{{ t('{count} job types enabled', { count: state.capabilities.job_types.length }) }}</span>
         </div>
       </aside>
-      <button v-if="navOpen" class="nav-scrim" type="button" aria-label="Close navigation" @click="closeNav"></button>
+      <button v-if="navOpen" class="nav-scrim" type="button" :aria-label="t('Close navigation')" @click="closeNav"></button>
       <main class="main-content" @click="closeNav">
         <RouterView />
       </main>

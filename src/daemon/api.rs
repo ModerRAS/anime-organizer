@@ -12,7 +12,8 @@ use super::{web, DaemonState};
 use anime_organizer::rss::db::RssDatabase;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Json, Path, Query, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, HeaderValue, Request, StatusCode, Uri};
+use axum::middleware::{self, Next};
 use axum::response::Response;
 #[cfg(feature = "clouddrive")]
 use axum::routing::put;
@@ -81,9 +82,55 @@ pub(crate) fn router(state: Arc<DaemonState>) -> Router {
             .route("/api/v1/rss/download-tasks", get(list_download_tasks));
     }
     router
-        .fallback(web::index)
+        .fallback(not_found_or_index)
         .layer(DefaultBodyLimit::max(1024 * 1024))
+        .layer(middleware::from_fn(restrict_local_requests))
         .with_state(state)
+}
+
+async fn restrict_local_requests(request: Request<Body>, next: Next) -> Response {
+    let host_allowed = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(local_host_allowed);
+    let origin_allowed = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .is_none_or(local_origin_allowed);
+    if !host_allowed || !origin_allowed {
+        return error(
+            StatusCode::FORBIDDEN,
+            "forbidden_origin",
+            "daemon API is available only from the local WebUI",
+        );
+    }
+    next.run(request).await
+}
+
+fn local_host_allowed(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "127.0.0.1:32145" | "localhost:32145" | "[::1]:32145"
+    )
+}
+
+fn local_origin_allowed(value: &str) -> bool {
+    url::Url::parse(value).ok().is_some_and(|url| {
+        url.scheme() == "http"
+            && url.username().is_empty()
+            && url.password().is_none()
+            && matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
+    })
+}
+
+async fn not_found_or_index(uri: Uri) -> Response {
+    if uri.path().starts_with("/api/v1/") || uri.path() == "/api/v1" {
+        error(StatusCode::NOT_FOUND, "not_found", "API endpoint not found")
+    } else {
+        web::index().await.into_response()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -444,14 +491,20 @@ fn validate_rss_request(
     state: &DaemonState,
     request: &RssSubscriptionRequest,
 ) -> Result<(), Response> {
-    if request.url.trim().is_empty()
+    let parsed_url = url::Url::parse(&request.url).ok();
+    if request.url.trim() != request.url
         || request.url.len() > 8192
-        || !(request.url.starts_with("http://") || request.url.starts_with("https://"))
+        || !parsed_url.as_ref().is_some_and(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+        })
     {
         return Err(error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_request",
-            "url must be an HTTP(S) URL of at most 8192 bytes",
+            "url must be an HTTP(S) URL of at most 8192 bytes without embedded credentials",
         ));
     }
     if request.target_folder.trim().is_empty() || request.target_folder.len() > 4096 {
@@ -479,20 +532,31 @@ fn validate_rss_request(
             ));
         }
     }
-    if let Some(connection_id) = request.connection_id {
-        match state.cloud.repository.get(connection_id) {
-            Ok(_) => {}
-            Err(CloudError::NotFound(_)) => {
-                return Err(error(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "invalid_request",
-                    "connection_id was not found",
-                ));
-            }
-            Err(cloud_failure) => return Err(cloud_error(cloud_failure)),
-        }
+    validate_rss_connection(state, request.connection_id)
+}
+
+#[cfg(feature = "clouddrive")]
+#[allow(clippy::result_large_err)]
+fn validate_rss_connection(
+    state: &DaemonState,
+    connection_id: Option<i64>,
+) -> Result<(), Response> {
+    let Some(connection_id) = connection_id else {
+        return Err(error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            "connection_id is required",
+        ));
+    };
+    match state.cloud.repository.get(connection_id) {
+        Ok(_) => Ok(()),
+        Err(CloudError::NotFound(_)) => Err(error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            "connection_id was not found",
+        )),
+        Err(cloud_failure) => Err(cloud_error(cloud_failure)),
     }
-    Ok(())
 }
 
 #[cfg(feature = "clouddrive")]
@@ -630,6 +694,29 @@ async fn set_rss_enabled(state: Arc<DaemonState>, id: i64, enabled: bool) -> Res
         Ok(db) => db,
         Err(response) => return response,
     };
+    if enabled {
+        match db.get_subscription(id) {
+            Ok(Some(subscription)) => {
+                if let Err(response) = validate_rss_connection(&state, subscription.connection_id) {
+                    return response;
+                }
+            }
+            Ok(None) => {
+                return error(
+                    StatusCode::NOT_FOUND,
+                    "not_found",
+                    format!("RSS subscription {id} was not found"),
+                )
+            }
+            Err(db_error) => {
+                return error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    db_error.to_string(),
+                )
+            }
+        }
+    }
     match db.set_subscription_enabled(id, enabled) {
         Ok(()) => match db.get_subscription(id) {
             Ok(Some(subscription)) => Json(subscription).into_response(),
@@ -702,6 +789,9 @@ async fn run_rss_subscription(
     };
     match db.get_subscription(id) {
         Ok(Some(subscription)) if subscription.enabled => {
+            if let Err(response) = validate_rss_connection(&state, subscription.connection_id) {
+                return response;
+            }
             enqueue_rss(
                 &state,
                 JobSpec::RssPoll {
@@ -731,6 +821,25 @@ async fn run_rss_subscription(
 
 #[cfg(feature = "clouddrive")]
 async fn run_all_rss_subscriptions(State(state): State<Arc<DaemonState>>) -> Response {
+    let db = match rss_db(&state) {
+        Ok(db) => db,
+        Err(response) => return response,
+    };
+    let subscriptions = match db.list_subscriptions() {
+        Ok(subscriptions) => subscriptions,
+        Err(db_error) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                db_error.to_string(),
+            )
+        }
+    };
+    for subscription in subscriptions {
+        if let Err(response) = validate_rss_connection(&state, subscription.connection_id) {
+            return response;
+        }
+    }
     enqueue_rss(&state, JobSpec::RssPollAll, None).await
 }
 
@@ -952,56 +1061,18 @@ async fn test_cloud_connection(
         Ok(connection) => connection,
         Err(error) => return cloud_error(error),
     };
-    let mut client = match (state.cloud.client_factory)(&connection) {
+    let client = match state.cloud.authenticated_client(&connection).await {
         Ok(client) => client,
-        Err(_) => return cloud_error(CloudError::Operation),
+        Err(error) => return cloud_error(error),
     };
-    let token = if let Some(username) = connection.username.as_deref() {
-        let Some(password) = connection.password.as_deref() else {
-            return cloud_error(CloudError::Invalid(
-                "username requires a password".to_string(),
-            ));
-        };
-        if connection.token.is_some() {
-            match tokio::time::timeout(
-                Duration::from_secs(CLOUD_OPERATION_TIMEOUT_SECS),
-                client.list_folder("/"),
-            )
-            .await
-            {
-                Ok(Ok(_)) => None,
-                Ok(Err(_)) | Err(_) => return cloud_error(CloudError::Operation),
-            }
-        } else {
-            match tokio::time::timeout(
-                Duration::from_secs(CLOUD_OPERATION_TIMEOUT_SECS),
-                client.login(username, password),
-            )
-            .await
-            {
-                Ok(Ok(token)) => Some(token),
-                Ok(Err(_)) | Err(_) => return cloud_error(CloudError::Operation),
-            }
-        }
-    } else if connection.token.is_some() {
-        match tokio::time::timeout(
-            Duration::from_secs(CLOUD_OPERATION_TIMEOUT_SECS),
-            client.list_folder("/"),
-        )
-        .await
-        {
-            Ok(Ok(_)) => None,
-            Ok(Err(_)) | Err(_) => return cloud_error(CloudError::Operation),
-        }
-    } else {
-        return cloud_error(CloudError::Invalid(
-            "connection requires a token or username/password".to_string(),
-        ));
-    };
-    if let Some(token) = token {
-        if let Err(error) = state.cloud.repository.set_token(id, &token) {
-            return cloud_error(error);
-        }
+    match tokio::time::timeout(
+        Duration::from_secs(CLOUD_OPERATION_TIMEOUT_SECS),
+        client.list_folder("/"),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(_)) | Err(_) => return cloud_error(CloudError::Operation),
     }
     Json(CloudTestResponse {
         ok: true,
@@ -1038,34 +1109,10 @@ async fn list_cloud_folder(
         Ok(connection) => connection,
         Err(error) => return cloud_error(error),
     };
-    let mut client = match (state.cloud.client_factory)(&connection) {
+    let client = match state.cloud.authenticated_client(&connection).await {
         Ok(client) => client,
-        Err(_) => return cloud_error(CloudError::Operation),
+        Err(error) => return cloud_error(error),
     };
-    if connection.token.is_none() {
-        let Some(username) = connection.username.as_deref() else {
-            return cloud_error(CloudError::Invalid(
-                "connection requires a token or username/password".to_string(),
-            ));
-        };
-        let Some(password) = connection.password.as_deref() else {
-            return cloud_error(CloudError::Invalid(
-                "username requires a password".to_string(),
-            ));
-        };
-        let token = match tokio::time::timeout(
-            Duration::from_secs(CLOUD_OPERATION_TIMEOUT_SECS),
-            client.login(username, password),
-        )
-        .await
-        {
-            Ok(Ok(token)) => token,
-            Ok(Err(_)) | Err(_) => return cloud_error(CloudError::Operation),
-        };
-        if let Err(error) = state.cloud.repository.set_token(id, &token) {
-            return cloud_error(error);
-        }
-    }
     let files = match tokio::time::timeout(
         Duration::from_secs(CLOUD_OPERATION_TIMEOUT_SECS),
         client.list_folder(&request.path),
@@ -1122,6 +1169,25 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
+    #[test]
+    fn local_host_and_origin_validation_rejects_rebinding() {
+        assert!(local_host_allowed("127.0.0.1:32145"));
+        assert!(local_host_allowed("LOCALHOST:32145"));
+        assert!(!local_host_allowed("attacker.example"));
+        assert!(local_origin_allowed("http://127.0.0.1:4173"));
+        assert!(local_origin_allowed("http://localhost:32145"));
+        assert!(!local_origin_allowed("https://attacker.example"));
+        assert!(!local_origin_allowed("null"));
+    }
+
+    #[tokio::test]
+    async fn api_fallback_is_json_not_found() {
+        let response = not_found_or_index("/api/v1/missing".parse().unwrap()).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response = not_found_or_index("/jobs/1".parse().unwrap()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
     #[cfg(feature = "clouddrive")]
     mod cloud_handlers {
         use super::*;
@@ -1138,9 +1204,11 @@ mod tests {
         use std::sync::{mpsc, Arc, Mutex};
         use tempfile::tempdir;
 
+        type LoginCalls = Arc<Mutex<Vec<(String, String)>>>;
+
         #[derive(Clone)]
         struct MockCloudClient {
-            login_calls: Arc<Mutex<Vec<(String, String)>>>,
+            login_calls: LoginCalls,
         }
 
         #[async_trait]
@@ -1172,7 +1240,7 @@ mod tests {
             }
         }
 
-        fn test_state(directory: &std::path::Path) -> Arc<DaemonState> {
+        fn test_state(directory: &std::path::Path) -> (Arc<DaemonState>, LoginCalls) {
             let repository = CloudConnectionRepository::new(&directory.join("daemon.db")).unwrap();
             let login_calls = Arc::new(Mutex::new(Vec::new()));
             let mock = MockCloudClient {
@@ -1182,14 +1250,17 @@ mod tests {
                 Arc::new(move |_| Ok(Box::new(mock.clone()) as Box<dyn CloudDriveClientTrait>));
             let queue = QueueRepository::new(&directory.join("daemon.db")).unwrap();
             let (wake, _) = mpsc::channel();
-            Arc::new(DaemonState {
-                queue,
-                cloud: CloudDriveState::with_factory(repository, factory),
-                rss_db_path: directory.join("rss.db"),
-                started_at: std::time::Instant::now(),
-                wake,
-                worker: Arc::new(Mutex::new(WorkerSnapshot::default())),
-            })
+            (
+                Arc::new(DaemonState {
+                    queue,
+                    cloud: CloudDriveState::with_factory(repository, factory),
+                    rss_db_path: directory.join("rss.db"),
+                    started_at: std::time::Instant::now(),
+                    wake,
+                    worker: Arc::new(Mutex::new(WorkerSnapshot::default())),
+                }),
+                login_calls,
+            )
         }
 
         async fn body_text(response: Response) -> String {
@@ -1197,10 +1268,29 @@ mod tests {
             String::from_utf8(body.to_vec()).unwrap()
         }
 
+        fn create_test_connection(state: &Arc<DaemonState>) -> i64 {
+            state
+                .cloud
+                .repository
+                .create(
+                    &CloudConnectionRequest {
+                        name: "rss".to_string(),
+                        url: "http://localhost:19798".to_string(),
+                        token: Some("token".to_string()),
+                        username: None,
+                        password: None,
+                    }
+                    .normalize()
+                    .unwrap(),
+                )
+                .unwrap()
+                .id
+        }
+
         #[tokio::test]
         async fn connection_handlers_redact_login_and_list_folders() {
             let directory = tempdir().unwrap();
-            let state = test_state(directory.path());
+            let (state, login_calls) = test_state(directory.path());
             let response = create_cloud_connection(
                 State(state.clone()),
                 Ok(Json(CloudConnectionRequest {
@@ -1252,12 +1342,13 @@ mod tests {
             let body = body_text(response).await;
             assert!(body.contains("Anime"));
             assert!(body.contains("/Anime"));
+            assert_eq!(login_calls.lock().unwrap().len(), 3);
         }
 
         #[tokio::test]
         async fn folder_handler_rejects_unbounded_paths() {
             let directory = tempdir().unwrap();
-            let state = test_state(directory.path());
+            let (state, _) = test_state(directory.path());
             let response = list_cloud_folder(
                 State(state),
                 Path(1),
@@ -1272,7 +1363,20 @@ mod tests {
         #[tokio::test]
         async fn rss_interval_matches_scheduler_granularity() {
             let directory = tempdir().unwrap();
-            let state = test_state(directory.path());
+            let (state, _) = test_state(directory.path());
+            let malformed = create_rss_subscription(
+                State(state.clone()),
+                Ok(Json(RssSubscriptionRequest {
+                    url: "https://".to_string(),
+                    filter_regex: None,
+                    target_folder: "/anime".to_string(),
+                    interval_secs: 300,
+                    connection_id: None,
+                })),
+            )
+            .await;
+            assert_eq!(malformed.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
             let too_fast = create_rss_subscription(
                 State(state.clone()),
                 Ok(Json(RssSubscriptionRequest {
@@ -1286,6 +1390,7 @@ mod tests {
             .await;
             assert_eq!(too_fast.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
+            let connection_id = create_test_connection(&state);
             let accepted = create_rss_subscription(
                 State(state),
                 Ok(Json(RssSubscriptionRequest {
@@ -1293,7 +1398,7 @@ mod tests {
                     filter_regex: None,
                     target_folder: "/anime".to_string(),
                     interval_secs: 30,
-                    connection_id: None,
+                    connection_id: Some(connection_id),
                 })),
             )
             .await;
@@ -1303,7 +1408,7 @@ mod tests {
         #[tokio::test]
         async fn referenced_cloud_connection_cannot_be_deleted() {
             let directory = tempdir().unwrap();
-            let state = test_state(directory.path());
+            let (state, _) = test_state(directory.path());
             let connection = state
                 .cloud
                 .repository
@@ -1338,9 +1443,34 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn legacy_rss_without_connection_cannot_run_or_enable() {
+            let directory = tempdir().unwrap();
+            let (state, _) = test_state(directory.path());
+            let db = RssDatabase::new(&state.rss_db_path).unwrap();
+            let id = db
+                .add_subscription_with_connection(
+                    "https://example.test/legacy.xml",
+                    None,
+                    "/anime",
+                    300,
+                    None,
+                )
+                .unwrap();
+
+            let response = run_rss_subscription(State(state.clone()), Path(id)).await;
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let response = run_all_rss_subscriptions(State(state.clone())).await;
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            db.set_subscription_enabled(id, false).unwrap();
+            let response = enable_rss_subscription(State(state), Path(id)).await;
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+
+        #[tokio::test]
         async fn rss_run_now_uses_registered_typed_job_and_resource_conflict() {
             let directory = tempdir().unwrap();
-            let state = test_state(directory.path());
+            let (state, _) = test_state(directory.path());
+            let connection_id = create_test_connection(&state);
             let response = create_rss_subscription(
                 State(state.clone()),
                 Ok(Json(RssSubscriptionRequest {
@@ -1348,7 +1478,7 @@ mod tests {
                     filter_regex: None,
                     target_folder: "/anime".to_string(),
                     interval_secs: 300,
-                    connection_id: None,
+                    connection_id: Some(connection_id),
                 })),
             )
             .await;

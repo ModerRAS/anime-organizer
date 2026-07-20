@@ -91,6 +91,16 @@ impl CloudConnectionRequest {
         let token = non_empty(self.token);
         let username = non_empty(self.username);
         let password = non_empty(self.password);
+        if username.is_some() != password.is_some() {
+            return Err(CloudError::Invalid(
+                "username and password must be provided together".to_string(),
+            ));
+        }
+        if token.is_some() && username.is_some() {
+            return Err(CloudError::Invalid(
+                "choose either token or username/password authentication".to_string(),
+            ));
+        }
         if token.as_ref().is_some_and(|value| value.len() > 16 * 1024)
             || username.as_ref().is_some_and(|value| value.len() > 1024)
             || password
@@ -195,6 +205,32 @@ impl CloudDriveState {
             client_factory,
         }
     }
+
+    pub(crate) async fn authenticated_client(
+        &self,
+        connection: &StoredCloudConnection,
+    ) -> CloudResult<Box<dyn CloudDriveClientTrait>> {
+        let mut client = (self.client_factory)(connection).map_err(|_| CloudError::Operation)?;
+        if let Some(username) = connection.username.as_deref() {
+            let password = connection
+                .password
+                .as_deref()
+                .ok_or_else(|| CloudError::Invalid("username requires a password".to_string()))?;
+            let token = tokio::time::timeout(
+                std::time::Duration::from_secs(CLOUD_OPERATION_TIMEOUT_SECS),
+                client.login(username, password),
+            )
+            .await
+            .map_err(|_| CloudError::Operation)?
+            .map_err(|_| CloudError::Operation)?;
+            self.repository.set_token(connection.id, &token)?;
+        } else if connection.token.is_none() {
+            return Err(CloudError::Invalid(
+                "connection requires a token or username/password".to_string(),
+            ));
+        }
+        Ok(client)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -262,6 +298,11 @@ impl CloudConnectionRepository {
         &self,
         request: &CloudConnectionRequest,
     ) -> CloudResult<StoredCloudConnection> {
+        if request.token.is_none() && request.username.is_none() {
+            return Err(CloudError::Invalid(
+                "a token or username/password login is required".to_string(),
+            ));
+        }
         let now = now_string();
         self.with_connection(|connection| {
             connection
@@ -289,7 +330,7 @@ impl CloudConnectionRepository {
         let changed = self.with_connection(|connection| {
             connection
                 .execute(
-                    "UPDATE cloud_connections SET name = ?1, url = ?2, token = COALESCE(?3, token), username = COALESCE(?4, username), password = COALESCE(?5, password), updated_at = ?6 WHERE id = ?7",
+                    "UPDATE cloud_connections SET name = ?1, url = ?2, token = CASE WHEN ?3 IS NOT NULL THEN ?3 WHEN ?4 IS NOT NULL THEN NULL ELSE token END, username = CASE WHEN ?3 IS NOT NULL THEN NULL WHEN ?4 IS NOT NULL THEN ?4 ELSE username END, password = CASE WHEN ?3 IS NOT NULL THEN NULL WHEN ?4 IS NOT NULL THEN ?5 ELSE password END, updated_at = ?6 WHERE id = ?7",
                     params![request.name, request.url, request.token, request.username, request.password, now_string(), id],
                 )
                 .map_err(|error| CloudError::Database(error.to_string()))
@@ -362,8 +403,8 @@ mod tests {
             name: "primary".to_string(),
             url: "http://localhost:19798".to_string(),
             token: Some("secret-token".to_string()),
-            username: Some("user".to_string()),
-            password: Some("secret-password".to_string()),
+            username: None,
+            password: None,
         }
     }
 
@@ -376,8 +417,8 @@ mod tests {
         let view = CloudConnectionView::from(&created);
         let json = serde_json::to_string(&view).unwrap();
         assert!(!json.contains("secret-token"));
-        assert!(!json.contains("secret-password"));
-        assert!(view.has_token && view.has_username && view.has_password);
+        assert!(view.has_token);
+        assert!(!view.has_username && !view.has_password);
 
         let updated = repository
             .update(
@@ -402,6 +443,47 @@ mod tests {
     }
 
     #[test]
+    fn credential_updates_replace_the_previous_mode() {
+        let directory = tempdir().unwrap();
+        let repository =
+            CloudConnectionRepository::new(&directory.path().join("daemon.db")).unwrap();
+        let created = repository.create(&request()).unwrap();
+        let login = repository
+            .update(
+                created.id,
+                &CloudConnectionRequest {
+                    name: "primary".to_string(),
+                    url: "https://localhost".to_string(),
+                    token: None,
+                    username: Some("user".to_string()),
+                    password: Some("password".to_string()),
+                }
+                .normalize()
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(login.token.is_none());
+        assert_eq!(login.username.as_deref(), Some("user"));
+
+        let token = repository
+            .update(
+                created.id,
+                &CloudConnectionRequest {
+                    name: "primary".to_string(),
+                    url: "https://localhost".to_string(),
+                    token: Some("replacement".to_string()),
+                    username: None,
+                    password: None,
+                }
+                .normalize()
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(token.token.as_deref(), Some("replacement"));
+        assert!(token.username.is_none() && token.password.is_none());
+    }
+
+    #[test]
     fn request_normalization_rejects_unbounded_or_non_http_values() {
         let invalid = CloudConnectionRequest {
             name: " ".to_string(),
@@ -411,5 +493,37 @@ mod tests {
             password: None,
         };
         assert!(matches!(invalid.normalize(), Err(CloudError::Invalid(_))));
+
+        let incomplete_login = CloudConnectionRequest {
+            name: "primary".to_string(),
+            url: "https://localhost".to_string(),
+            token: None,
+            username: Some("user".to_string()),
+            password: None,
+        };
+        assert!(matches!(
+            incomplete_login.normalize(),
+            Err(CloudError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn connection_creation_requires_credentials() {
+        let directory = tempdir().unwrap();
+        let repository =
+            CloudConnectionRepository::new(&directory.path().join("daemon.db")).unwrap();
+        let request = CloudConnectionRequest {
+            name: "primary".to_string(),
+            url: "https://localhost".to_string(),
+            token: None,
+            username: None,
+            password: None,
+        }
+        .normalize()
+        .unwrap();
+        assert!(matches!(
+            repository.create(&request),
+            Err(CloudError::Invalid(_))
+        ));
     }
 }
