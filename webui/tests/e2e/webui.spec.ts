@@ -80,11 +80,21 @@ test('keeps page sections padded on desktop and mobile', async ({ page }) => {
       border: style.borderLeftWidth,
       leftInset: Math.round(heading.left - box.left),
       rightPadding: parseFloat(style.paddingRight),
+      emptyBottomPadding: getComputedStyle(element.querySelector('.empty-state')!).paddingBottom,
     }
   })
   expect(spacing.border).toBe('1px')
   expect(spacing.leftInset).toBeGreaterThanOrEqual(16)
   expect(spacing.rightPadding).toBeGreaterThanOrEqual(16)
+  expect(spacing.emptyBottomPadding).toBe('0px')
+
+  await page.goto('/organize')
+  const formSections = page.locator('.organize-form > .section-block')
+  const firstFormSection = await formSections.nth(0).boundingBox()
+  const secondFormSection = await formSections.nth(1).boundingBox()
+  expect(Math.round(secondFormSection!.y - firstFormSection!.y - firstFormSection!.height)).toBe(20)
+  await page.goto('/scraper')
+  expect(await page.locator('.scraper-forms > .section-block').first().evaluate(element => getComputedStyle(element).marginBottom)).toBe('0px')
 
   await page.goto('/jobs')
   const emptyCell = page.locator('.empty-cell')
