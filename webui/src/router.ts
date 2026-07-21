@@ -10,7 +10,8 @@ import AliasesView from './views/AliasesView.vue'
 import RssView from './views/RssView.vue'
 import RssDetailView from './views/RssDetailView.vue'
 import CloudView from './views/CloudView.vue'
-import { api, type Capabilities } from './api'
+import type { Capabilities } from './api'
+import { loadCapabilities } from './stores/status'
 
 type CapabilityRequirement = { field: keyof Pick<Capabilities, 'features' | 'job_types' | 'resources'>; values: string[] }
 
@@ -36,7 +37,7 @@ router.beforeEach(async (to) => {
   const requirement = to.meta.capability as CapabilityRequirement | undefined
   if (!requirement) return true
   try {
-    const available = (await api.capabilities())[requirement.field]
+    const available = (await loadCapabilities())[requirement.field]
     const missing = requirement.values.find(value => !available.includes(value))
     return missing ? { path: '/about', query: { unavailable: missing } } : true
   } catch {

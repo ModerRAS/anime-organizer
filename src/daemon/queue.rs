@@ -47,6 +47,16 @@ CREATE TABLE IF NOT EXISTS job_artifacts (
     created_at TEXT NOT NULL,
     FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS job_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL,
+    level TEXT NOT NULL,
+    message TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS job_logs_job_id ON job_logs(job_id, id);
 "#;
 
 #[derive(Debug, Error)]
@@ -79,6 +89,14 @@ pub(crate) struct ArtifactRecord {
     pub(crate) name: String,
     pub(crate) content_type: String,
     pub(crate) path: PathBuf,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct JobLogRecord {
+    pub(crate) id: i64,
+    pub(crate) level: String,
+    pub(crate) message: String,
+    pub(crate) created_at: String,
 }
 
 impl QueueRepository {
@@ -218,6 +236,43 @@ impl QueueRepository {
                 .optional()
                 .map_err(|error| QueueError::Database(error.to_string()))?
                 .ok_or(QueueError::NotFound(id))
+        })
+    }
+
+    pub(crate) fn append_log(&self, job_id: i64, level: &str, message: &str) -> QueueResult<()> {
+        self.with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO job_logs (job_id, level, message, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![job_id, level, message, now_string()],
+            )
+            .map_err(|error| QueueError::Database(error.to_string()))?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn logs(
+        &self,
+        job_id: i64,
+        after_id: Option<i64>,
+        limit: i64,
+    ) -> QueueResult<Vec<JobLogRecord>> {
+        self.get(job_id)?;
+        self.with_connection(|conn| {
+            let mut statement = conn
+                .prepare("SELECT id, level, message, created_at FROM job_logs WHERE job_id = ?1 AND (?2 IS NULL OR id > ?2) ORDER BY id ASC LIMIT ?3")
+                .map_err(|error| QueueError::Database(error.to_string()))?;
+            let rows = statement
+                .query_map(params![job_id, after_id, limit.clamp(1, 10_000)], |row| {
+                    Ok(JobLogRecord {
+                        id: row.get(0)?,
+                        level: row.get(1)?,
+                        message: row.get(2)?,
+                        created_at: row.get(3)?,
+                    })
+                })
+                .map_err(|error| QueueError::Database(error.to_string()))?;
+            rows.map(|row| row.map_err(|error| QueueError::Database(error.to_string())))
+                .collect()
         })
     }
 
@@ -659,6 +714,28 @@ mod tests {
         queue.cancel(job.id).unwrap();
         queue.delete_terminal(job.id).unwrap();
         assert!(!artifact.path.exists());
+    }
+
+    #[test]
+    fn job_logs_are_persistent_and_support_incremental_reads() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("daemon.db");
+        let queue = QueueRepository::new(&path).unwrap();
+        let job = queue
+            .enqueue(&request(None, JobOrigin::Manual))
+            .unwrap()
+            .job;
+        queue.append_log(job.id, "info", "queued").unwrap();
+        let first = queue.logs(job.id, None, 100).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].message, "queued");
+        queue.append_log(job.id, "info", "started").unwrap();
+        drop(queue);
+
+        let reopened = QueueRepository::new(&path).unwrap();
+        let next = reopened.logs(job.id, Some(first[0].id), 100).unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].message, "started");
     }
 
     #[test]

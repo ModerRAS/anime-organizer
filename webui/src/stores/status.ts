@@ -6,12 +6,26 @@ const state = reactive<{ health: { status: string; version: string } | null; sta
 })
 let timer: number | undefined
 let users = 0
+let capabilitiesPromise: Promise<Capabilities> | null = null
+
+export function loadCapabilities(): Promise<Capabilities> {
+  if (state.capabilities) return Promise.resolve(state.capabilities)
+  if (!capabilitiesPromise) {
+    capabilitiesPromise = api.capabilities()
+      .then((capabilities) => {
+        state.capabilities = capabilities
+        return capabilities
+      })
+      .finally(() => { capabilitiesPromise = null })
+  }
+  return capabilitiesPromise
+}
 
 async function refresh() {
   if (document.visibilityState !== 'visible') return
   try {
-    const [health, status, capabilities] = await Promise.all([api.health(), api.status(), api.capabilities()])
-    state.health = health; state.status = status; state.capabilities = capabilities; state.error = null
+    const [health, status] = await Promise.all([api.health(), api.status(), loadCapabilities()])
+    state.health = health; state.status = status; state.error = null
   } catch (error) { state.error = errorMessage(error) }
 }
 

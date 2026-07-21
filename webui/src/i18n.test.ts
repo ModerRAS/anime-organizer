@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { formatDateTime, locale, setLocale, t, valueLabel } from './i18n'
+import { formatDateTime, formatDuration, locale, setLocale, t, valueLabel } from './i18n'
 
 afterEach(() => setLocale('en'))
 
@@ -17,6 +17,12 @@ describe('i18n', () => {
     setLocale('zh-CN')
     expect(valueLabel('cloud_add_offline')).toBe('CloudDrive 离线下载')
     expect(valueLabel('future_job_kind')).toBe('future job kind')
+  })
+
+  it('formats stable and running durations', () => {
+    expect(formatDuration('2026-07-20T12:00:00Z', '2026-07-20T13:02:03Z')).toBe('1:02:03')
+    expect(formatDuration('2026-07-20T12:00:00Z', '2026-07-20T12:02:03Z')).toBe('2:03')
+    expect(formatDuration(null, null)).toBe('-')
   })
 
   it('formats API and SQLite timestamps in the active locale', () => {

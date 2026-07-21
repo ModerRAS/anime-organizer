@@ -5,6 +5,7 @@ test.beforeEach(async ({ page }) => {
   await page.route('**/api/v1/status', route => route.fulfill({ json: { uptime_seconds: 60, worker_state: 'idle', current_job_id: null, queue_counts: { queued: 0, running: 0, succeeded: 0, failed: 0, canceled: 0 }, database_path: 'test.db' } }))
   await page.route('**/api/v1/capabilities', route => route.fulfill({ json: { features: ['metadata', 'clouddrive', 'scraper', 'torrent-scraper'], job_types: ['organize', 'scrape', 'match_aliases', 'torrent_scrape', 'build_bangumi_db', 'extract_aliases', 'merge_aliases', 'apply_matches', 'create_alias_issues', 'rss_poll', 'rss_poll_all', 'cloud_add_offline'], resources: ['rss_subscriptions', 'cloud_connections'] } }))
   await page.route('**/api/v1/jobs?*', route => route.fulfill({ json: { jobs: [] } }))
+  await page.route('**/api/v1/jobs/*/logs?*', route => route.fulfill({ json: { logs: [] } }))
 })
 
 for (const path of ['/', '/jobs', '/jobs/1', '/organize', '/scraper', '/torrent', '/aliases', '/about']) {
@@ -65,6 +66,46 @@ test('formats legacy timestamps and persists the Chinese locale', async ({ page 
   await expect(page.getByRole('status')).toContainText('Daemon 在线')
   await expect(page.locator('main')).not.toContainText('Invalid Date')
   await page.screenshot({ path: `test-results/jobs-chinese-${testInfo.project.name}.png`, fullPage: true })
+})
+
+test('shares capabilities across route navigation and keeps shell scroll regions independent', async ({ page }) => {
+  let capabilityCalls = 0
+  await page.unroute('**/api/v1/capabilities')
+  await page.route('**/api/v1/capabilities', async route => {
+    capabilityCalls++
+    await new Promise(resolve => setTimeout(resolve, 300))
+    await route.fulfill({ json: { features: ['metadata', 'clouddrive'], job_types: ['organize', 'scrape', 'match_aliases', 'torrent_scrape', 'build_bangumi_db'], resources: ['rss_subscriptions'] } })
+  })
+  await page.goto('/')
+  const menu = page.getByRole('button', { name: 'Open navigation' })
+  if (await menu.isVisible()) await menu.click()
+  await page.getByRole('link', { name: 'Scraper' }).click()
+  await expect(page).toHaveURL(/\/scraper$/)
+  if (await menu.isVisible()) await menu.click()
+  await page.getByRole('link', { name: 'Torrents' }).click()
+  await expect(page).toHaveURL(/\/torrent$/)
+  expect(capabilityCalls).toBe(1)
+  expect(await page.evaluate(() => ({
+    body: getComputedStyle(document.body).overflow,
+    sidebar: getComputedStyle(document.querySelector('aside')!).overflowY,
+    main: getComputedStyle(document.querySelector('main')!).overflowY,
+  }))).toEqual({ body: 'hidden', sidebar: 'auto', main: 'auto' })
+})
+
+test('shows job finish time, duration, and incremental logs', async ({ page }) => {
+  await page.route('**/api/v1/jobs/9001', route => route.fulfill({ json: { ...job, state: 'running', finished_at: null } }))
+  await page.unroute('**/api/v1/jobs/*/logs?*')
+  let logCalls = 0
+  await page.route('**/api/v1/jobs/9001/logs?*', route => {
+    logCalls++
+    return route.fulfill({ json: { logs: logCalls === 1
+      ? [{ id: 1, level: 'info', message: 'Worker started the job', created_at: '2026-07-20T12:00:00Z' }]
+      : [{ id: 2, level: 'info', message: 'Organized episode 1', created_at: '2026-07-20T12:00:02Z' }] } })
+  })
+  await page.goto('/jobs/9001')
+  await expect(page.getByRole('log')).toContainText('Worker started the job')
+  await expect(page.getByRole('log')).toContainText('Organized episode 1', { timeout: 5000 })
+  await expect(page.getByText('Duration', { exact: true })).toBeVisible()
 })
 
 test('ignores an older jobs poll that finishes late', async ({ page }) => {

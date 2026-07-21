@@ -40,6 +40,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(feature = "metadata")]
+use std::sync::Arc;
 use walkdir::WalkDir;
 
 /// 默认支持的视频扩展名
@@ -149,28 +151,44 @@ fn reject_daemon_conflicts(cli: &Cli) -> Result<(), AppError> {
 
 #[cfg(feature = "metadata")]
 pub(crate) fn run_organize_entry(args: OrganizeArgs) -> Result<(), AppError> {
+    run_organize_entry_with_log(args, &|_| {})
+}
+
+#[cfg(feature = "metadata")]
+pub(crate) fn run_organize_entry_with_log(
+    args: OrganizeArgs,
+    log: &dyn Fn(&str),
+) -> Result<(), AppError> {
     if args.scrape_metadata || args.mlip {
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| AppError::MetadataFetchError(format!("创建异步运行时失败: {e}")))?;
-        runtime.block_on(run_with_metadata(args))
+        runtime.block_on(run_with_metadata(args, log))
     } else {
-        run_organize(args)
+        run_organize(args, log)
     }
 }
 
 #[cfg(not(feature = "metadata"))]
 pub(crate) fn run_organize_entry(args: OrganizeArgs) -> Result<(), AppError> {
+    run_organize_entry_with_log(args, &|_| {})
+}
+
+#[cfg(not(feature = "metadata"))]
+pub(crate) fn run_organize_entry_with_log(
+    args: OrganizeArgs,
+    log: &dyn Fn(&str),
+) -> Result<(), AppError> {
     if args.scrape_metadata || args.mlip {
         return Err(AppError::MetadataFetchError(
             "元数据功能未启用，请使用 --features metadata 编译".to_string(),
         ));
     }
 
-    run_organize(args)
+    run_organize(args, log)
 }
 
 /// 仅文件整理流程（无元数据）
-fn run_organize(args: OrganizeArgs) -> Result<(), AppError> {
+fn run_organize(args: OrganizeArgs, log: &dyn Fn(&str)) -> Result<(), AppError> {
     validate_library_index_args(&args)?;
     validate_filename_parser_args(&args)?;
     let (source, target) = resolve_source_and_target(&args)?;
@@ -178,6 +196,8 @@ fn run_organize(args: OrganizeArgs) -> Result<(), AppError> {
         .fallback_on_link_failure
         .map(FallbackMode::to_operation_mode);
     let extensions = build_extensions(&args.include_ext);
+    let subtitle_candidates = FileOrganizer::collect_external_subtitle_candidates(&source);
+    log(&format!("Scanning {}", source.display()));
     let probe_runtime = runtime_probe_enabled(&args);
 
     let mut processed = 0;
@@ -223,6 +243,8 @@ fn run_organize(args: OrganizeArgs) -> Result<(), AppError> {
             args.dry_run,
             fallback_mode,
             args.verbose,
+            &subtitle_candidates,
+            log,
         ) {
             Ok(target_path) => {
                 succeeded += 1;
@@ -240,13 +262,16 @@ fn run_organize(args: OrganizeArgs) -> Result<(), AppError> {
     }
 
     println!("处理完成：总计{processed}个文件，成功{succeeded}个，失败{failed}个");
+    log(&format!(
+        "Processed {processed} files: {succeeded} succeeded, {failed} failed"
+    ));
     finish_library_index(&args, &target, &extensions, &library_records)?;
     Ok(())
 }
 
 /// 带元数据刮削的流程
 #[cfg(feature = "metadata")]
-async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
+async fn run_with_metadata(args: OrganizeArgs, log: &dyn Fn(&str)) -> Result<(), AppError> {
     validate_library_index_args(&args)?;
     validate_filename_parser_args(&args)?;
     let (source, target) = resolve_source_and_target(&args)?;
@@ -254,12 +279,17 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
         .fallback_on_link_failure
         .map(FallbackMode::to_operation_mode);
     let extensions = build_extensions(&args.include_ext);
-    let bangumi =
-        BangumiClient::with_source(args.bangumi_cache.clone(), args.metadata_source.clone());
+    let subtitle_candidates = FileOrganizer::collect_external_subtitle_candidates(&source);
+    let bangumi = Arc::new(BangumiClient::with_source(
+        args.bangumi_cache.clone(),
+        args.metadata_source.clone(),
+    ));
     let alias_db_path =
         resolve_alias_db_path(&bangumi, args.metadata_source.as_deref(), args.verbose).await;
-    let alias_lookup =
-        AliasLookup::load_from_sources(alias_db_path.as_deref(), args.alias_file.as_deref())?;
+    let alias_lookup = Arc::new(AliasLookup::load_from_sources(
+        alias_db_path.as_deref(),
+        args.alias_file.as_deref(),
+    )?);
     if args.verbose {
         if alias_lookup.is_empty() {
             eprintln!("未找到可用别名库，将仅使用 Bangumi 名称和搜索匹配");
@@ -282,7 +312,7 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
     }
 
     let allow_online_title_resolution = args.metadata_source.is_none();
-    let tmdb = args.tmdb_api_key.clone().map(TmdbClient::new);
+    let tmdb = args.tmdb_api_key.clone().map(TmdbClient::new).map(Arc::new);
     if !args.no_images && tmdb.is_none() && args.verbose {
         eprintln!("未提供 TMDB API Key，将跳过 TMDB 图片下载");
     }
@@ -290,11 +320,27 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
 
     let anime_groups =
         collect_anime_groups(&source, &extensions, args.filename_parser, args.verbose)?;
+    log(&format!("Discovered {} anime groups", anime_groups.len()));
     let mut processed = 0;
     let mut succeeded = 0;
     let mut failed = 0;
-    let mut metadata_cache: HashMap<(String, u32), Option<AnimeMetadata>> = HashMap::new();
-    let mut episode_cache: HashMap<u32, Option<Vec<BangumiEpisode>>> = HashMap::new();
+    let (mut metadata_cache, mut episode_cache) = prefetch_group_metadata(
+        &anime_groups,
+        Arc::clone(&alias_lookup),
+        Arc::clone(&bangumi),
+        tmdb.clone(),
+        target.clone(),
+        allow_online_title_resolution,
+        !args.no_episode_metadata,
+        !args.no_images && !args.dry_run,
+        args.force_overwrite,
+        args.verbose,
+    )
+    .await;
+    log(&format!(
+        "Metadata prefetch completed for {} groups",
+        metadata_cache.len()
+    ));
     let mut library_records = Vec::new();
 
     for (anime_name, files) in anime_groups {
@@ -318,9 +364,9 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
                     season_hint: first_file.season_number(),
                     allow_online_title_resolution,
                 },
-                &alias_lookup,
-                &bangumi,
-                tmdb.as_ref(),
+                alias_lookup.as_ref(),
+                bangumi.as_ref(),
+                tmdb.as_deref(),
                 args.verbose,
             )
             .await;
@@ -332,7 +378,7 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
             if let Some(ref meta) = metadata {
                 fetch_bangumi_episodes_cached(
                     meta.bangumi_id,
-                    &bangumi,
+                    bangumi.as_ref(),
                     &mut episode_cache,
                     args.verbose,
                 )
@@ -362,19 +408,6 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
                     }
                 }
             }
-
-            if !args.no_images && !args.dry_run {
-                download_images(
-                    meta,
-                    &anime_root,
-                    season_number,
-                    &bangumi,
-                    tmdb.as_ref(),
-                    args.force_overwrite,
-                    args.verbose,
-                )
-                .await;
-            }
         }
 
         for file in files {
@@ -388,6 +421,8 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
                 args.dry_run,
                 fallback_mode,
                 args.verbose,
+                &subtitle_candidates,
+                log,
             ) {
                 Ok(target_path) => {
                     succeeded += 1;
@@ -442,6 +477,9 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
     }
 
     println!("处理完成：总计{processed}个文件，成功{succeeded}个，失败{failed}个");
+    log(&format!(
+        "Processed {processed} files: {succeeded} succeeded, {failed} failed"
+    ));
     if !metadata_cache.is_empty() {
         let matched = metadata_cache
             .values()
@@ -458,9 +496,9 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
         MetadataIndexContext {
             metadata_cache: &mut metadata_cache,
             episode_cache: &mut episode_cache,
-            alias_lookup: &alias_lookup,
-            bangumi: &bangumi,
-            tmdb: tmdb.as_ref(),
+            alias_lookup: alias_lookup.as_ref(),
+            bangumi: bangumi.as_ref(),
+            tmdb: tmdb.as_deref(),
             download_images: !args.no_images,
             force_overwrite: args.force_overwrite,
             fetch_episode_metadata: !args.no_episode_metadata,
@@ -474,6 +512,125 @@ async fn run_with_metadata(args: OrganizeArgs) -> Result<(), AppError> {
     Ok(())
 }
 
+#[cfg(feature = "metadata")]
+#[allow(clippy::too_many_arguments)]
+async fn prefetch_group_metadata(
+    anime_groups: &HashMap<String, Vec<AnimeFileInfo>>,
+    alias_lookup: Arc<AliasLookup>,
+    bangumi: Arc<BangumiClient>,
+    tmdb: Option<Arc<TmdbClient>>,
+    target: PathBuf,
+    allow_online_title_resolution: bool,
+    fetch_episode_metadata: bool,
+    download_images_enabled: bool,
+    force_overwrite: bool,
+    verbose: bool,
+) -> (
+    HashMap<(String, u32), Option<AnimeMetadata>>,
+    HashMap<u32, Option<Vec<BangumiEpisode>>>,
+) {
+    const CONCURRENCY: usize = 8;
+
+    let permits = Arc::new(tokio::sync::Semaphore::new(CONCURRENCY));
+    let mut tasks = tokio::task::JoinSet::new();
+
+    for (anime_name, files) in anime_groups {
+        let Some(first_file) = files.first() else {
+            continue;
+        };
+        let anime_name = anime_name.clone();
+        let series_name = first_file.series_name();
+        let publisher = first_file.publisher.clone();
+        let season_hint = first_file.season_number();
+        let season_number = season_hint.unwrap_or(1);
+        let alias_lookup = Arc::clone(&alias_lookup);
+        let bangumi = Arc::clone(&bangumi);
+        let tmdb = tmdb.clone();
+        let target = target.clone();
+        let permits = Arc::clone(&permits);
+
+        tasks.spawn(async move {
+            let Ok(_permit) = permits.acquire_owned().await else {
+                return ((anime_name, season_number), None, None);
+            };
+            let metadata = fetch_anime_metadata(
+                MetadataLookup {
+                    anime_name: &anime_name,
+                    series_name: &series_name,
+                    publisher_hint: Some(&publisher),
+                    season_hint,
+                    allow_online_title_resolution,
+                },
+                alias_lookup.as_ref(),
+                bangumi.as_ref(),
+                tmdb.as_deref(),
+                verbose,
+            )
+            .await;
+            if download_images_enabled {
+                if let Some(meta) = metadata.as_ref() {
+                    download_images(
+                        meta,
+                        &target.join(&series_name),
+                        season_number,
+                        bangumi.as_ref(),
+                        tmdb.as_deref(),
+                        force_overwrite,
+                        verbose,
+                    )
+                    .await;
+                }
+            }
+            let episodes = if fetch_episode_metadata {
+                if let Some(meta) = metadata.as_ref() {
+                    let bangumi_id = meta.bangumi_id;
+                    let fetched = match bangumi.fetch_episodes(bangumi_id).await {
+                        Ok(episodes) => {
+                            if verbose {
+                                eprintln!(
+                                    "Bangumi 分集加载: {bangumi_id} -> {} 集",
+                                    episodes.len()
+                                );
+                            }
+                            Some(episodes)
+                        }
+                        Err(error) => {
+                            if verbose {
+                                eprintln!("Bangumi 分集加载失败 {bangumi_id}: {error}");
+                            }
+                            None
+                        }
+                    };
+                    Some((bangumi_id, fetched))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            ((anime_name, season_number), metadata, episodes)
+        });
+    }
+
+    let mut metadata_cache = HashMap::new();
+    let mut episode_cache = HashMap::new();
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok((key, metadata, episodes)) => {
+                metadata_cache.insert(key, metadata);
+                if let Some((bangumi_id, episodes)) = episodes {
+                    episode_cache.entry(bangumi_id).or_insert(episodes);
+                }
+            }
+            Err(error) if verbose => eprintln!("元数据预取任务失败: {error}"),
+            Err(_) => {}
+        }
+    }
+
+    (metadata_cache, episode_cache)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn organize_file_to_dir(
     anime_file: &AnimeFileInfo,
     target_dir: &Path,
@@ -481,8 +638,16 @@ fn organize_file_to_dir(
     dry_run: bool,
     fallback_mode: Option<OperationMode>,
     verbose: bool,
+    subtitle_candidates: &[PathBuf],
+    log: &dyn Fn(&str),
 ) -> Result<PathBuf, AppError> {
-    match FileOrganizer::organize_to_dir(anime_file, target_dir, mode, dry_run) {
+    let subtitles = FileOrganizer::find_external_subtitles_from(
+        Path::new(&anime_file.original_path),
+        subtitle_candidates,
+    );
+    match FileOrganizer::organize_to_dir_with_subtitles(
+        anime_file, target_dir, mode, dry_run, &subtitles,
+    ) {
         Ok(target_path) => {
             if verbose && !dry_run {
                 println!(
@@ -491,6 +656,7 @@ fn organize_file_to_dir(
                     target_path.display()
                 );
             }
+            log(&format!("Organized {}", target_path.display()));
             Ok(target_path)
         }
         Err(error) => {
@@ -507,8 +673,8 @@ fn organize_file_to_dir(
                             );
                         }
 
-                        return FileOrganizer::organize_to_dir(
-                            anime_file, target_dir, fallback, dry_run,
+                        return FileOrganizer::organize_to_dir_with_subtitles(
+                            anime_file, target_dir, fallback, dry_run, &subtitles,
                         )
                         .map_err(|fallback_error| {
                             eprintln!(
@@ -522,6 +688,7 @@ fn organize_file_to_dir(
             }
 
             eprintln!("处理文件失败 {}: {error}", anime_file.original_path);
+            log(&format!("Failed {}: {error}", anime_file.original_path));
             Err(error)
         }
     }

@@ -6,7 +6,7 @@ use super::cloud::{
 use super::model::{EnqueueRequest, JobState, JobView};
 #[cfg(feature = "clouddrive")]
 use super::model::{JobOrigin, JobSpec};
-use super::queue::QueueError;
+use super::queue::{JobLogRecord, QueueError};
 use super::{web, DaemonState};
 #[cfg(feature = "clouddrive")]
 use anime_organizer::rss::db::RssDatabase;
@@ -32,6 +32,7 @@ pub(crate) fn router(state: Arc<DaemonState>) -> Router {
         .route("/api/v1/capabilities", get(capabilities))
         .route("/api/v1/jobs", post(enqueue).get(list_jobs))
         .route("/api/v1/jobs/:id", get(get_job).delete(cancel_job))
+        .route("/api/v1/jobs/:id/logs", get(get_job_logs))
         .route("/api/v1/jobs/:id/retry", post(retry_job))
         .route("/api/v1/jobs/:id/history", delete(delete_history))
         .route(
@@ -347,6 +348,9 @@ async fn enqueue(
         Ok(outcome) => outcome,
         Err(error) => return queue_error(error),
     };
+    if !outcome.duplicate {
+        let _ = state.queue.append_log(outcome.job.id, "info", "Job queued");
+    }
     let response = EnqueueResponse {
         job: JobView::from(outcome.job),
         duplicate: outcome.duplicate,
@@ -362,9 +366,37 @@ async fn get_job(State(state): State<Arc<DaemonState>>, Path(id): Path<i64>) -> 
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct JobLogsQuery {
+    after_id: Option<i64>,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct JobLogsResponse {
+    logs: Vec<JobLogRecord>,
+}
+
+async fn get_job_logs(
+    State(state): State<Arc<DaemonState>>,
+    Path(id): Path<i64>,
+    Query(query): Query<JobLogsQuery>,
+) -> Response {
+    match state
+        .queue
+        .logs(id, query.after_id, query.limit.unwrap_or(5_000))
+    {
+        Ok(logs) => Json(JobLogsResponse { logs }).into_response(),
+        Err(error) => queue_error(error),
+    }
+}
+
 async fn cancel_job(State(state): State<Arc<DaemonState>>, Path(id): Path<i64>) -> Response {
     match state.queue.cancel(id) {
-        Ok(job) => Json(JobView::from(job)).into_response(),
+        Ok(job) => {
+            let _ = state.queue.append_log(id, "warning", "Job canceled");
+            Json(JobView::from(job)).into_response()
+        }
         Err(error) => queue_error(error),
     }
 }
@@ -372,6 +404,7 @@ async fn cancel_job(State(state): State<Arc<DaemonState>>, Path(id): Path<i64>) 
 async fn retry_job(State(state): State<Arc<DaemonState>>, Path(id): Path<i64>) -> Response {
     match state.queue.retry(id) {
         Ok(job) => {
+            let _ = state.queue.append_log(id, "info", "Job queued for retry");
             let _ = state.wake.send(());
             Json(JobView::from(job)).into_response()
         }

@@ -4,7 +4,7 @@ import { ChevronDown, CircleSlash, RotateCcw } from 'lucide-vue-next'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { api, errorMessage, type Job, type JobState } from '../api'
 import { jobQueryState, jobStates } from '../filters'
-import { formatDateTime, t, valueLabel } from '../i18n'
+import { formatDateTime, formatDuration, t, valueLabel } from '../i18n'
 
 const pageSize = 100
 const route = useRoute()
@@ -104,9 +104,9 @@ onBeforeUnmount(() => { if (timer !== undefined) window.clearInterval(timer) })
       <label>{{ t('Type') }}<input v-model="kind" type="search" :placeholder="t('All types')" @change="updateQuery" /></label>
       <button class="button secondary filter-reset" type="button" :disabled="!selectedState && !kind" @click="selectedState = ''; kind = ''; updateQuery()"><ChevronDown :size="15" aria-hidden="true" />{{ t('Clear filters') }}</button>
     </div>
-    <div class="table-wrap"><table><caption id="jobs-table-heading" class="sr-only">{{ t('Daemon jobs') }}</caption><thead><tr><th>{{ t('Job') }}</th><th>{{ t('Type') }}</th><th>{{ t('Origin') }}</th><th>{{ t('State') }}</th><th>{{ t('Created') }}</th><th><span class="sr-only">{{ t('Actions') }}</span></th></tr></thead><tbody>
-      <tr v-for="job in jobs" :key="job.id"><td><RouterLink :to="`/jobs/${job.id}`">#{{ job.id }}</RouterLink><small v-if="job.progress_message" class="table-subtext">{{ job.progress_message }}</small></td><td>{{ valueLabel(job.kind) }}</td><td>{{ valueLabel(job.origin) }}</td><td><span class="state" :class="statusClass(job.state)">{{ valueLabel(job.state) }}</span></td><td>{{ formatDateTime(job.created_at) }}</td><td class="actions"><button v-if="job.state === 'queued'" class="icon-button danger-action" type="button" :title="t('Cancel queued job')" :aria-label="t('Cancel queued job')" @click="cancel(job)"><CircleSlash :size="16" aria-hidden="true" /></button><button v-if="job.state === 'failed' || job.state === 'canceled'" class="icon-button" type="button" :title="t('Retry job')" :aria-label="t('Retry job')" @click="retry(job)"><RotateCcw :size="16" aria-hidden="true" /></button></td></tr>
-      <tr v-if="!loading && !jobs.length"><td colspan="6" class="empty-cell">{{ t('No jobs match these filters.') }}</td></tr>
+    <div class="table-wrap"><table><caption id="jobs-table-heading" class="sr-only">{{ t('Daemon jobs') }}</caption><thead><tr><th>{{ t('Job') }}</th><th>{{ t('Type') }}</th><th>{{ t('Origin') }}</th><th>{{ t('State') }}</th><th>{{ t('Created') }}</th><th>{{ t('Finished') }}</th><th>{{ t('Duration') }}</th><th><span class="sr-only">{{ t('Actions') }}</span></th></tr></thead><tbody>
+      <tr v-for="job in jobs" :key="job.id"><td><RouterLink :to="`/jobs/${job.id}`">#{{ job.id }}</RouterLink><small v-if="job.progress_message" class="table-subtext">{{ job.progress_message }}</small></td><td>{{ valueLabel(job.kind) }}</td><td>{{ valueLabel(job.origin) }}</td><td><span class="state" :class="statusClass(job.state)">{{ valueLabel(job.state) }}</span></td><td>{{ formatDateTime(job.created_at) }}</td><td>{{ formatDateTime(job.finished_at) }}</td><td>{{ formatDuration(job.started_at, job.finished_at) }}</td><td class="actions"><button v-if="job.state === 'queued'" class="icon-button danger-action" type="button" :title="t('Cancel queued job')" :aria-label="t('Cancel queued job')" @click="cancel(job)"><CircleSlash :size="16" aria-hidden="true" /></button><button v-if="job.state === 'failed' || job.state === 'canceled'" class="icon-button" type="button" :title="t('Retry job')" :aria-label="t('Retry job')" @click="retry(job)"><RotateCcw :size="16" aria-hidden="true" /></button></td></tr>
+      <tr v-if="!loading && !jobs.length"><td colspan="8" class="empty-cell">{{ t('No jobs match these filters.') }}</td></tr>
     </tbody></table></div>
     <p v-if="loading" class="loading-line">{{ t('Refreshing queue...') }}</p>
     <div v-if="hasOlder" class="pagination-actions"><button class="button secondary" type="button" :disabled="loadingOlder" @click="loadOlder">{{ t(loadingOlder ? 'Loading older jobs...' : 'Load older') }}</button></div>

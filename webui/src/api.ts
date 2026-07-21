@@ -1,5 +1,6 @@
 export type JobState = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
 export type JobArtifact = { id: number; name: string; content_type: string; size: number; download_url: string }
+export type JobLog = { id: number; level: string; message: string; created_at: string }
 export type Job = { id: number; idempotency_key: string | null; origin: string; kind: string; resource_key: string | null; request: unknown; state: JobState; priority: number; attempts: number; progress_current: number | null; progress_total: number | null; progress_message: string | null; result: unknown; error: string | null; created_at: string; started_at: string | null; finished_at: string | null }
 export type Status = { uptime_seconds: number; worker_state: string; current_job_id: number | null; queue_counts: Record<JobState, number>; database_path: string }
 export type Capabilities = { features: string[]; job_types: string[]; resources: string[] }
@@ -53,6 +54,7 @@ export const api = {
   capabilities: () => request<Capabilities>('/capabilities'),
   jobs: (query: { state?: JobState; kind?: string; limit?: number; before_id?: number } = {}) => request<{ jobs: Job[] }>(`/jobs?${new URLSearchParams(Object.entries(query).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]))}`),
   job: (id: number) => request<Job>(`/jobs/${id}`),
+  jobLogs: (id: number, afterId?: number) => request<{ logs: JobLog[] }>(`/jobs/${id}/logs?${new URLSearchParams(afterId === undefined ? {} : { after_id: String(afterId), limit: '5000' })}`),
   cancel: (id: number) => request<Job>(`/jobs/${id}`, { method: 'DELETE' }),
   retry: (id: number) => request<Job>(`/jobs/${id}/retry`, { method: 'POST' }),
   enqueueOrganize: (args: OrganizeArgs, confirmed: boolean) => request<{ job: Job; duplicate: boolean }>('/jobs', { method: 'POST', body: JSON.stringify({ origin: 'manual', confirmed, job: { type: 'organize', args } }) }),

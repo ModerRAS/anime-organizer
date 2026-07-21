@@ -30,6 +30,7 @@ use crate::error::{AppError, Result};
 use crate::parser::AnimeFileInfo;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -134,6 +135,18 @@ impl FileOrganizer {
         mode: OperationMode,
         dry_run: bool,
     ) -> Result<PathBuf> {
+        let subtitles = Self::find_external_subtitles(Path::new(&anime_file.original_path));
+        Self::organize_to_dir_with_subtitles(anime_file, target_dir, mode, dry_run, &subtitles)
+    }
+
+    /// 使用已发现的字幕整理文件，供批处理避免重复扫描源目录。
+    pub fn organize_to_dir_with_subtitles<P: AsRef<Path>>(
+        anime_file: &AnimeFileInfo,
+        target_dir: P,
+        mode: OperationMode,
+        dry_run: bool,
+        subtitle_paths: &[PathBuf],
+    ) -> Result<PathBuf> {
         let target_dir = target_dir.as_ref();
         let source_path = Path::new(&anime_file.original_path);
         let target_filename = source_path
@@ -143,7 +156,6 @@ impl FileOrganizer {
                 message: "源路径缺少文件名".to_string(),
             })?;
         let target_path = target_dir.join(target_filename);
-        let subtitle_paths = Self::find_external_subtitles(source_path);
 
         if dry_run {
             println!(
@@ -155,7 +167,7 @@ impl FileOrganizer {
                 println!(
                     "[DRY-RUN] {} -> {}",
                     subtitle_path.display(),
-                    Self::subtitle_target_path(source_path, &subtitle_path, &target_path).display(),
+                    Self::subtitle_target_path(source_path, subtitle_path, &target_path).display(),
                 );
             }
             return Ok(target_path);
@@ -165,11 +177,23 @@ impl FileOrganizer {
         Self::organize_path(source_path, &target_path, mode)?;
         for subtitle_path in subtitle_paths {
             let subtitle_target =
-                Self::subtitle_target_path(source_path, &subtitle_path, &target_path);
-            Self::organize_path(&subtitle_path, &subtitle_target, mode)?;
+                Self::subtitle_target_path(source_path, subtitle_path, &target_path);
+            Self::organize_path(subtitle_path, &subtitle_target, mode)?;
         }
 
         Ok(target_path)
+    }
+
+    /// 扫描一次批处理根目录中的所有外部字幕候选。
+    pub fn collect_external_subtitle_candidates(root: &Path) -> Vec<PathBuf> {
+        WalkDir::new(root)
+            .min_depth(1)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| entry.into_path())
+            .filter(|path| Self::is_external_subtitle(path))
+            .collect()
     }
 
     /// 查找视频附近三层目录内同名或带语言后缀的外部字幕。
@@ -177,26 +201,24 @@ impl FileOrganizer {
         let Some(directory) = video_path.parent() else {
             return Vec::new();
         };
+        let candidates = Self::collect_external_subtitle_candidates(directory);
+        Self::find_external_subtitles_from(video_path, &candidates)
+    }
+
+    /// 从批处理候选集中查找视频对应字幕。
+    pub fn find_external_subtitles_from(video_path: &Path, candidates: &[PathBuf]) -> Vec<PathBuf> {
+        let Some(directory) = video_path.parent() else {
+            return Vec::new();
+        };
         let Some(video_stem) = video_path.file_stem().and_then(|value| value.to_str()) else {
             return Vec::new();
         };
         let video_stem_lower = video_stem.to_lowercase();
-        let mut paths = WalkDir::new(directory)
-            .min_depth(1)
-            .max_depth(3)
-            .into_iter()
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_type().is_file())
-            .map(|entry| entry.into_path())
-            .filter(|path| path != video_path)
+        let mut paths = candidates
+            .iter()
             .filter(|path| {
-                matches!(
-                    path.extension()
-                        .and_then(|value| value.to_str())
-                        .map(|value| value.to_ascii_lowercase())
-                        .as_deref(),
-                    Some("srt" | "ass" | "ssa" | "vtt")
-                )
+                path.strip_prefix(directory)
+                    .is_ok_and(|relative| relative.components().count() <= 3)
             })
             .filter(|path| {
                 let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
@@ -208,9 +230,20 @@ impl FileOrganizer {
                 };
                 suffix.is_empty() || suffix.starts_with(['.', ' ', '_', '-', '[', '(', '（'])
             })
+            .cloned()
             .collect::<Vec<_>>();
         paths.sort_by_key(|path| path.to_string_lossy().to_lowercase());
         paths
+    }
+
+    fn is_external_subtitle(path: &Path) -> bool {
+        matches!(
+            path.extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.to_ascii_lowercase())
+                .as_deref(),
+            Some("srt" | "ass" | "ssa" | "vtt")
+        )
     }
 
     fn subtitle_target_path(
@@ -246,6 +279,9 @@ impl FileOrganizer {
             return Ok(());
         }
         if target_path.exists() {
+            if Self::files_match_quick(source_path, target_path)? {
+                return Ok(());
+            }
             fs::remove_file(target_path)?;
         }
         match mode {
@@ -261,6 +297,41 @@ impl FileOrganizer {
             OperationMode::Link => Self::create_hard_link(source_path, target_path)?,
         }
         Ok(())
+    }
+
+    fn files_match_quick(source_path: &Path, target_path: &Path) -> std::io::Result<bool> {
+        const SAMPLE_SIZE: u64 = 64 * 1024;
+
+        let source_metadata = fs::metadata(source_path)?;
+        let target_metadata = fs::metadata(target_path)?;
+        let source_len = source_metadata.len();
+        if source_len != target_metadata.len() {
+            return Ok(false);
+        }
+        if source_len == 0 {
+            return Ok(true);
+        }
+        let sample_len = source_len.min(SAMPLE_SIZE) as usize;
+        let mut source = fs::File::open(source_path)?;
+        let mut target = fs::File::open(target_path)?;
+        let mut source_sample = vec![0; sample_len];
+        let mut target_sample = vec![0; sample_len];
+        let mut samples_equal = |offset| -> std::io::Result<bool> {
+            source.seek(SeekFrom::Start(offset))?;
+            target.seek(SeekFrom::Start(offset))?;
+            source.read_exact(&mut source_sample)?;
+            target.read_exact(&mut target_sample)?;
+            Ok(source_sample == target_sample)
+        };
+
+        if !samples_equal(0)? {
+            return Ok(false);
+        }
+        // ponytail: sample media boundaries; use full hashing if same-size middle-only edits matter.
+        if source_len <= SAMPLE_SIZE {
+            return Ok(true);
+        }
+        samples_equal(source_len - SAMPLE_SIZE)
     }
 
     /// 创建硬链接
@@ -368,6 +439,23 @@ mod tests {
         assert!(source_file.exists());
         assert_eq!(fs::read_to_string(&expected_path).unwrap(), "test content");
         assert_eq!(fs::read_to_string(&source_file).unwrap(), "test content");
+    }
+
+    #[test]
+    fn quick_file_match_checks_both_media_boundaries() {
+        let directory = TempDir::new().unwrap();
+        let source = directory.path().join("source.mkv");
+        let target = directory.path().join("target.mkv");
+        let bytes = vec![b'a'; 128 * 1024];
+        fs::write(&source, &bytes).unwrap();
+        fs::write(&target, &bytes).unwrap();
+
+        assert!(FileOrganizer::files_match_quick(&source, &target).unwrap());
+
+        let mut changed = bytes;
+        *changed.last_mut().unwrap() = b'b';
+        fs::write(&target, changed).unwrap();
+        assert!(!FileOrganizer::files_match_quick(&source, &target).unwrap());
     }
 
     #[test]

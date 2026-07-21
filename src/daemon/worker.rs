@@ -4,6 +4,11 @@ use super::queue::QueueRepository;
 use super::rss_schedule::RssRuntime;
 #[cfg(feature = "torrent-scraper")]
 use crate::cli::TorrentSource;
+#[cfg(feature = "clouddrive")]
+use anime_organizer::rss::{
+    proxy::{build_http_client, ProxyConfig},
+    torrent::download_torrent_to_magnet,
+};
 #[cfg(feature = "torrent-scraper")]
 use anime_organizer::torrent::ScrapedTitle;
 #[cfg(all(feature = "torrent-scraper", test))]
@@ -77,6 +82,7 @@ fn worker_loop(
             Ok(Some(job)) => {
                 set_snapshot(&snapshot, "validating", Some(job.id));
                 let _ = queue.set_progress(job.id, "validating");
+                let _ = queue.append_log(job.id, "info", "Worker started the job");
                 let outcome = catch_unwind(AssertUnwindSafe(|| {
                     execute(
                         &queue,
@@ -89,14 +95,18 @@ fn worker_loop(
                     Ok(Ok(result)) => {
                         let json = serde_json::to_string(&result)
                             .unwrap_or_else(|_| "{\"summary\":\"succeeded\"}".to_string());
+                        let _ = queue.append_log(job.id, "info", &result.summary);
                         let _ = queue.mark_succeeded(job.id, &json);
                     }
                     Ok(Err(error)) => {
+                        let _ = queue.append_log(job.id, "error", &error);
                         let _ = queue.mark_failed(job.id, &error);
                     }
                     Err(panic) => {
                         let message = panic_message(panic);
-                        let _ = queue.mark_failed(job.id, &format!("worker panic: {message}"));
+                        let error = format!("worker panic: {message}");
+                        let _ = queue.append_log(job.id, "error", &error);
+                        let _ = queue.mark_failed(job.id, &error);
                     }
                 }
                 set_snapshot(&snapshot, "idle", None);
@@ -126,13 +136,15 @@ fn execute(
     let _ = queue.set_progress(job.id, "running");
     #[allow(unreachable_patterns)]
     match &spec {
-        JobSpec::Organize(args) => crate::run_organize_entry(args.clone())
-            .map(|_| JobResult {
-                summary: "organize completed".to_string(),
-                data: serde_json::json!({}),
-                artifacts: Vec::new(),
-            })
-            .map_err(|error| error.to_string()),
+        JobSpec::Organize(args) => crate::run_organize_entry_with_log(args.clone(), &|message| {
+            let _ = queue.append_log(job.id, "info", message);
+        })
+        .map(|_| JobResult {
+            summary: "organize completed".to_string(),
+            data: serde_json::json!({}),
+            artifacts: Vec::new(),
+        })
+        .map_err(|error| error.to_string()),
         #[cfg(feature = "clouddrive")]
         JobSpec::RssPoll { .. } | JobSpec::RssPollAll => {
             let runtime = tokio::runtime::Runtime::new()
@@ -182,9 +194,10 @@ fn execute_cloud_add_offline(
             .authenticated_client(&connection)
             .await
             .map_err(|error| error.to_string())?;
+        let offline_url = resolve_cloud_offline_url(&args.url).await?;
         tokio::time::timeout(
             Duration::from_secs(super::cloud::CLOUD_OPERATION_TIMEOUT_SECS),
-            client.add_offline_files(vec![args.url.clone()], &args.target),
+            client.add_offline_files(vec![offline_url], &args.target),
         )
         .await
         .map_err(|_| "CloudDrive offline submission timed out".to_string())?
@@ -198,6 +211,28 @@ fn execute_cloud_add_offline(
             artifacts: Vec::new(),
         })
     })
+}
+
+#[cfg(feature = "clouddrive")]
+async fn resolve_cloud_offline_url(url: &str) -> Result<String, String> {
+    if !is_torrent_url(url) {
+        return Ok(url.to_string());
+    }
+
+    let client = build_http_client(&ProxyConfig::from_env()).map_err(|error| error.to_string())?;
+    download_torrent_to_magnet(&client, url)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "clouddrive")]
+fn is_torrent_url(url: &str) -> bool {
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    path.ends_with(".torrent") || path.ends_with("%2etorrent")
 }
 
 #[cfg(feature = "scraper")]
@@ -534,6 +569,17 @@ mod tests {
         let previous = active.fetch_add(1, Ordering::SeqCst);
         assert_eq!(previous, 0);
         active.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    #[cfg(feature = "clouddrive")]
+    #[test]
+    fn cloud_offline_torrent_urls_are_detected_without_affecting_regular_urls() {
+        assert!(is_torrent_url("https://example.com/show.torrent"));
+        assert!(is_torrent_url(
+            "https://example.com/show%2Etorrent?token=secret"
+        ));
+        assert!(!is_torrent_url("https://example.com/video.mkv"));
+        assert!(!is_torrent_url("magnet:?xt=urn:btih:test"));
     }
 
     #[cfg(feature = "clouddrive")]

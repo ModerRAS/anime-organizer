@@ -453,7 +453,8 @@ pub(crate) fn gh_preflight() -> Result<String, AppError> {
 
 #[cfg(feature = "scraper")]
 pub(crate) fn gh_available() -> bool {
-    gh_preflight().is_ok()
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| gh_preflight().is_ok())
 }
 
 #[cfg(feature = "scraper")]
