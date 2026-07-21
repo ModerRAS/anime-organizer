@@ -68,6 +68,33 @@ test('formats legacy timestamps and persists the Chinese locale', async ({ page 
   await page.screenshot({ path: `test-results/jobs-chinese-${testInfo.project.name}.png`, fullPage: true })
 })
 
+test('keeps page sections padded on desktop and mobile', async ({ page }) => {
+  await page.goto('/')
+  const section = page.locator('.section-block').first()
+  await expect(section).toBeVisible()
+  const spacing = await section.evaluate(element => {
+    const style = getComputedStyle(element)
+    const box = element.getBoundingClientRect()
+    const heading = element.querySelector('.section-heading')!.getBoundingClientRect()
+    return {
+      border: style.borderLeftWidth,
+      leftInset: Math.round(heading.left - box.left),
+      rightPadding: parseFloat(style.paddingRight),
+    }
+  })
+  expect(spacing.border).toBe('1px')
+  expect(spacing.leftInset).toBeGreaterThanOrEqual(16)
+  expect(spacing.rightPadding).toBeGreaterThanOrEqual(16)
+
+  await page.goto('/jobs')
+  const emptyCell = page.locator('.empty-cell')
+  await expect(emptyCell).toBeVisible()
+  const mainBox = await page.locator('main').boundingBox()
+  const emptyBox = await emptyCell.boundingBox()
+  expect(emptyBox!.x).toBeGreaterThanOrEqual(mainBox!.x)
+  expect(emptyBox!.x).toBeLessThan(mainBox!.x + mainBox!.width)
+})
+
 test('shares capabilities across route navigation and keeps shell scroll regions independent', async ({ page }) => {
   let capabilityCalls = 0
   await page.unroute('**/api/v1/capabilities')
