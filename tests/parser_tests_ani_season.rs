@@ -5,6 +5,15 @@
 
 use anime_organizer::parser::FilenameParser;
 
+#[test]
+fn test_season_episode_token() {
+    let path = "[smzase] LV999 no Murabito - S01E02 - [CHT_JPN][WebRip H264 8bit 1080P].mp4";
+    let info = FilenameParser::parse(path).unwrap();
+    assert_eq!(info.series_name(), "LV999 no Murabito");
+    assert_eq!(info.season_number(), Some(1));
+    assert_eq!(info.episode, "02");
+}
+
 // Numeric suffix format: "Anime 2", "Anime 12"
 #[test]
 fn test_ani_season_numeric_suffix() {

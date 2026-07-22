@@ -33,6 +33,12 @@ use std::sync::LazyLock;
 
 static ANIME_FILE_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\[(?P<publisher>[^\]]+)\]").expect("正则表达式编译失败"));
+static SEASON_EPISODE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^(?P<title>.+?)\s*-\s*S(?P<season>\d{1,2})E(?P<episode>\d{1,4})(?P<rest>\s.*)$",
+    )
+    .expect("季集信息正则表达式编译失败")
+});
 
 static SEASON_SUFFIX_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
@@ -223,6 +229,17 @@ impl FilenameParser {
 
     fn parse_anime_episode(input: &str) -> Option<(String, String, &str)> {
         let input = input.trim_start();
+        if let Some(captures) = SEASON_EPISODE_REGEX.captures(input) {
+            let title = captures.name("title")?.as_str().trim();
+            let season = captures.name("season")?.as_str().parse::<u32>().ok()?;
+            let episode = captures.name("episode")?.as_str().parse::<u32>().ok()?;
+            let rest = captures.name("rest")?.as_str().trim_start();
+            return Some((
+                format!("{title} Season {season}"),
+                format!("{episode:02}"),
+                rest,
+            ));
+        }
         let bytes = input.as_bytes();
 
         let mut episode_info: Option<(usize, usize, usize)> = None;
