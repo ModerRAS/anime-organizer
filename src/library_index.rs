@@ -947,7 +947,8 @@ fn insert_record(conn: &Connection, record: &LibraryIndexRecord) -> Result<()> {
 }
 
 fn insert_extra(conn: &Connection, extra: &LibraryExtraRecord) -> Result<()> {
-    let series_uuid = stable_uuid("series", &normalize_key(&extra.series_title));
+    let series_uuid = root_series_uuid(&extra.relative_path)
+        .unwrap_or_else(|| stable_uuid("series", &normalize_key(&extra.series_title)));
     let series_id: i64 = conn
         .query_row(
             "SELECT id FROM series WHERE uuid = ?1",
@@ -1035,6 +1036,12 @@ fn resolve_series_uuid(conn: &Connection, record: &LibraryIndexRecord) -> Result
     }
 
     Ok(stable_uuid("series", &normalize_key(&record.series_title)))
+}
+
+fn root_series_uuid(relative_path: &str) -> Option<Uuid> {
+    relative_path
+        .split_once('/')
+        .map(|(root, _)| stable_uuid("series-root", &normalize_key(root)))
 }
 
 fn upsert_release_date(
