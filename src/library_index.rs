@@ -988,26 +988,7 @@ fn insert_extra(conn: &Connection, extra: &LibraryExtraRecord) -> Result<()> {
 }
 
 fn resolve_series_uuid(conn: &Connection, record: &LibraryIndexRecord) -> Result<Uuid> {
-    for external_id in &record.external_ids {
-        let uuid = conn
-            .query_row(
-                "SELECT series.uuid FROM series \
-                 INNER JOIN series_external_id ON series_external_id.series_id = series.id \
-                 WHERE series_external_id.provider = ?1 AND series_external_id.value = ?2 \
-                 LIMIT 1",
-                params![external_id.provider.as_i64(), external_id.value],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(|e| {
-                AppError::LibraryIndexError(format!("按 external_id 读取 series 失败: {e}"))
-            })?;
-        if let Some(uuid) = uuid.and_then(|value| Uuid::parse_str(&value).ok()) {
-            return Ok(uuid);
-        }
-    }
-
-    if let Some(root) = record.relative_path.split('/').next() {
+    if let Some((root, _)) = record.relative_path.split_once('/') {
         let prefix = format!("{root}/");
         let mut statement = conn
             .prepare(
@@ -1028,6 +1009,28 @@ fn resolve_series_uuid(conn: &Connection, record: &LibraryIndexRecord) -> Result
             if let Ok(uuid) = Uuid::parse_str(uuid) {
                 return Ok(uuid);
             }
+        }
+
+        // A library directory is authoritative even if a metadata lookup is wrong.
+        return Ok(stable_uuid("series-root", &normalize_key(root)));
+    }
+
+    for external_id in &record.external_ids {
+        let uuid = conn
+            .query_row(
+                "SELECT series.uuid FROM series \
+                 INNER JOIN series_external_id ON series_external_id.series_id = series.id \
+                 WHERE series_external_id.provider = ?1 AND series_external_id.value = ?2 \
+                 LIMIT 1",
+                params![external_id.provider.as_i64(), external_id.value],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| {
+                AppError::LibraryIndexError(format!("按 external_id 读取 series 失败: {e}"))
+            })?;
+        if let Some(uuid) = uuid.and_then(|value| Uuid::parse_str(&value).ok()) {
+            return Ok(uuid);
         }
     }
 

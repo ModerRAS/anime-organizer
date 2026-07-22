@@ -402,6 +402,41 @@ fn incremental_update_keeps_series_identity_after_metadata_title_change() {
 }
 
 #[test]
+fn directory_identity_prevents_external_id_merges_across_series_roots() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path();
+    let first_path = target.join("First Show").join("Season 1").join("01.mkv");
+    let second_path = target.join("Second Show").join("Season 1").join("01.mkv");
+    fs::create_dir_all(first_path.parent().unwrap()).unwrap();
+    fs::create_dir_all(second_path.parent().unwrap()).unwrap();
+    fs::write(&first_path, b"first").unwrap();
+    fs::write(&second_path, b"second").unwrap();
+
+    let mut first = LibraryIndexRecord::from_target_path(target, &first_path)
+        .unwrap()
+        .unwrap();
+    let mut second = LibraryIndexRecord::from_target_path(target, &second_path)
+        .unwrap()
+        .unwrap();
+    for record in [&mut first, &mut second] {
+        record.series_title = "Incorrect shared metadata".to_string();
+        record.external_ids = vec![ExternalId::new(ExternalProvider::Bangumi, 123)];
+    }
+
+    LibraryIndex::rebuild(target, &[first, second]).unwrap();
+
+    let conn = Connection::open(target.join("library.db")).unwrap();
+    let series_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM series", [], |row| row.get(0))
+        .unwrap();
+    let episode_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM episode", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(series_count, 2);
+    assert_eq!(episode_count, 2);
+}
+
+#[test]
 fn release_date_requires_a_valid_iso_calendar_date() {
     assert_eq!(
         ReleaseDate::parse_iso("2024-02-29").unwrap().to_string(),
