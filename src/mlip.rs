@@ -616,6 +616,7 @@ fn metadata_search_queries(
                     push_unique_title(&mut queries, format!("{title} 第{number}季"));
                 }
                 push_unique_title(&mut queries, format!("{title} Season {season}"));
+                push_unique_title(&mut queries, format!("{title} S{season}"));
             }
         } else {
             push_unique_title(&mut queries, title);
@@ -1267,6 +1268,9 @@ mod tests {
         assert!(queries
             .iter()
             .any(|query| query == "女性向遊戲世界對路人角色很不友好 Season 2"));
+        assert!(queries
+            .iter()
+            .any(|query| query == "女性向遊戲世界對路人角色很不友好 S2"));
         assert!(!queries
             .iter()
             .any(|query| query == "女性向遊戲世界對路人角色很不友好"));
