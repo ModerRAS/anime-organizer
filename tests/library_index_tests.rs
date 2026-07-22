@@ -402,7 +402,7 @@ fn incremental_update_keeps_series_identity_after_metadata_title_change() {
 }
 
 #[test]
-fn directory_identity_prevents_external_id_merges_across_series_roots() {
+fn confirmed_external_id_merges_series_across_roots() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path();
     let first_path = target.join("First Show").join("Season 1").join("01.mkv");
@@ -432,8 +432,12 @@ fn directory_identity_prevents_external_id_merges_across_series_roots() {
     let episode_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM episode", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(series_count, 2);
-    assert_eq!(episode_count, 2);
+    let media_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM media_file", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(series_count, 1);
+    assert_eq!(episode_count, 1);
+    assert_eq!(media_count, 2);
 }
 
 #[test]

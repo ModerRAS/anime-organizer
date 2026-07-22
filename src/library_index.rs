@@ -947,7 +947,7 @@ fn insert_record(conn: &Connection, record: &LibraryIndexRecord) -> Result<()> {
 }
 
 fn insert_extra(conn: &Connection, extra: &LibraryExtraRecord) -> Result<()> {
-    let series_uuid = root_series_uuid(&extra.relative_path)
+    let series_uuid = root_series_uuid(conn, &extra.relative_path)?
         .unwrap_or_else(|| stable_uuid("series", &normalize_key(&extra.series_title)));
     let series_id: i64 = conn
         .query_row(
@@ -989,33 +989,8 @@ fn insert_extra(conn: &Connection, extra: &LibraryExtraRecord) -> Result<()> {
 }
 
 fn resolve_series_uuid(conn: &Connection, record: &LibraryIndexRecord) -> Result<Uuid> {
-    if let Some((root, _)) = record.relative_path.split_once('/') {
-        let prefix = format!("{root}/");
-        let mut statement = conn
-            .prepare(
-                "SELECT DISTINCT series.uuid FROM series \
-                 INNER JOIN episode ON episode.series_id = series.id \
-                 INNER JOIN media_file ON media_file.episode_id = episode.id \
-                 WHERE substr(media_file.path, 1, ?1) = ?2 LIMIT 2",
-            )
-            .map_err(|e| AppError::LibraryIndexError(format!("准备 series 路径查询失败: {e}")))?;
-        let uuids = statement
-            .query_map(params![prefix.chars().count() as i64, prefix], |row| {
-                row.get::<_, String>(0)
-            })
-            .map_err(|e| AppError::LibraryIndexError(format!("按路径读取 series 失败: {e}")))?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| AppError::LibraryIndexError(format!("读取 series 路径结果失败: {e}")))?;
-        if let [uuid] = uuids.as_slice() {
-            if let Ok(uuid) = Uuid::parse_str(uuid) {
-                return Ok(uuid);
-            }
-        }
-
-        // A library directory is authoritative even if a metadata lookup is wrong.
-        return Ok(stable_uuid("series-root", &normalize_key(root)));
-    }
-
+    // A confirmed external identity may span several library directories. A
+    // directory remains the stable fallback when metadata is unavailable.
     for external_id in &record.external_ids {
         let uuid = conn
             .query_row(
@@ -1035,13 +1010,30 @@ fn resolve_series_uuid(conn: &Connection, record: &LibraryIndexRecord) -> Result
         }
     }
 
+    if let Some(uuid) = root_series_uuid(conn, &record.relative_path)? {
+        return Ok(uuid);
+    }
     Ok(stable_uuid("series", &normalize_key(&record.series_title)))
 }
 
-fn root_series_uuid(relative_path: &str) -> Option<Uuid> {
-    relative_path
-        .split_once('/')
-        .map(|(root, _)| stable_uuid("series-root", &normalize_key(root)))
+fn root_series_uuid(conn: &Connection, relative_path: &str) -> Result<Option<Uuid>> {
+    let Some((root, _)) = relative_path.split_once('/') else {
+        return Ok(None);
+    };
+    let prefix = format!("{root}/");
+    let uuid = conn
+        .query_row(
+            "SELECT series.uuid FROM series \
+             INNER JOIN episode ON episode.series_id = series.id \
+             INNER JOIN media_file ON media_file.episode_id = episode.id \
+             WHERE substr(media_file.path, 1, ?1) = ?2 LIMIT 1",
+            params![prefix.chars().count() as i64, prefix],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| AppError::LibraryIndexError(format!("按路径读取 series 失败: {e}")))?
+        .and_then(|value| Uuid::parse_str(&value).ok());
+    Ok(uuid.or_else(|| Some(stable_uuid("series-root", &normalize_key(root)))))
 }
 
 fn upsert_release_date(
