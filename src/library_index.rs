@@ -8,6 +8,7 @@ use crate::organizer::FileOrganizer;
 use crate::parser::{split_series_and_season, FilenameParser};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashSet;
+use std::io::{BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
@@ -648,42 +649,97 @@ fn staging_paths(target_root: &Path) -> StagingPaths {
             .unwrap_or_default()
             .as_nanos()
     );
+    let temp_root = std::env::temp_dir();
     StagingPaths {
-        local: std::env::temp_dir().join(format!("aniorg-{DATABASE_FILENAME}-{suffix}.tmp")),
+        local: temp_root.join(format!("aniorg-{DATABASE_FILENAME}-{suffix}.tmp")),
         upload: target_root.join(format!(".{DATABASE_FILENAME}.{suffix}.tmp")),
-        backup: target_root.join(format!(".{DATABASE_FILENAME}.{suffix}.bak")),
+        backup: temp_root.join(format!("aniorg-{DATABASE_FILENAME}-{suffix}.bak")),
     }
 }
 
 fn install_staged_database(paths: &StagingPaths, db_path: &Path) -> Result<()> {
     std::fs::copy(&paths.local, &paths.upload)
         .map_err(|e| AppError::LibraryIndexError(format!("上传媒体库索引失败: {e}")))?;
+    if !files_equal(&paths.local, &paths.upload)
+        .map_err(|e| AppError::LibraryIndexError(format!("校验已上传媒体库索引失败: {e}")))?
+    {
+        let _ = std::fs::remove_file(&paths.upload);
+        return Err(AppError::LibraryIndexError(
+            "已上传媒体库索引内容不完整".to_string(),
+        ));
+    }
 
     let had_database = db_path.exists();
     if had_database {
-        if let Err(error) = std::fs::rename(db_path, &paths.backup) {
+        std::fs::copy(db_path, &paths.backup).map_err(|error| {
             let _ = std::fs::remove_file(&paths.upload);
-            return Err(AppError::LibraryIndexError(format!(
-                "备份旧媒体库索引失败: {error}"
-            )));
-        }
+            let _ = std::fs::remove_file(&paths.backup);
+            AppError::LibraryIndexError(format!("备份旧媒体库索引到本地失败: {error}"))
+        })?;
     }
 
     if let Err(error) = std::fs::rename(&paths.upload, db_path) {
-        let restore_error = had_database
-            .then(|| std::fs::rename(&paths.backup, db_path).err())
-            .flatten();
+        let restore_error = if had_database && !db_path.exists() {
+            std::fs::copy(&paths.backup, db_path).err()
+        } else {
+            None
+        };
         let _ = std::fs::remove_file(&paths.upload);
+        let _ = std::fs::remove_file(&paths.backup);
         return Err(AppError::LibraryIndexError(match restore_error {
             Some(restore) => format!("替换媒体库索引失败: {error}; 恢复旧索引也失败: {restore}"),
             None => format!("替换媒体库索引失败: {error}"),
         }));
     }
 
-    if had_database {
+    let verification_error = match files_equal(&paths.local, db_path) {
+        Ok(true) => None,
+        Ok(false) => Some("已安装媒体库索引内容不完整".to_string()),
+        Err(error) => Some(format!("校验已安装媒体库索引失败: {error}")),
+    };
+    if let Some(verification_error) = verification_error {
+        let restore_error = if had_database {
+            std::fs::copy(&paths.backup, &paths.upload)
+                .and_then(|_| std::fs::rename(&paths.upload, db_path))
+                .err()
+        } else {
+            std::fs::remove_file(db_path).err()
+        };
+        let _ = std::fs::remove_file(&paths.upload);
         let _ = std::fs::remove_file(&paths.backup);
+        return Err(AppError::LibraryIndexError(match restore_error {
+            Some(restore) => {
+                format!("{verification_error}; 恢复旧索引也失败: {restore}")
+            }
+            None => format!("{verification_error}; 已恢复旧索引"),
+        }));
     }
+
+    let _ = std::fs::remove_file(&paths.backup);
     Ok(())
+}
+
+fn files_equal(left: &Path, right: &Path) -> std::io::Result<bool> {
+    let length = std::fs::metadata(left)?.len();
+    if std::fs::metadata(right)?.len() != length {
+        return Ok(false);
+    }
+
+    let mut left = BufReader::new(std::fs::File::open(left)?);
+    let mut right = BufReader::new(std::fs::File::open(right)?);
+    let mut left_buffer = [0_u8; 64 * 1024];
+    let mut right_buffer = [0_u8; 64 * 1024];
+    let mut remaining = length;
+    while remaining > 0 {
+        let chunk = remaining.min(left_buffer.len() as u64) as usize;
+        left.read_exact(&mut left_buffer[..chunk])?;
+        right.read_exact(&mut right_buffer[..chunk])?;
+        if left_buffer[..chunk] != right_buffer[..chunk] {
+            return Ok(false);
+        }
+        remaining -= chunk as u64;
+    }
+    Ok(true)
 }
 
 fn validate_user_version(conn: &Connection) -> Result<()> {
@@ -1318,4 +1374,39 @@ fn episode_key(value: f64) -> String {
 #[cfg(feature = "metadata")]
 fn parse_year(value: &str) -> Option<i32> {
     value.get(0..4)?.parse().ok()
+}
+
+#[cfg(test)]
+mod staged_install_tests {
+    use super::*;
+
+    #[test]
+    fn replaces_database_and_cleans_staging_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join(DATABASE_FILENAME);
+        let paths = StagingPaths {
+            local: directory.path().join("local.tmp"),
+            upload: directory.path().join("upload.tmp"),
+            backup: directory.path().join("backup.bak"),
+        };
+        std::fs::write(&db_path, b"old database").unwrap();
+        std::fs::write(&paths.local, b"new database").unwrap();
+
+        install_staged_database(&paths, &db_path).unwrap();
+
+        assert_eq!(std::fs::read(&db_path).unwrap(), b"new database");
+        assert!(!paths.upload.exists());
+        assert!(!paths.backup.exists());
+    }
+
+    #[test]
+    fn detects_same_length_content_mismatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let left = directory.path().join("left");
+        let right = directory.path().join("right");
+        std::fs::write(&left, b"abcdef").unwrap();
+        std::fs::write(&right, b"abcdeg").unwrap();
+
+        assert!(!files_equal(&left, &right).unwrap());
+    }
 }
