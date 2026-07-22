@@ -136,15 +136,43 @@ fn execute(
     let _ = queue.set_progress(job.id, "running");
     #[allow(unreachable_patterns)]
     match &spec {
-        JobSpec::Organize(args) => crate::run_organize_entry_with_log(args.clone(), &|message| {
-            let _ = queue.append_log(job.id, "info", message);
-        })
-        .map(|_| JobResult {
-            summary: "organize completed".to_string(),
-            data: serde_json::json!({}),
-            artifacts: Vec::new(),
-        })
-        .map_err(|error| error.to_string()),
+        JobSpec::Organize(args) => {
+            if args.rebuild_library_index {
+                let target = args.target.as_ref().map_or_else(
+                    || "the target library".to_string(),
+                    |path| path.display().to_string(),
+                );
+                let artwork = if args.no_images {
+                    "without refreshing artwork"
+                } else if args.force_overwrite {
+                    "with artwork force-refresh enabled"
+                } else {
+                    "with missing artwork downloads enabled"
+                };
+                let _ = queue.append_log(
+                    job.id,
+                    "info",
+                    &format!("Starting MLIP rebuild for {target} {artwork}"),
+                );
+            }
+            let result = crate::run_organize_entry_with_log(args.clone(), &|message| {
+                let _ = queue.append_log(job.id, "info", message);
+            });
+            if result.is_ok() && args.rebuild_library_index {
+                let _ = queue.append_log(
+                    job.id,
+                    "info",
+                    "MLIP rebuild finished and library.db was atomically replaced",
+                );
+            }
+            result
+                .map(|_| JobResult {
+                    summary: "organize completed".to_string(),
+                    data: serde_json::json!({}),
+                    artifacts: Vec::new(),
+                })
+                .map_err(|error| error.to_string())
+        }
         #[cfg(feature = "clouddrive")]
         JobSpec::RssPoll { .. } | JobSpec::RssPollAll => {
             let runtime = tokio::runtime::Runtime::new()
