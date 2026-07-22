@@ -679,18 +679,39 @@ fn install_staged_database(paths: &StagingPaths, db_path: &Path) -> Result<()> {
     }
 
     if let Err(error) = std::fs::rename(&paths.upload, db_path) {
-        let restore_error = if had_database && !db_path.exists() {
-            std::fs::copy(&paths.backup, db_path).err()
+        if error.kind() == std::io::ErrorKind::Unsupported {
+            if let Err(copy_error) = std::fs::copy(&paths.local, db_path) {
+                let restore_error = had_database
+                    .then(|| std::fs::copy(&paths.backup, db_path).err())
+                    .flatten();
+                let _ = std::fs::remove_file(&paths.upload);
+                let _ = std::fs::remove_file(&paths.backup);
+                return Err(AppError::LibraryIndexError(match restore_error {
+                    Some(restore) => format!(
+                        "CloudDrive 不支持原子替换且覆盖媒体库索引失败: {copy_error}; 恢复旧索引也失败: {restore}"
+                    ),
+                    None => format!(
+                        "CloudDrive 不支持原子替换且覆盖媒体库索引失败: {copy_error}"
+                    ),
+                }));
+            }
         } else {
-            None
-        };
-        let _ = std::fs::remove_file(&paths.upload);
-        let _ = std::fs::remove_file(&paths.backup);
-        return Err(AppError::LibraryIndexError(match restore_error {
-            Some(restore) => format!("替换媒体库索引失败: {error}; 恢复旧索引也失败: {restore}"),
-            None => format!("替换媒体库索引失败: {error}"),
-        }));
+            let restore_error = if had_database && !db_path.exists() {
+                std::fs::copy(&paths.backup, db_path).err()
+            } else {
+                None
+            };
+            let _ = std::fs::remove_file(&paths.upload);
+            let _ = std::fs::remove_file(&paths.backup);
+            return Err(AppError::LibraryIndexError(match restore_error {
+                Some(restore) => {
+                    format!("替换媒体库索引失败: {error}; 恢复旧索引也失败: {restore}")
+                }
+                None => format!("替换媒体库索引失败: {error}"),
+            }));
+        }
     }
+    let _ = std::fs::remove_file(&paths.upload);
 
     let verification_error = match files_equal(&paths.local, db_path) {
         Ok(true) => None,

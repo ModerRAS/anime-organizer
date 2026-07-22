@@ -162,7 +162,7 @@ fn execute(
                 let _ = queue.append_log(
                     job.id,
                     "info",
-                    "MLIP rebuild finished and library.db was atomically replaced",
+                    "MLIP rebuild finished and library.db was published",
                 );
             }
             result
