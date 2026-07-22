@@ -40,6 +40,14 @@ fn test_ani_season_chinese_cjk() {
 }
 
 #[test]
+fn test_ani_season_chinese_numeric_with_spaces() {
+    let path = "[ANi] 終末起點 第 2 季 - 03 [1080P].mp4";
+    let info = FilenameParser::parse(path).unwrap();
+    assert_eq!(info.season_number(), Some(2));
+    assert_eq!(info.series_name(), "終末起點");
+}
+
+#[test]
 fn test_ani_season_chinese_fourth() {
     let path = "[ANi] Test Anime 第四季 - 01 [1080P].mp4";
     let info = FilenameParser::parse(path).unwrap();

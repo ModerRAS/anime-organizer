@@ -42,7 +42,7 @@ static SEASON_SUFFIX_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         Regex::new(r"(?i)^(?P<title>.+?)\s+(?P<num>\d{1,2})(?:st|nd|rd|th)\s+season$")
             .expect("季信息正则表达式编译失败"),
         Regex::new(
-            r"^(?P<title>.+?)\s*第(?P<num>\d{1,2}|[一二三四五六七八九十]+)季(?:\s*[~～].+)?$",
+            r"^(?P<title>.+?)\s*第\s*(?P<num>\d{1,2}|[一二三四五六七八九十]+)\s*季(?:\s*[~～].+)?$",
         )
         .expect("季信息正则表达式编译失败"),
         Regex::new(r"^(?P<title>.+?)\s*(?P<num>\d{1,2}|[一二三四五六七八九十]+)期$")

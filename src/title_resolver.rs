@@ -76,8 +76,8 @@ pub(crate) async fn resolve_latin_title(
     }
 
     match resolve_from_anilist(title, season_hint).await {
-        Ok(Some(title)) => Some(ResolvedTitle {
-            titles: vec![title],
+        Ok(Some(titles)) => Some(ResolvedTitle {
+            titles,
             source: "AniList",
         }),
         Ok(None) => None,
@@ -218,7 +218,7 @@ fn decode_html_title(value: &str) -> String {
 async fn resolve_from_anilist(
     title: &str,
     season_hint: Option<u32>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<Vec<String>>, String> {
     let response = HTTP_CLIENT
         .post(ANILIST_GRAPHQL_URL)
         .json(&serde_json::json!({
@@ -238,7 +238,7 @@ fn select_anilist_title(
     response: &AniListResponse,
     query: &str,
     season_hint: Option<u32>,
-) -> Option<String> {
+) -> Option<Vec<String>> {
     let expected_season = season_hint.unwrap_or(1);
     let query_lower = query.to_ascii_lowercase();
 
@@ -272,13 +272,20 @@ fn select_anilist_title(
             (score >= 0.75).then_some((media, score))
         })
         .max_by(|(_, left), (_, right)| left.total_cmp(right))
-        .and_then(|(media, _)| {
-            media
-                .title
-                .native
-                .clone()
-                .or_else(|| media.title.english.clone())
-                .or_else(|| media.title.romaji.clone())
+        .map(|(media, _)| {
+            let mut titles = Vec::new();
+            if let Some(native) = media.title.native.as_ref() {
+                titles.push(native.clone());
+            }
+            for candidate in media.all_titles() {
+                if is_latin_title(candidate)
+                    && latin_title_match_score(query, candidate) >= 0.75
+                    && !titles.iter().any(|title| title == candidate)
+                {
+                    titles.push(candidate.to_string());
+                }
+            }
+            titles
         })
 }
 
@@ -508,7 +515,10 @@ mod tests {
 
         assert_eq!(
             select_anilist_title(&response, "Honzuki no Gekokujou", None),
-            Some("本好きの下剋上".to_string())
+            Some(vec![
+                "本好きの下剋上".to_string(),
+                "Honzuki no Gekokujou".to_string(),
+            ])
         );
     }
 
@@ -525,7 +535,31 @@ mod tests {
 
         assert_eq!(
             select_anilist_title(&response, "Rakudai Kenja no Gakuin Musou", None),
-            Some("落第賢者の学院無双".to_string())
+            Some(vec![
+                "落第賢者の学院無双".to_string(),
+                "Rakudai Kenja no Gakuin Musou: Nidome no Tensei, S-Rank Cheat Majutsushi Bouken-roku".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn anilist_keeps_latin_candidates_for_cross_script_bangumi_search() {
+        let response: AniListResponse = serde_json::from_str(
+            r#"{
+  "data": {"Page": {"media": [
+    {"title":{"romaji":"BanG Dream! Yume∞Mita","english":"BanG Dream! YUME∞MITA","native":"バンドリ！ ゆめ∞みた"},"synonyms":[],"format":"TV"}
+  ]}}
+}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            select_anilist_title(&response, "BanG Dream Yumemita", None),
+            Some(vec![
+                "バンドリ！ ゆめ∞みた".to_string(),
+                "BanG Dream! Yume∞Mita".to_string(),
+                "BanG Dream! YUME∞MITA".to_string(),
+            ])
         );
     }
 
