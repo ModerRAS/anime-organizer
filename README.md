@@ -553,6 +553,12 @@ v2 新增必需表 `media_subtitle`，并将 `subtitle` capability 设为 `1`。
 
 v3 新增必需表 `media_extra` 和 `extra` capability。完整目标扫描会把 OVA、`NCOP`、`NCED`、`Tokuten` 和 `Images` 文件作为所属作品的本地特典编目；BD `menu` 文件仍会忽略。特典不创建伪造的 episode，也不参与正片集数。对既有 v1/v2 数据库执行写入时会自动升级为 v3。
 
+MLIP v4 是当前 writer 的默认输出。它新增 `artwork_pack` 与 `artwork_asset`，将可验证的原始图片字节保存到不可变、未压缩的 tar shards；`series_artwork` 和 `episode_artwork` 保留相对 `path` fallback，并可引用 `asset_id` 及 binding 级来源信息。writer 会先发布并校验 pack，再发布引用它们的 `library.db`。完整重建会生成 v4；已审核且不希望重新解析标题/元数据的 v3 库可用以下维护工具原样升级：
+
+```bash
+cargo run --example migrate_mlip_v3_to_v4 -- "/path/to/anime"
+```
+
 ### 🎨 文件命名格式
 
 #### 支持的源文件名格式
@@ -910,6 +916,12 @@ The source directory must exist. An empty source performs no move, copy, or hard
 Matching `.srt`, `.ass`, `.ssa`, and `.vtt` sidecars are organized with their video and exported through the required MLIP v2 `media_subtitle` table. A sidecar must share the video stem or append a language-style suffix; `.sub` is excluded because VobSub requires a paired `.idx`.
 
 MLIP v3 adds the required `media_extra` table. Full target scans classify OVA, NCOP, NCED, Tokuten, and Images videos as series-owned extras while ignoring Blu-ray menu videos. Extras never create fake episode rows or change the normal episode count. Existing v1/v2 databases migrate to v3 on the next write.
+
+MLIP v4 is the current writer output. It adds `artwork_pack` and `artwork_asset`, storing verified original image bytes in immutable, uncompressed tar shards. `series_artwork` and `episode_artwork` retain relative `path` fallback and can reference an `asset_id` with binding-level provenance. Packs are published and verified before a `library.db` that references them. A full rebuild writes v4; an audited v3 library can be upgraded without re-resolving titles or metadata:
+
+```bash
+cargo run --example migrate_mlip_v3_to_v4 -- "/path/to/anime"
+```
 
 ### 🔗 Hard Link Notes
 

@@ -94,7 +94,7 @@ fn library_index_flag_creates_target_root_database() {
         subtitle_path,
         "Test Show/[ANi] Test Show - 01 [1080P](zh-CN).ass"
     );
-    assert_eq!(user_version, 3);
+    assert_eq!(user_version, 4);
     assert!(target
         .path()
         .join("Test Show")

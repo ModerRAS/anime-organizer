@@ -323,7 +323,7 @@ impl TmdbClient {
 
     /// 根据 AniDB 条目页提取海报地址并下载。
     #[cfg(feature = "metadata")]
-    pub async fn download_anidb_poster(&self, anidb_id: u32, save_path: &Path) -> Result<()> {
+    pub async fn download_anidb_poster(&self, anidb_id: u32, save_path: &Path) -> Result<String> {
         let page_url = format!("https://anidb.net/anime/{anidb_id}");
         let resp = self
             .http
@@ -350,7 +350,9 @@ impl TmdbClient {
             )));
         };
 
-        self.download_image(image_match.as_str(), save_path).await
+        let image_url = image_match.as_str().to_string();
+        self.download_image(&image_url, save_path).await?;
+        Ok(image_url)
     }
 
     /// 下载图片并保存到文件

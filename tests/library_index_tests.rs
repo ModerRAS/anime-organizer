@@ -20,7 +20,7 @@ fn table_names(conn: &Connection) -> Vec<String> {
 }
 
 #[test]
-fn rebuild_creates_mlip_v3_schema_with_real_foreign_keys() {
+fn rebuild_creates_mlip_v4_schema_with_real_foreign_keys() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path();
     fs::create_dir_all(target.join("Test Show")).unwrap();
@@ -42,17 +42,19 @@ fn rebuild_creates_mlip_v3_schema_with_real_foreign_keys() {
     let user_version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 3);
+    assert_eq!(user_version, 4);
     let schema: String = conn
         .query_row("SELECT value FROM meta WHERE key = 'schema'", [], |row| {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(schema, "3");
+    assert_eq!(schema, "4");
 
     assert_eq!(
         table_names(&conn),
         vec![
+            "artwork_asset",
+            "artwork_pack",
             "capability",
             "episode",
             "episode_artwork",

@@ -8,13 +8,87 @@ use anime_organizer::nfo::{EpisodeNfo, NfoWriter, UniqueId};
 use anime_organizer::{
     parser::split_series_and_season, AnimeFileInfo, AnimeMetadata, LibraryIndexRecord,
 };
-use std::collections::{HashMap, HashSet};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{LazyLock, Mutex};
 use zhhz::{Config, Converter};
 
 static TRADITIONAL_TO_SIMPLIFIED: LazyLock<Mutex<Converter>> =
     LazyLock::new(|| Mutex::new(Converter::new(Config::T2s)));
+
+#[cfg(feature = "metadata")]
+const ARTWORK_PROVENANCE_FILE: &str = ".aniorg-artwork-sources.json";
+
+/// Provenance for one locally retained artwork binding, captured when the bytes are downloaded.
+#[cfg(feature = "metadata")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ArtworkSource {
+    pub(crate) source_url: String,
+    pub(crate) source_provider: i64,
+    pub(crate) source_subject_id: String,
+    pub(crate) downloaded_at: String,
+}
+
+#[cfg(feature = "metadata")]
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ArtworkSourceStore {
+    artwork: BTreeMap<String, ArtworkSource>,
+}
+
+#[cfg(feature = "metadata")]
+impl ArtworkSource {
+    fn downloaded(
+        source_provider: i64,
+        source_subject_id: impl ToString,
+        source_url: &str,
+    ) -> Self {
+        Self {
+            source_url: source_url.to_string(),
+            source_provider,
+            source_subject_id: source_subject_id.to_string(),
+            downloaded_at: time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default(),
+        }
+    }
+}
+
+#[cfg(feature = "metadata")]
+pub(crate) fn artwork_source(path: &Path) -> Option<ArtworkSource> {
+    let parent = path.parent()?;
+    let name = path.file_name()?.to_str()?;
+    let store = std::fs::read(parent.join(ARTWORK_PROVENANCE_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ArtworkSourceStore>(&bytes).ok())?;
+    store.artwork.get(name).cloned()
+}
+
+#[cfg(feature = "metadata")]
+fn record_artwork_source(path: &Path, source: &ArtworkSource) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return;
+    };
+    let provenance_path = parent.join(ARTWORK_PROVENANCE_FILE);
+    let mut store = std::fs::read(&provenance_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ArtworkSourceStore>(&bytes).ok())
+        .unwrap_or_default();
+    store.artwork.insert(name.to_string(), source.clone());
+    let Ok(bytes) = serde_json::to_vec_pretty(&store) else {
+        return;
+    };
+    let temporary = parent.join(format!(".{ARTWORK_PROVENANCE_FILE}.tmp"));
+    if std::fs::write(&temporary, bytes).is_ok()
+        && std::fs::rename(&temporary, &provenance_path).is_err()
+    {
+        let _ = std::fs::copy(&temporary, &provenance_path);
+        let _ = std::fs::remove_file(&temporary);
+    }
+}
 
 #[cfg(feature = "metadata")]
 pub(crate) struct MetadataLookup<'a> {
@@ -281,11 +355,14 @@ pub(crate) async fn download_images(
                 Ok(bytes) => {
                     write_poster_images(
                         &bytes,
-                        &root_poster_path,
-                        &season_poster_path,
-                        needs_root,
-                        needs_season,
+                        PosterImageTargets {
+                            root_path: &root_poster_path,
+                            season_path: &season_poster_path,
+                            write_root: needs_root,
+                            write_season: needs_season,
+                        },
                         "Bangumi",
+                        &ArtworkSource::downloaded(1, meta.bangumi_id, url),
                         verbose,
                     );
                     poster_written = true;
@@ -311,11 +388,14 @@ pub(crate) async fn download_images(
                     Ok(bytes) => {
                         write_poster_images(
                             &bytes,
-                            &root_poster_path,
-                            &season_poster_path,
-                            needs_root,
-                            needs_season,
+                            PosterImageTargets {
+                                root_path: &root_poster_path,
+                                season_path: &season_poster_path,
+                                write_root: needs_root,
+                                write_season: needs_season,
+                            },
                             "TMDB",
+                            &ArtworkSource::downloaded(2, show.id, &url),
                             verbose,
                         );
                         poster_written = true;
@@ -335,8 +415,14 @@ pub(crate) async fn download_images(
                     Ok(bytes) => {
                         if let Err(error) = NfoWriter::write_image(&fanart_path, &bytes) {
                             eprintln!("背景图写入失败: {error}");
-                        } else if verbose {
-                            eprintln!("已下载 TMDB 背景图: {}", fanart_path.display());
+                        } else {
+                            record_artwork_source(
+                                &fanart_path,
+                                &ArtworkSource::downloaded(2, show.id, &url),
+                            );
+                            if verbose {
+                                eprintln!("已下载 TMDB 背景图: {}", fanart_path.display());
+                            }
                         }
                     }
                     Err(error) => eprintln!("TMDB 背景图下载失败: {error}"),
@@ -353,7 +439,9 @@ pub(crate) async fn download_images(
                 .download_anidb_poster(anidb_id, &root_poster_path)
                 .await
             {
-                Ok(()) => {
+                Ok(image_url) => {
+                    let source = ArtworkSource::downloaded(3, anidb_id, &image_url);
+                    record_artwork_source(&root_poster_path, &source);
                     if verbose {
                         eprintln!("已从 AniDB 下载海报: {}", root_poster_path.display());
                     }
@@ -365,6 +453,8 @@ pub(crate) async fn download_images(
                                     NfoWriter::write_image(&season_poster_path, &bytes)
                                 {
                                     eprintln!("季海报写入失败: {error}");
+                                } else {
+                                    record_artwork_source(&season_poster_path, &source);
                                 }
                             }
                             Err(error) => eprintln!("读取 AniDB 海报失败: {error}"),
@@ -382,28 +472,40 @@ pub(crate) async fn download_images(
 }
 
 #[cfg(feature = "metadata")]
+struct PosterImageTargets<'a> {
+    root_path: &'a Path,
+    season_path: &'a Path,
+    write_root: bool,
+    write_season: bool,
+}
+
+#[cfg(feature = "metadata")]
 fn write_poster_images(
     bytes: &[u8],
-    root_poster_path: &Path,
-    season_poster_path: &Path,
-    needs_root: bool,
-    needs_season: bool,
+    targets: PosterImageTargets<'_>,
     source: &str,
+    provenance: &ArtworkSource,
     verbose: bool,
 ) {
-    if needs_root {
-        if let Err(error) = NfoWriter::write_image(root_poster_path, bytes) {
+    if targets.write_root {
+        if let Err(error) = NfoWriter::write_image(targets.root_path, bytes) {
             eprintln!("海报写入失败: {error}");
-        } else if verbose {
-            eprintln!("已下载 {source} 海报: {}", root_poster_path.display());
+        } else {
+            record_artwork_source(targets.root_path, provenance);
+            if verbose {
+                eprintln!("已下载 {source} 海报: {}", targets.root_path.display());
+            }
         }
     }
 
-    if needs_season {
-        if let Err(error) = NfoWriter::write_image(season_poster_path, bytes) {
+    if targets.write_season {
+        if let Err(error) = NfoWriter::write_image(targets.season_path, bytes) {
             eprintln!("季海报写入失败: {error}");
-        } else if verbose {
-            eprintln!("已下载 {source} 季海报: {}", season_poster_path.display());
+        } else {
+            record_artwork_source(targets.season_path, provenance);
+            if verbose {
+                eprintln!("已下载 {source} 季海报: {}", targets.season_path.display());
+            }
         }
     }
 }
@@ -1550,5 +1652,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(subject.id, 471578);
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn artwork_source_round_trips_the_exact_download_url() {
+        let directory = tempfile::tempdir().unwrap();
+        let poster = directory.path().join("poster.jpg");
+        std::fs::write(&poster, b"image").unwrap();
+        let source = ArtworkSource {
+            source_url: "https://lain.bgm.tv/pic/cover/l/abc%20def.jpg?token=raw".to_string(),
+            source_provider: 1,
+            source_subject_id: "424242".to_string(),
+            downloaded_at: "2026-07-23T00:00:00Z".to_string(),
+        };
+
+        record_artwork_source(&poster, &source);
+
+        let restored = artwork_source(&poster).unwrap();
+        assert_eq!(restored.source_url, source.source_url);
+        assert_eq!(restored.source_provider, source.source_provider);
+        assert_eq!(restored.source_subject_id, source.source_subject_id);
+        assert_eq!(restored.downloaded_at, source.downloaded_at);
     }
 }

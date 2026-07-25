@@ -20,11 +20,12 @@ use crate::cli::*;
 use crate::commands::run_command;
 #[cfg(feature = "metadata")]
 use crate::mlip::{
-    anime_group_min_episode, apply_bangumi_episode_details, create_episode_nfo, download_images,
-    fetch_anime_metadata, fetch_bangumi_episodes_cached, min_episode_by_series, MetadataLookup,
+    anime_group_min_episode, apply_bangumi_episode_details, artwork_source, create_episode_nfo,
+    download_images, fetch_anime_metadata, fetch_bangumi_episodes_cached, min_episode_by_series,
+    MetadataLookup,
 };
 #[cfg(feature = "metadata")]
-use anime_organizer::library_index::{Artwork, ArtworkKind};
+use anime_organizer::library_index::{Artwork, ArtworkKind, ExternalProvider};
 use anime_organizer::{
     error::AppError, AnimeFileInfo, FileOrganizer, FilenameParser, LibraryExtraRecord,
     LibraryIndex, LibraryIndexRecord, OperationMode,
@@ -1171,7 +1172,24 @@ fn add_series_artwork_if_exists(
     }
 
     if let Some(relative) = path.strip_prefix(target).ok().map(normalized_relative_path) {
-        record.series_artwork.push(Artwork::new(kind, relative));
+        let mut artwork = Artwork::new(kind, relative);
+        if let Some(source) = artwork_source(path) {
+            let provider = match source.source_provider {
+                1 => Some(ExternalProvider::Bangumi),
+                2 => Some(ExternalProvider::Tmdb),
+                3 => Some(ExternalProvider::Anidb),
+                _ => None,
+            };
+            if let Some(provider) = provider {
+                artwork = artwork.with_source(
+                    provider,
+                    source.source_subject_id,
+                    Some(source.source_url),
+                    Some(source.downloaded_at),
+                );
+            }
+        }
+        record.series_artwork.push(artwork);
     }
 }
 

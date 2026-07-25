@@ -24,6 +24,7 @@ tmp/
 bangumi-archive
 .sisyphus
 *.db
+!tests/fixtures/mlip-v4/**/library.db
 
 .playwright-mcp/
 

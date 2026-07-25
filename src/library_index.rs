@@ -3,11 +3,12 @@
 //! The generated database is a read-only protocol artifact for players. User
 //! state such as playback history or favorites belongs in the player database.
 
+use crate::artwork_pack::{build_and_publish, build_and_publish_artwork, ArtworkPacking};
 use crate::error::{AppError, Result};
 use crate::organizer::FileOrganizer;
 use crate::parser::{split_series_and_season, FilenameParser};
 use rusqlite::{params, Connection, OptionalExtension};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,7 +23,7 @@ pub const DATABASE_FILENAME: &str = "library.db";
 const MLIP_NAMESPACE: Uuid = Uuid::from_u128(0x3f1a60c1_0f29_4f54_96bd_2068841e14c1);
 static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// MLIP v3 schema. This is the protocol source of truth.
+/// MLIP v1-v3 compatibility schema, extended by the v4 artifact tables below.
 pub const MLIP_SCHEMA_SQL: &str = r#"
 PRAGMA foreign_keys = ON;
 
@@ -235,6 +236,89 @@ CREATE TABLE capability
 PRAGMA user_version = 3;
 "#;
 
+/// MLIP v4 immutable artwork-pack schema extension.
+pub const MLIP_V4_SCHEMA_SQL: &str = r#"
+CREATE TABLE artwork_pack
+(
+    id              INTEGER PRIMARY KEY,
+    sha256          TEXT UNIQUE NOT NULL CHECK(length(sha256) = 64),
+    path            TEXT UNIQUE NOT NULL,
+    byte_length     INTEGER NOT NULL CHECK(byte_length >= 1024),
+    asset_count     INTEGER NOT NULL CHECK(asset_count > 0)
+);
+
+CREATE TABLE artwork_asset
+(
+    id              INTEGER PRIMARY KEY,
+    sha256          TEXT UNIQUE NOT NULL CHECK(length(sha256) = 64),
+    pack_id         INTEGER NOT NULL,
+    member_name     TEXT NOT NULL,
+    data_offset     INTEGER NOT NULL CHECK(data_offset >= 512 AND data_offset % 512 = 0),
+    byte_length     INTEGER NOT NULL CHECK(byte_length > 0),
+    media_type      TEXT NOT NULL,
+    width           INTEGER NOT NULL CHECK(width > 0),
+    height          INTEGER NOT NULL CHECK(height > 0),
+
+    FOREIGN KEY(pack_id)
+        REFERENCES artwork_pack(id)
+        ON DELETE RESTRICT,
+
+    UNIQUE(pack_id, member_name)
+);
+
+DROP INDEX idx_series_artwork_series;
+ALTER TABLE series_artwork RENAME TO series_artwork_v3;
+CREATE TABLE series_artwork
+(
+    id                  INTEGER PRIMARY KEY,
+    series_id           INTEGER NOT NULL,
+    artwork_kind        INTEGER NOT NULL,
+    path                TEXT,
+    asset_id            INTEGER,
+    source_url          TEXT,
+    source_provider     INTEGER,
+    source_subject_id   TEXT,
+    downloaded_at       TEXT,
+
+    FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE,
+    FOREIGN KEY(asset_id) REFERENCES artwork_asset(id) ON DELETE RESTRICT,
+    CHECK(path IS NOT NULL OR asset_id IS NOT NULL),
+    UNIQUE(series_id, artwork_kind, path)
+);
+INSERT INTO series_artwork (id, series_id, artwork_kind, path)
+SELECT id, series_id, artwork_kind, path FROM series_artwork_v3;
+DROP TABLE series_artwork_v3;
+CREATE INDEX idx_series_artwork_series ON series_artwork(series_id);
+CREATE INDEX idx_series_artwork_asset ON series_artwork(asset_id);
+
+DROP INDEX idx_episode_artwork_episode;
+ALTER TABLE episode_artwork RENAME TO episode_artwork_v3;
+CREATE TABLE episode_artwork
+(
+    id                  INTEGER PRIMARY KEY,
+    episode_id          INTEGER NOT NULL,
+    artwork_kind        INTEGER NOT NULL,
+    path                TEXT,
+    asset_id            INTEGER,
+    source_url          TEXT,
+    source_provider     INTEGER,
+    source_subject_id   TEXT,
+    downloaded_at       TEXT,
+
+    FOREIGN KEY(episode_id) REFERENCES episode(id) ON DELETE CASCADE,
+    FOREIGN KEY(asset_id) REFERENCES artwork_asset(id) ON DELETE RESTRICT,
+    CHECK(path IS NOT NULL OR asset_id IS NOT NULL),
+    UNIQUE(episode_id, artwork_kind, path)
+);
+INSERT INTO episode_artwork (id, episode_id, artwork_kind, path)
+SELECT id, episode_id, artwork_kind, path FROM episode_artwork_v3;
+DROP TABLE episode_artwork_v3;
+CREATE INDEX idx_episode_artwork_episode ON episode_artwork(episode_id);
+CREATE INDEX idx_episode_artwork_asset ON episode_artwork(asset_id);
+
+PRAGMA user_version = 4;
+"#;
+
 /// MLIP artwork kind integer enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArtworkKind {
@@ -248,7 +332,7 @@ pub enum ArtworkKind {
 }
 
 impl ArtworkKind {
-    fn as_i64(self) -> i64 {
+    pub(crate) fn as_i64(self) -> i64 {
         self as i64
     }
 }
@@ -269,7 +353,7 @@ impl ExtraKind {
     }
 }
 
-/// MLIP external id provider integer enum.
+/// MLIP provider integer enum, shared by external IDs and v4 artwork provenance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExternalProvider {
     Bangumi = 1,
@@ -288,6 +372,10 @@ impl ExternalProvider {
 pub struct Artwork {
     pub kind: ArtworkKind,
     pub path: String,
+    pub source_url: Option<String>,
+    pub source_provider: Option<ExternalProvider>,
+    pub source_subject_id: Option<String>,
+    pub downloaded_at: Option<String>,
 }
 
 impl Artwork {
@@ -296,7 +384,43 @@ impl Artwork {
         Self {
             kind,
             path: path.into(),
+            source_url: None,
+            source_provider: None,
+            source_subject_id: None,
+            downloaded_at: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_source(
+        mut self,
+        provider: ExternalProvider,
+        subject_id: impl ToString,
+        source_url: Option<String>,
+        downloaded_at: Option<String>,
+    ) -> Self {
+        self.source_provider = Some(provider);
+        self.source_subject_id = Some(subject_id.to_string());
+        self.source_url = source_url;
+        self.downloaded_at = downloaded_at;
+        self
+    }
+
+    pub(crate) fn has_valid_source_identity(&self) -> bool {
+        let provider_identity = match (&self.source_provider, &self.source_subject_id) {
+            (None, None) => true,
+            (Some(_), Some(subject_id)) => !subject_id.trim().is_empty(),
+            _ => false,
+        };
+        provider_identity
+            && self
+                .source_url
+                .as_deref()
+                .is_none_or(|url| !url.trim().is_empty())
+            && self
+                .downloaded_at
+                .as_deref()
+                .is_none_or(|value| !value.trim().is_empty())
     }
 }
 
@@ -578,21 +702,103 @@ impl LibraryIndex {
         records: &[LibraryIndexRecord],
         extras: &[LibraryExtraRecord],
     ) -> Result<LibraryIndexStats> {
+        Self::rebuild_v4(target_root, records, extras)
+    }
+
+    /// Explicit v4 entry point retained for fixture generation and staging tools.
+    pub fn rebuild_v4_staging(
+        target_root: &Path,
+        records: &[LibraryIndexRecord],
+        extras: &[LibraryExtraRecord],
+    ) -> Result<LibraryIndexStats> {
+        Self::rebuild_v4(target_root, records, extras)
+    }
+
+    fn rebuild_v4(
+        target_root: &Path,
+        records: &[LibraryIndexRecord],
+        extras: &[LibraryExtraRecord],
+    ) -> Result<LibraryIndexStats> {
+        let packing = build_and_publish(target_root, records)?;
         let db_path = Self::database_path(target_root);
         let paths = staging_paths(target_root);
         let result = (|| {
             {
-                let mut conn = Connection::open(&paths.local)
-                    .map_err(|e| AppError::LibraryIndexError(format!("打开临时数据库失败: {e}")))?;
-                conn.execute_batch(MLIP_SCHEMA_SQL).map_err(|e| {
-                    AppError::LibraryIndexError(format!("创建 MLIP schema 失败: {e}"))
+                let mut conn = Connection::open(&paths.local).map_err(|e| {
+                    AppError::LibraryIndexError(format!("打开 v4 临时数据库失败: {e}"))
                 })?;
-                write_records(&mut conn, target_root, records, extras, true)?;
+                conn.execute_batch(MLIP_SCHEMA_SQL)
+                    .and_then(|_| conn.execute_batch(MLIP_V4_SCHEMA_SQL))
+                    .map_err(|e| {
+                        AppError::LibraryIndexError(format!("创建 MLIP v4 schema 失败: {e}"))
+                    })?;
+                write_records_v4(&mut conn, target_root, records, extras, &packing)?;
             }
 
             let stats = {
-                let conn = Connection::open(&paths.local)
-                    .map_err(|e| AppError::LibraryIndexError(format!("校验临时数据库失败: {e}")))?;
+                let conn = Connection::open(&paths.local).map_err(|e| {
+                    AppError::LibraryIndexError(format!("校验 v4 临时数据库失败: {e}"))
+                })?;
+                read_stats(&conn)?
+            };
+            install_staged_database(&paths, &db_path)?;
+            Ok(stats)
+        })();
+        let _ = std::fs::remove_file(&paths.local);
+        result
+    }
+
+    /// Converts an already-audited v3 library into v4 without re-resolving titles or metadata.
+    ///
+    /// Packs are verified before the staged database that references them is published.
+    pub fn migrate_v3_to_v4(target_root: &Path) -> Result<LibraryIndexStats> {
+        let db_path = Self::database_path(target_root);
+        if !db_path.exists() {
+            return Err(AppError::LibraryIndexError(format!(
+                "无法迁移不存在的媒体库索引: {}",
+                db_path.display()
+            )));
+        }
+
+        let artwork = {
+            let conn = Connection::open(&db_path)
+                .map_err(|e| AppError::LibraryIndexError(format!("打开媒体库索引失败: {e}")))?;
+            match validate_user_version(&conn)? {
+                4 => return read_stats(&conn),
+                3 => read_v3_artwork(&conn)?,
+                version => {
+                    return Err(AppError::LibraryIndexError(format!(
+                        "只能迁移 MLIP v3 媒体库，当前版本: {version}"
+                    )));
+                }
+            }
+        };
+        let packing = build_and_publish_artwork(target_root, &artwork)?;
+        let paths = staging_paths(target_root);
+        let result = (|| {
+            std::fs::copy(&db_path, &paths.local).map_err(|e| {
+                AppError::LibraryIndexError(format!("复制媒体库索引到本地失败: {e}"))
+            })?;
+            let stats = {
+                let mut conn = Connection::open(&paths.local).map_err(|e| {
+                    AppError::LibraryIndexError(format!("打开本地媒体库索引失败: {e}"))
+                })?;
+                conn.execute_batch("PRAGMA foreign_keys = ON;")
+                    .and_then(|_| conn.execute_batch(MLIP_V4_SCHEMA_SQL))
+                    .map_err(|e| {
+                        AppError::LibraryIndexError(format!("升级 MLIP v4 schema 失败: {e}"))
+                    })?;
+                let tx = conn.transaction().map_err(|e| {
+                    AppError::LibraryIndexError(format!("开始 v4 迁移事务失败: {e}"))
+                })?;
+                upsert_meta(&tx, target_root, true, 4)?;
+                upsert_capabilities(&tx, true)?;
+                let asset_ids = packing.write_catalog(&tx)?;
+                attach_packed_v3_artwork(&tx, "series_artwork", &packing, &asset_ids)?;
+                attach_packed_v3_artwork(&tx, "episode_artwork", &packing, &asset_ids)?;
+                tx.commit().map_err(|e| {
+                    AppError::LibraryIndexError(format!("提交 v4 迁移事务失败: {e}"))
+                })?;
                 read_stats(&conn)?
             };
             install_staged_database(&paths, &db_path)?;
@@ -608,6 +814,14 @@ impl LibraryIndex {
             return Self::rebuild(target_root, records);
         }
 
+        let version = {
+            let conn = Connection::open(&db_path)
+                .map_err(|e| AppError::LibraryIndexError(format!("打开媒体库索引失败: {e}")))?;
+            validate_user_version(&conn)?
+        };
+        let packing = (version == 4)
+            .then(|| build_and_publish(target_root, records))
+            .transpose()?;
         let paths = staging_paths(target_root);
         let result = (|| {
             std::fs::copy(&db_path, &paths.local).map_err(|e| {
@@ -620,8 +834,11 @@ impl LibraryIndex {
                 })?;
                 conn.execute_batch("PRAGMA foreign_keys = ON;")
                     .map_err(|e| AppError::LibraryIndexError(format!("设置 PRAGMA 失败: {e}")))?;
-                validate_user_version(&conn)?;
-                write_records(&mut conn, target_root, records, &[], false)?;
+                if let Some(packing) = &packing {
+                    write_records_v4(&mut conn, target_root, records, &[], packing)?;
+                } else {
+                    write_records(&mut conn, target_root, records, &[], false)?;
+                }
                 read_stats(&conn)?
             };
 
@@ -763,16 +980,90 @@ fn files_equal(left: &Path, right: &Path) -> std::io::Result<bool> {
     Ok(true)
 }
 
-fn validate_user_version(conn: &Connection) -> Result<()> {
+fn validate_user_version(conn: &Connection) -> Result<i64> {
     let user_version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(|e| AppError::LibraryIndexError(format!("读取 schema 版本失败: {e}")))?;
-    if !matches!(user_version, 1..=3) {
+    if !matches!(user_version, 1..=4) {
         return Err(AppError::LibraryIndexError(format!(
             "不支持的 MLIP schema 版本: {user_version}"
         )));
     }
+    Ok(user_version)
+}
+
+fn read_v3_artwork(conn: &Connection) -> Result<Vec<Artwork>> {
+    let mut artwork = Vec::new();
+    for table in ["series_artwork", "episode_artwork"] {
+        let mut statement = conn
+            .prepare(&format!("SELECT artwork_kind, path FROM {table}"))
+            .map_err(|e| AppError::LibraryIndexError(format!("读取 v3 artwork 失败: {e}")))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| AppError::LibraryIndexError(format!("查询 v3 artwork 失败: {e}")))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| AppError::LibraryIndexError(format!("解析 v3 artwork 失败: {e}")))?;
+        for (kind, path) in rows {
+            artwork.push(Artwork::new(artwork_kind(kind)?, path));
+        }
+    }
+    Ok(artwork)
+}
+
+fn attach_packed_v3_artwork(
+    conn: &rusqlite::Transaction<'_>,
+    table: &str,
+    packing: &ArtworkPacking,
+    asset_ids: &HashMap<String, i64>,
+) -> Result<()> {
+    let rows = {
+        let mut statement = conn
+            .prepare(&format!("SELECT id, artwork_kind, path FROM {table}"))
+            .map_err(|e| AppError::LibraryIndexError(format!("读取 v4 artwork 失败: {e}")))?;
+        let result = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .map_err(|e| AppError::LibraryIndexError(format!("查询 v4 artwork 失败: {e}")))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| AppError::LibraryIndexError(format!("解析 v4 artwork 失败: {e}")))?;
+        result
+    };
+    for (id, kind, path) in rows {
+        let Some(path) = path else {
+            continue;
+        };
+        let artwork = Artwork::new(artwork_kind(kind)?, path);
+        if let Some(asset_id) = packing.asset_id(&artwork, asset_ids) {
+            conn.execute(
+                &format!("UPDATE {table} SET asset_id = ?1 WHERE id = ?2"),
+                params![asset_id, id],
+            )
+            .map_err(|e| AppError::LibraryIndexError(format!("绑定 v4 artwork asset 失败: {e}")))?;
+        }
+    }
     Ok(())
+}
+
+fn artwork_kind(value: i64) -> Result<ArtworkKind> {
+    match value {
+        1 => Ok(ArtworkKind::Poster),
+        2 => Ok(ArtworkKind::Fanart),
+        3 => Ok(ArtworkKind::Banner),
+        4 => Ok(ArtworkKind::Logo),
+        5 => Ok(ArtworkKind::Thumb),
+        6 => Ok(ArtworkKind::Clearart),
+        7 => Ok(ArtworkKind::SeasonPoster),
+        _ => Err(AppError::LibraryIndexError(format!(
+            "未知 artwork kind: {value}"
+        ))),
+    }
 }
 
 fn write_records(
@@ -787,11 +1078,11 @@ fn write_records(
         .transaction()
         .map_err(|e| AppError::LibraryIndexError(format!("开始事务失败: {e}")))?;
 
-    upsert_meta(&tx, target_root, include_static_meta)?;
-    upsert_capabilities(&tx)?;
+    upsert_meta(&tx, target_root, include_static_meta, 3)?;
+    upsert_capabilities(&tx, false)?;
 
     for record in records {
-        insert_record(&tx, record)?;
+        insert_record(&tx, record, None)?;
     }
     for extra in extras {
         insert_extra(&tx, extra)?;
@@ -799,6 +1090,30 @@ fn write_records(
 
     tx.commit()
         .map_err(|e| AppError::LibraryIndexError(format!("提交事务失败: {e}")))?;
+    Ok(())
+}
+
+fn write_records_v4(
+    conn: &mut Connection,
+    target_root: &Path,
+    records: &[LibraryIndexRecord],
+    extras: &[LibraryExtraRecord],
+    packing: &ArtworkPacking,
+) -> Result<()> {
+    let tx = conn
+        .transaction()
+        .map_err(|e| AppError::LibraryIndexError(format!("开始 v4 事务失败: {e}")))?;
+    upsert_meta(&tx, target_root, true, 4)?;
+    upsert_capabilities(&tx, true)?;
+    let asset_ids = packing.write_catalog(&tx)?;
+    for record in records {
+        insert_record(&tx, record, Some((packing, &asset_ids)))?;
+    }
+    for extra in extras {
+        insert_extra(&tx, extra)?;
+    }
+    tx.commit()
+        .map_err(|e| AppError::LibraryIndexError(format!("提交 v4 事务失败: {e}")))?;
     Ok(())
 }
 
@@ -840,7 +1155,12 @@ fn ensure_schema_extensions(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn upsert_meta(conn: &Connection, target_root: &Path, include_static_meta: bool) -> Result<()> {
+fn upsert_meta(
+    conn: &Connection,
+    target_root: &Path,
+    include_static_meta: bool,
+    schema: i64,
+) -> Result<()> {
     let generated_at = OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .map_err(|e| AppError::LibraryIndexError(format!("格式化生成时间失败: {e}")))?;
@@ -849,7 +1169,10 @@ fn upsert_meta(conn: &Connection, target_root: &Path, include_static_meta: bool)
         .unwrap_or_else(|_| target_root.to_path_buf());
     let library_uuid = stable_uuid("library", &canonical_root.to_string_lossy());
 
-    let mut entries = vec![("generated_at", generated_at), ("schema", "3".to_string())];
+    let mut entries = vec![
+        ("generated_at", generated_at),
+        ("schema", schema.to_string()),
+    ];
     if include_static_meta {
         entries.extend([
             ("protocol", "MLIP".to_string()),
@@ -871,7 +1194,7 @@ fn upsert_meta(conn: &Connection, target_root: &Path, include_static_meta: bool)
     Ok(())
 }
 
-fn upsert_capabilities(conn: &Connection) -> Result<()> {
+fn upsert_capabilities(conn: &Connection, artwork_pack: bool) -> Result<()> {
     const CAPABILITIES: &[(&str, i64)] = &[
         ("artwork", 1),
         ("genre", 1),
@@ -884,7 +1207,11 @@ fn upsert_capabilities(conn: &Connection) -> Result<()> {
         ("multi_file", 1),
     ];
 
-    for (name, enabled) in CAPABILITIES {
+    for (name, enabled) in CAPABILITIES
+        .iter()
+        .copied()
+        .chain(artwork_pack.then_some(("artwork_pack", 1)))
+    {
         conn.execute(
             "INSERT INTO capability (name, enabled) VALUES (?1, ?2) \
              ON CONFLICT(name) DO UPDATE SET enabled = excluded.enabled",
@@ -895,7 +1222,11 @@ fn upsert_capabilities(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn insert_record(conn: &Connection, record: &LibraryIndexRecord) -> Result<()> {
+fn insert_record(
+    conn: &Connection,
+    record: &LibraryIndexRecord,
+    artwork_catalog: Option<(&ArtworkPacking, &HashMap<String, i64>)>,
+) -> Result<()> {
     let series_uuid = resolve_series_uuid(conn, record)?;
     conn.execute(
         "INSERT INTO series \
@@ -1011,6 +1342,7 @@ fn insert_record(conn: &Connection, record: &LibraryIndexRecord) -> Result<()> {
         "series_id",
         series_id,
         &record.series_artwork,
+        artwork_catalog,
     )?;
     insert_artwork(
         conn,
@@ -1018,6 +1350,7 @@ fn insert_record(conn: &Connection, record: &LibraryIndexRecord) -> Result<()> {
         "episode_id",
         episode_id,
         &record.episode_artwork,
+        artwork_catalog,
     )?;
 
     Ok(())
@@ -1194,21 +1527,45 @@ fn insert_artwork(
     owner_column: &str,
     owner_id: i64,
     artwork: &[Artwork],
+    artwork_catalog: Option<(&ArtworkPacking, &HashMap<String, i64>)>,
 ) -> Result<()> {
     let mut seen = HashSet::new();
     for item in artwork.iter().filter(|item| !item.path.trim().is_empty()) {
         if !seen.insert((item.kind, item.path.clone())) {
             continue;
         }
-        let sql = format!(
-            "INSERT OR IGNORE INTO {table} ({owner_column}, artwork_kind, path) \
-             VALUES (?1, ?2, ?3)"
-        );
-        conn.execute(
-            &sql,
-            params![owner_id, item.kind.as_i64(), item.path.trim()],
-        )
-        .map_err(|e| AppError::LibraryIndexError(format!("写入 artwork 失败: {e}")))?;
+        if let Some((packing, asset_ids)) = artwork_catalog {
+            let sql = format!(
+                "INSERT OR IGNORE INTO {table} \
+                 ({owner_column}, artwork_kind, path, asset_id, source_url, source_provider, \
+                  source_subject_id, downloaded_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+            );
+            conn.execute(
+                &sql,
+                params![
+                    owner_id,
+                    item.kind.as_i64(),
+                    item.path.trim(),
+                    packing.asset_id(item, asset_ids),
+                    item.source_url.as_deref(),
+                    item.source_provider.map(ExternalProvider::as_i64),
+                    item.source_subject_id.as_deref(),
+                    item.downloaded_at.as_deref(),
+                ],
+            )
+            .map_err(|e| AppError::LibraryIndexError(format!("写入 v4 artwork 失败: {e}")))?;
+        } else {
+            let sql = format!(
+                "INSERT OR IGNORE INTO {table} ({owner_column}, artwork_kind, path) \
+                 VALUES (?1, ?2, ?3)"
+            );
+            conn.execute(
+                &sql,
+                params![owner_id, item.kind.as_i64(), item.path.trim()],
+            )
+            .map_err(|e| AppError::LibraryIndexError(format!("写入 artwork 失败: {e}")))?;
+        }
     }
     Ok(())
 }
