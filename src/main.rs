@@ -208,6 +208,7 @@ fn run_organize(args: OrganizeArgs, log: &dyn Fn(&str)) -> Result<(), AppError> 
 
     for entry in WalkDir::new(&source)
         .into_iter()
+        .filter_entry(|entry| !is_supplemental_video_path(entry.path()))
         .filter_map(|item| item.ok())
         .filter(|item| item.file_type().is_file())
     {
@@ -1266,6 +1267,7 @@ fn collect_anime_groups(
 
     for entry in WalkDir::new(source)
         .into_iter()
+        .filter_entry(|entry| !is_supplemental_video_path(entry.path()))
         .filter_map(|item| item.ok())
         .filter(|item| item.file_type().is_file())
     {
@@ -1449,6 +1451,31 @@ fn has_valid_extension(path: &Path, extensions: &HashSet<String>) -> bool {
         .unwrap_or(false)
 }
 
+fn is_supplemental_video_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "menu" | "ncop" | "nced" | "ncop&nced" | "图集" | "圖集" | "特典映像"
+    ) {
+        return true;
+    }
+
+    name.split('[')
+        .skip(1)
+        .filter_map(|part| part.split_once(']'))
+        .map(|(token, _)| token.trim().to_ascii_uppercase())
+        .any(|token| {
+            matches!(token.as_str(), "MENU" | "NCOP&NCED" | "TOKUTEN" | "IMAGES")
+                || ["NCOP", "NCED"].iter().any(|prefix| {
+                    token
+                        .strip_prefix(prefix)
+                        .is_some_and(|suffix| suffix.chars().all(|ch| ch.is_ascii_digit()))
+                })
+        })
+}
+
 #[cfg(all(test, feature = "metadata"))]
 mod tests {
     use super::*;
@@ -1562,5 +1589,46 @@ mod tests {
         })
         .unwrap();
         assert!(!target.path().join("Test Anime").exists());
+    }
+
+    #[test]
+    fn organize_entry_skips_supplemental_videos() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("[ANi] Test Anime - 01.mkv"), b"video").unwrap();
+
+        for directory in [
+            "menu",
+            "NCOP",
+            "NCED",
+            "NCOP&NCED",
+            "图集",
+            "圖集",
+            "特典映像",
+        ] {
+            let path = source.path().join(directory);
+            std::fs::create_dir(&path).unwrap();
+            std::fs::write(path.join("supplement.mkv"), b"supplement").unwrap();
+        }
+        for tag in ["MENU", "NCOP01", "NCED10", "Tokuten", "Images"] {
+            std::fs::write(
+                source
+                    .path()
+                    .join(format!("[DBD-Raws][Test Anime][{tag}][01].mkv")),
+                b"supplement",
+            )
+            .unwrap();
+        }
+
+        run_organize_entry(OrganizeArgs {
+            source: Some(source.path().to_path_buf()),
+            target: Some(target.path().to_path_buf()),
+            mode: OperationMode::Copy,
+            ..OrganizeArgs::default()
+        })
+        .unwrap();
+
+        assert_eq!(std::fs::read_dir(target.path()).unwrap().count(), 1);
+        assert!(target.path().join("Test Anime").exists());
     }
 }
