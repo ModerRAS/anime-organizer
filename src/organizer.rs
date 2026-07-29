@@ -30,9 +30,12 @@ use crate::error::{AppError, Result};
 use crate::parser::AnimeFileInfo;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+
+const QUICK_MATCH_PREFIX_SIZE: u64 = 63 * 1024 * 1024;
+const QUICK_MATCH_BUFFER_SIZE: usize = 1024 * 1024;
 
 /// 文件操作模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, Serialize, Deserialize)]
@@ -303,38 +306,28 @@ impl FileOrganizer {
     }
 
     fn files_match_quick(source_path: &Path, target_path: &Path) -> std::io::Result<bool> {
-        const SAMPLE_SIZE: u64 = 64 * 1024;
-
         let source_metadata = fs::metadata(source_path)?;
         let target_metadata = fs::metadata(target_path)?;
         let source_len = source_metadata.len();
         if source_len != target_metadata.len() {
             return Ok(false);
         }
-        if source_len == 0 {
-            return Ok(true);
-        }
-        let sample_len = source_len.min(SAMPLE_SIZE) as usize;
+
+        let mut remaining = source_len.min(QUICK_MATCH_PREFIX_SIZE);
         let mut source = fs::File::open(source_path)?;
         let mut target = fs::File::open(target_path)?;
-        let mut source_sample = vec![0; sample_len];
-        let mut target_sample = vec![0; sample_len];
-        let mut samples_equal = |offset| -> std::io::Result<bool> {
-            source.seek(SeekFrom::Start(offset))?;
-            target.seek(SeekFrom::Start(offset))?;
-            source.read_exact(&mut source_sample)?;
-            target.read_exact(&mut target_sample)?;
-            Ok(source_sample == target_sample)
-        };
-
-        if !samples_equal(0)? {
-            return Ok(false);
+        let mut source_buffer = vec![0; QUICK_MATCH_BUFFER_SIZE];
+        let mut target_buffer = vec![0; QUICK_MATCH_BUFFER_SIZE];
+        while remaining > 0 {
+            let chunk = remaining.min(QUICK_MATCH_BUFFER_SIZE as u64) as usize;
+            source.read_exact(&mut source_buffer[..chunk])?;
+            target.read_exact(&mut target_buffer[..chunk])?;
+            if source_buffer[..chunk] != target_buffer[..chunk] {
+                return Ok(false);
+            }
+            remaining -= chunk as u64;
         }
-        // ponytail: sample media boundaries; use full hashing if same-size middle-only edits matter.
-        if source_len <= SAMPLE_SIZE {
-            return Ok(true);
-        }
-        samples_equal(source_len - SAMPLE_SIZE)
+        Ok(true)
     }
 
     /// 创建硬链接
@@ -376,7 +369,7 @@ impl FileOrganizer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{Seek, SeekFrom, Write};
     use tempfile::TempDir;
 
     fn create_test_file(dir: &Path, filename: &str, content: &str) -> std::path::PathBuf {
@@ -468,20 +461,33 @@ mod tests {
     }
 
     #[test]
-    fn quick_file_match_checks_both_media_boundaries() {
+    fn quick_file_match_stays_within_clouddrive_cached_prefix() {
         let directory = TempDir::new().unwrap();
-        let source = directory.path().join("source.mkv");
-        let target = directory.path().join("target.mkv");
-        let bytes = vec![b'a'; 128 * 1024];
-        fs::write(&source, &bytes).unwrap();
-        fs::write(&target, &bytes).unwrap();
+        let source_path = directory.path().join("source.mkv");
+        let target_path = directory.path().join("target.mkv");
+        let file_len = QUICK_MATCH_PREFIX_SIZE + 1;
+        let mut source = fs::File::create(&source_path).unwrap();
+        let mut target = fs::File::create(&target_path).unwrap();
+        source.set_len(file_len).unwrap();
+        target.set_len(file_len).unwrap();
 
-        assert!(FileOrganizer::files_match_quick(&source, &target).unwrap());
+        assert!(FileOrganizer::files_match_quick(&source_path, &target_path).unwrap());
 
-        let mut changed = bytes;
-        *changed.last_mut().unwrap() = b'b';
-        fs::write(&target, changed).unwrap();
-        assert!(!FileOrganizer::files_match_quick(&source, &target).unwrap());
+        target
+            .seek(SeekFrom::Start(QUICK_MATCH_PREFIX_SIZE - 1))
+            .unwrap();
+        target.write_all(b"x").unwrap();
+        assert!(!FileOrganizer::files_match_quick(&source_path, &target_path).unwrap());
+
+        source
+            .seek(SeekFrom::Start(QUICK_MATCH_PREFIX_SIZE - 1))
+            .unwrap();
+        source.write_all(b"x").unwrap();
+        target
+            .seek(SeekFrom::Start(QUICK_MATCH_PREFIX_SIZE))
+            .unwrap();
+        target.write_all(b"y").unwrap();
+        assert!(FileOrganizer::files_match_quick(&source_path, &target_path).unwrap());
     }
 
     #[test]
