@@ -156,6 +156,79 @@ fn mlip_flag_creates_metadata_library_without_nfo() {
 }
 
 #[test]
+fn existing_library_bangumi_id_skips_title_matching_on_later_runs() {
+    let first_source = tempfile::tempdir().unwrap();
+    let second_source = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let metadata = tempfile::tempdir().unwrap();
+    let subject_path = metadata.path().join("subject.jsonlines");
+    fs::write(
+        &subject_path,
+        r#"{"id":431767,"type":2,"name":"Cached Romaji","name_cn":"缓存旧标题","summary":"old","date":"2024-01-01","images":{"large":"poster.jpg"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        first_source
+            .path()
+            .join("[LoliHouse] Cached Romaji - 01 [1080P].mkv"),
+        b"one",
+    )
+    .unwrap();
+
+    let common_args = |source: &std::path::Path| {
+        vec![
+            "--source".to_string(),
+            source.display().to_string(),
+            "--target".to_string(),
+            target.path().display().to_string(),
+            "--mode".to_string(),
+            "copy".to_string(),
+            "--mlip".to_string(),
+            "--metadata-source".to_string(),
+            subject_path.display().to_string(),
+            "--no-images".to_string(),
+            "--no-episode-metadata".to_string(),
+        ]
+    };
+    let first = run_aniorg(&common_args(first_source.path()));
+    assert!(
+        first.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    fs::write(
+        &subject_path,
+        r#"{"id":431767,"type":2,"name":"Unrelated Native Title","name_cn":"缓存新标题","summary":"new","date":"2024-01-01","images":{"large":"poster.jpg"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        second_source
+            .path()
+            .join("[LoliHouse] Cached Romaji - 02 [1080P].mkv"),
+        b"two",
+    )
+    .unwrap();
+
+    let second = run_aniorg(&common_args(second_source.path()));
+    assert!(
+        second.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    let db_path = target.path().join("library.db");
+    let conn = Connection::open(&db_path).unwrap();
+    let title: String = conn
+        .query_row("SELECT title FROM series", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(title, "缓存新标题");
+    assert_eq!(media_count(&db_path), 2);
+}
+
+#[test]
 fn existing_database_is_incremental_until_rebuild_is_requested() {
     let initial_source = tempfile::tempdir().unwrap();
     let empty_source = tempfile::tempdir().unwrap();

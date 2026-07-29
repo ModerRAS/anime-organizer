@@ -314,6 +314,20 @@ async fn run_with_metadata(args: OrganizeArgs, log: &dyn Fn(&str)) -> Result<(),
     }
 
     let allow_online_title_resolution = args.metadata_source.is_none();
+    let library_bangumi_ids = Arc::new(match LibraryIndex::bangumi_ids_by_series_root(&target) {
+        Ok(ids) => {
+            if args.verbose && !ids.is_empty() {
+                eprintln!("已从 library.db 加载 {} 条 Bangumi 元数据缓存", ids.len());
+            }
+            ids
+        }
+        Err(error) => {
+            if args.verbose {
+                eprintln!("读取 library.db 元数据缓存失败，将使用常规匹配: {error}");
+            }
+            HashMap::new()
+        }
+    });
     let tmdb = args.tmdb_api_key.clone().map(TmdbClient::new).map(Arc::new);
     if !args.no_images && tmdb.is_none() && args.verbose {
         eprintln!("未提供 TMDB API Key，将跳过 TMDB 图片下载");
@@ -332,6 +346,7 @@ async fn run_with_metadata(args: OrganizeArgs, log: &dyn Fn(&str)) -> Result<(),
         Arc::clone(&bangumi),
         tmdb.clone(),
         target.clone(),
+        Arc::clone(&library_bangumi_ids),
         allow_online_title_resolution,
         !args.no_episode_metadata,
         !args.no_images && !args.dry_run,
@@ -364,6 +379,9 @@ async fn run_with_metadata(args: OrganizeArgs, log: &dyn Fn(&str)) -> Result<(),
                     series_name: &series_name,
                     publisher_hint: Some(&first_file.publisher),
                     season_hint: first_file.season_number(),
+                    cached_bangumi_id: library_bangumi_ids
+                        .get(&(series_name.clone(), season_number))
+                        .copied(),
                     allow_online_title_resolution,
                 },
                 alias_lookup.as_ref(),
@@ -501,6 +519,7 @@ async fn run_with_metadata(args: OrganizeArgs, log: &dyn Fn(&str)) -> Result<(),
             alias_lookup: alias_lookup.as_ref(),
             bangumi: bangumi.as_ref(),
             tmdb: tmdb.as_deref(),
+            library_bangumi_ids: library_bangumi_ids.as_ref(),
             download_images: !args.no_images,
             force_overwrite: args.force_overwrite,
             fetch_episode_metadata: !args.no_episode_metadata,
@@ -522,6 +541,7 @@ async fn prefetch_group_metadata(
     bangumi: Arc<BangumiClient>,
     tmdb: Option<Arc<TmdbClient>>,
     target: PathBuf,
+    library_bangumi_ids: Arc<HashMap<(String, u32), u32>>,
     allow_online_title_resolution: bool,
     fetch_episode_metadata: bool,
     download_images_enabled: bool,
@@ -545,6 +565,9 @@ async fn prefetch_group_metadata(
         let publisher = first_file.publisher.clone();
         let season_hint = first_file.season_number();
         let season_number = season_hint.unwrap_or(1);
+        let cached_bangumi_id = library_bangumi_ids
+            .get(&(series_name.clone(), season_number))
+            .copied();
         let alias_lookup = Arc::clone(&alias_lookup);
         let bangumi = Arc::clone(&bangumi);
         let tmdb = tmdb.clone();
@@ -561,6 +584,7 @@ async fn prefetch_group_metadata(
                     series_name: &series_name,
                     publisher_hint: Some(&publisher),
                     season_hint,
+                    cached_bangumi_id,
                     allow_online_title_resolution,
                 },
                 alias_lookup.as_ref(),
@@ -982,6 +1006,7 @@ struct MetadataIndexContext<'a> {
     alias_lookup: &'a AliasLookup,
     bangumi: &'a BangumiClient,
     tmdb: Option<&'a TmdbClient>,
+    library_bangumi_ids: &'a HashMap<(String, u32), u32>,
     download_images: bool,
     force_overwrite: bool,
     fetch_episode_metadata: bool,
@@ -1062,12 +1087,21 @@ async fn enrich_library_index_records(
         } else {
             let publisher = FilenameParser::parse(target.join(&record.relative_path))
                 .map(|file| file.publisher);
+            let series_root = record
+                .relative_path
+                .split('/')
+                .next()
+                .unwrap_or(&lookup_title);
             let fetched = fetch_anime_metadata(
                 MetadataLookup {
                     anime_name: &lookup_title,
                     series_name: &lookup_title,
                     publisher_hint: publisher.as_deref(),
                     season_hint,
+                    cached_bangumi_id: context
+                        .library_bangumi_ids
+                        .get(&(series_root.to_string(), season))
+                        .copied(),
                     allow_online_title_resolution: context.allow_online_title_resolution,
                 },
                 context.alias_lookup,

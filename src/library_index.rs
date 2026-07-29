@@ -690,6 +690,53 @@ impl LibraryIndex {
         target_root.join(DATABASE_FILENAME)
     }
 
+    /// Load unambiguous Bangumi identities already associated with each library root and season.
+    pub fn bangumi_ids_by_series_root(target_root: &Path) -> Result<HashMap<(String, u32), u32>> {
+        let db_path = Self::database_path(target_root);
+        if !db_path.exists() {
+            return Ok(HashMap::new());
+        }
+
+        let conn = Connection::open(&db_path)
+            .map_err(|e| AppError::LibraryIndexError(format!("打开媒体库索引失败: {e}")))?;
+        let mut statement = conn
+            .prepare(
+                "SELECT substr(media_file.path, 1, instr(media_file.path, '/') - 1), \
+                        episode.season, MIN(series_external_id.value) \
+                 FROM media_file \
+                 INNER JOIN episode ON episode.id = media_file.episode_id \
+                 INNER JOIN series_external_id \
+                    ON series_external_id.series_id = episode.series_id \
+                 WHERE series_external_id.provider = ?1 \
+                   AND instr(media_file.path, '/') > 0 \
+                 GROUP BY 1, 2 \
+                 HAVING COUNT(DISTINCT series_external_id.value) = 1",
+            )
+            .map_err(|e| {
+                AppError::LibraryIndexError(format!("准备读取媒体库元数据缓存失败: {e}"))
+            })?;
+        let rows = statement
+            .query_map(params![ExternalProvider::Bangumi.as_i64()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| AppError::LibraryIndexError(format!("读取媒体库元数据缓存失败: {e}")))?;
+
+        let mut ids = HashMap::new();
+        for row in rows {
+            let (root, season, id) = row.map_err(|e| {
+                AppError::LibraryIndexError(format!("解析媒体库元数据缓存失败: {e}"))
+            })?;
+            if let (Ok(season), Ok(id)) = (u32::try_from(season), id.parse::<u32>()) {
+                ids.insert((root, season), id);
+            }
+        }
+        Ok(ids)
+    }
+
     pub fn rebuild(
         target_root: &Path,
         records: &[LibraryIndexRecord],

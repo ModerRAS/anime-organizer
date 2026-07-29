@@ -96,6 +96,7 @@ pub(crate) struct MetadataLookup<'a> {
     pub(crate) series_name: &'a str,
     pub(crate) publisher_hint: Option<&'a str>,
     pub(crate) season_hint: Option<u32>,
+    pub(crate) cached_bangumi_id: Option<u32>,
     pub(crate) allow_online_title_resolution: bool,
 }
 
@@ -112,6 +113,7 @@ pub(crate) async fn fetch_anime_metadata(
         series_name,
         publisher_hint,
         season_hint,
+        cached_bangumi_id,
         allow_online_title_resolution,
     } = lookup;
     let mut metadata = None;
@@ -119,11 +121,30 @@ pub(crate) async fn fetch_anime_metadata(
     let mut lookup_queries =
         metadata_search_queries(series_name, Some(anime_name), None, season_hint);
 
-    let alias = lookup_queries.iter().find_map(|query| {
-        alias_lookup
-            .find(query)
-            .or_else(|| alias_lookup.find_fuzzy(query))
-    });
+    if let Some(bangumi_id) = cached_bangumi_id {
+        match bangumi.fetch_metadata(bangumi_id).await {
+            Ok(meta) => {
+                if verbose {
+                    eprintln!("媒体库缓存命中: {anime_name} -> bangumi_id={bangumi_id}");
+                }
+                metadata = Some(meta);
+            }
+            Err(error) if verbose => {
+                eprintln!("媒体库缓存加载失败 {bangumi_id}: {error}");
+            }
+            Err(_) => {}
+        }
+    }
+
+    let alias = if metadata.is_none() {
+        lookup_queries.iter().find_map(|query| {
+            alias_lookup
+                .find(query)
+                .or_else(|| alias_lookup.find_fuzzy(query))
+        })
+    } else {
+        None
+    };
 
     if let Some(entry) = alias {
         if verbose {
