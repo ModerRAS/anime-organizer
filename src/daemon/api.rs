@@ -245,7 +245,7 @@ async fn capabilities() -> Json<CapabilitiesResponse> {
         resources.extend(["cloud_connections", "rss_subscriptions"]);
     }
     #[allow(unused_mut)]
-    let mut job_types = vec!["organize"];
+    let mut job_types = vec!["organize", "normalize_layout", "compact_artwork_packs"];
     #[cfg(feature = "scraper")]
     {
         features.push("scraper");
@@ -1191,6 +1191,15 @@ fn cloud_error(cloud_error: CloudError) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capabilities_include_layout_maintenance_jobs() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let Json(response) = runtime.block_on(capabilities());
+
+        assert!(response.job_types.contains(&"normalize_layout"));
+        assert!(response.job_types.contains(&"compact_artwork_packs"));
+    }
 
     #[test]
     fn error_envelope_is_stable() {
