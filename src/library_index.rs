@@ -89,9 +89,15 @@ CREATE TABLE media_file
     id              INTEGER PRIMARY KEY,
 
     episode_id      INTEGER NOT NULL,
-    path            TEXT NOT NULL UNIQUE,
-    size            INTEGER,
-    modified_time   INTEGER,
+    path                TEXT NOT NULL UNIQUE,
+    size                INTEGER,
+    modified_time       INTEGER,
+    sha256_prefix_63m   TEXT CHECK (
+        sha256_prefix_63m IS NULL OR length(sha256_prefix_63m) = 64
+    ),
+    sha256_full         TEXT CHECK (
+        sha256_full IS NULL OR length(sha256_full) = 64
+    ),
 
     FOREIGN KEY(episode_id)
         REFERENCES episode(id)
@@ -490,6 +496,8 @@ pub struct LibraryIndexRecord {
     pub relative_path: String,
     pub size: Option<i64>,
     pub modified_time: Option<i64>,
+    pub sha256_prefix_63m: Option<String>,
+    pub sha256_full: Option<String>,
     pub subtitle_paths: Vec<String>,
     pub genres: Vec<String>,
     pub external_ids: Vec<ExternalId>,
@@ -588,6 +596,8 @@ impl LibraryIndexRecord {
             relative_path,
             size,
             modified_time,
+            sha256_prefix_63m: None,
+            sha256_full: None,
             subtitle_paths: Vec::new(),
             genres: Vec::new(),
             external_ids: Vec::new(),
@@ -779,8 +789,10 @@ impl LibraryIndex {
         records: &[LibraryIndexRecord],
         extras: &[LibraryExtraRecord],
     ) -> Result<LibraryIndexStats> {
-        let packing = build_and_publish(target_root, records)?;
         let db_path = Self::database_path(target_root);
+        let mut records = records.to_vec();
+        inherit_media_hashes(&db_path, &mut records)?;
+        let mut packing = build_and_publish(target_root, &records)?;
         let paths = staging_paths(target_root);
         let result = (|| {
             {
@@ -792,7 +804,7 @@ impl LibraryIndex {
                     .map_err(|e| {
                         AppError::LibraryIndexError(format!("创建 MLIP v4 schema 失败: {e}"))
                     })?;
-                write_records_v4(&mut conn, target_root, records, extras, &packing)?;
+                write_records_v4(&mut conn, target_root, &records, extras, &packing)?;
             }
 
             let stats = {
@@ -804,6 +816,9 @@ impl LibraryIndex {
             install_staged_database(&paths, &db_path)?;
             Ok(stats)
         })();
+        if result.is_ok() {
+            packing.commit();
+        }
         let _ = std::fs::remove_file(&paths.local);
         result
     }
@@ -833,7 +848,7 @@ impl LibraryIndex {
                 }
             }
         };
-        let packing = build_and_publish_artwork(target_root, &artwork)?;
+        let mut packing = build_and_publish_artwork(target_root, &artwork)?;
         let paths = staging_paths(target_root);
         let result = (|| {
             std::fs::copy(&db_path, &paths.local).map_err(|e| {
@@ -848,6 +863,7 @@ impl LibraryIndex {
                     .map_err(|e| {
                         AppError::LibraryIndexError(format!("升级 MLIP v4 schema 失败: {e}"))
                     })?;
+                ensure_media_hash_columns(&conn)?;
                 let tx = conn.transaction().map_err(|e| {
                     AppError::LibraryIndexError(format!("开始 v4 迁移事务失败: {e}"))
                 })?;
@@ -864,6 +880,9 @@ impl LibraryIndex {
             install_staged_database(&paths, &db_path)?;
             Ok(stats)
         })();
+        if result.is_ok() {
+            packing.commit();
+        }
         let _ = std::fs::remove_file(&paths.local);
         result
     }
@@ -879,7 +898,7 @@ impl LibraryIndex {
                 .map_err(|e| AppError::LibraryIndexError(format!("打开媒体库索引失败: {e}")))?;
             validate_user_version(&conn)?
         };
-        let packing = (version == 4)
+        let mut packing = (version == 4)
             .then(|| build_and_publish(target_root, records))
             .transpose()?;
         let paths = staging_paths(target_root);
@@ -905,6 +924,11 @@ impl LibraryIndex {
             install_staged_database(&paths, &db_path)?;
             Ok(stats)
         })();
+        if result.is_ok() {
+            if let Some(packing) = &mut packing {
+                packing.commit();
+            }
+        }
         let _ = std::fs::remove_file(&paths.local);
         result
     }
@@ -1017,6 +1041,53 @@ fn install_staged_database(paths: &StagingPaths, db_path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn update_staged_database(
+    target_root: &Path,
+    update: impl FnOnce(&mut Connection) -> Result<()>,
+) -> Result<()> {
+    let db_path = LibraryIndex::database_path(target_root);
+    if !db_path.exists() {
+        return Err(AppError::LibraryIndexError(format!(
+            "媒体库索引不存在: {}",
+            db_path.display()
+        )));
+    }
+    let paths = staging_paths(target_root);
+    let result = (|| {
+        std::fs::copy(&db_path, &paths.local)
+            .map_err(|e| AppError::LibraryIndexError(format!("复制媒体库索引到本地失败: {e}")))?;
+        {
+            let mut conn = Connection::open(&paths.local)
+                .map_err(|e| AppError::LibraryIndexError(format!("打开本地媒体库索引失败: {e}")))?;
+            conn.execute_batch("PRAGMA foreign_keys = ON;")
+                .map_err(|e| AppError::LibraryIndexError(format!("设置 PRAGMA 失败: {e}")))?;
+            ensure_media_hash_columns(&conn)?;
+            update(&mut conn)?;
+            let integrity: String = conn
+                .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+                .map_err(|e| AppError::LibraryIndexError(format!("校验媒体库索引失败: {e}")))?;
+            if integrity != "ok" {
+                return Err(AppError::LibraryIndexError(format!(
+                    "媒体库索引完整性校验失败: {integrity}"
+                )));
+            }
+            let foreign_key_errors: i64 = conn
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get(0)
+                })
+                .map_err(|e| AppError::LibraryIndexError(format!("校验媒体库外键失败: {e}")))?;
+            if foreign_key_errors != 0 {
+                return Err(AppError::LibraryIndexError(format!(
+                    "媒体库索引存在 {foreign_key_errors} 个外键错误"
+                )));
+            }
+        }
+        install_staged_database(&paths, &db_path)
+    })();
+    let _ = std::fs::remove_file(&paths.local);
+    result
+}
+
 fn files_equal(left: &Path, right: &Path) -> std::io::Result<bool> {
     let length = std::fs::metadata(left)?.len();
     if std::fs::metadata(right)?.len() != length {
@@ -1038,6 +1109,98 @@ fn files_equal(left: &Path, right: &Path) -> std::io::Result<bool> {
         remaining -= chunk as u64;
     }
     Ok(true)
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut statement = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| AppError::LibraryIndexError(format!("读取 {table} schema 失败: {e}")))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| AppError::LibraryIndexError(format!("查询 {table} schema 失败: {e}")))?;
+    for value in columns {
+        if value
+            .map_err(|e| AppError::LibraryIndexError(format!("解析 {table} schema 失败: {e}")))?
+            == column
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn ensure_media_hash_columns(conn: &Connection) -> Result<()> {
+    if !column_exists(conn, "media_file", "sha256_prefix_63m")? {
+        conn.execute_batch(
+            "ALTER TABLE media_file ADD COLUMN sha256_prefix_63m TEXT \
+             CHECK (sha256_prefix_63m IS NULL OR length(sha256_prefix_63m) = 64)",
+        )
+        .map_err(|e| AppError::LibraryIndexError(format!("添加媒体 quick hash 字段失败: {e}")))?;
+    }
+    if !column_exists(conn, "media_file", "sha256_full")? {
+        conn.execute_batch(
+            "ALTER TABLE media_file ADD COLUMN sha256_full TEXT \
+             CHECK (sha256_full IS NULL OR length(sha256_full) = 64)",
+        )
+        .map_err(|e| AppError::LibraryIndexError(format!("添加媒体 full hash 字段失败: {e}")))?;
+    }
+    Ok(())
+}
+
+fn inherit_media_hashes(db_path: &Path, records: &mut [LibraryIndexRecord]) -> Result<()> {
+    if !db_path.exists() {
+        return Ok(());
+    }
+    let conn = Connection::open(db_path)
+        .map_err(|e| AppError::LibraryIndexError(format!("打开旧媒体 hash 缓存失败: {e}")))?;
+    if !column_exists(&conn, "media_file", "sha256_prefix_63m")?
+        || !column_exists(&conn, "media_file", "sha256_full")?
+    {
+        return Ok(());
+    }
+    let mut statement = conn
+        .prepare(
+            "SELECT path, size, modified_time, sha256_prefix_63m, sha256_full \
+             FROM media_file WHERE sha256_prefix_63m IS NOT NULL OR sha256_full IS NOT NULL",
+        )
+        .map_err(|e| AppError::LibraryIndexError(format!("读取旧媒体 hash 缓存失败: {e}")))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                (
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ),
+                (
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ),
+            ))
+        })
+        .map_err(|e| AppError::LibraryIndexError(format!("查询旧媒体 hash 缓存失败: {e}")))?;
+    let mut cache = HashMap::new();
+    for row in rows {
+        let (key, hashes) =
+            row.map_err(|e| AppError::LibraryIndexError(format!("解析旧媒体 hash 缓存失败: {e}")))?;
+        cache.insert(key, hashes);
+    }
+    for record in records {
+        let key = (
+            record.relative_path.clone(),
+            record.size,
+            record.modified_time,
+        );
+        if let Some((prefix, full)) = cache.get(&key) {
+            if record.sha256_prefix_63m.is_none() {
+                record.sha256_prefix_63m.clone_from(prefix);
+            }
+            if record.sha256_full.is_none() {
+                record.sha256_full.clone_from(full);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_user_version(conn: &Connection) -> Result<i64> {
@@ -1134,6 +1297,7 @@ fn write_records(
     include_static_meta: bool,
 ) -> Result<()> {
     ensure_schema_extensions(conn)?;
+    ensure_media_hash_columns(conn)?;
     let tx = conn
         .transaction()
         .map_err(|e| AppError::LibraryIndexError(format!("开始事务失败: {e}")))?;
@@ -1160,6 +1324,7 @@ fn write_records_v4(
     extras: &[LibraryExtraRecord],
     packing: &ArtworkPacking,
 ) -> Result<()> {
+    ensure_media_hash_columns(conn)?;
     let tx = conn
         .transaction()
         .map_err(|e| AppError::LibraryIndexError(format!("开始 v4 事务失败: {e}")))?;
@@ -1360,10 +1525,21 @@ fn insert_record(
         .map_err(|e| AppError::LibraryIndexError(format!("读取 episode id 失败: {e}")))?;
 
     conn.execute(
-        "INSERT INTO media_file (episode_id, path, size, modified_time) \
-         VALUES (?1, ?2, ?3, ?4) \
+        "INSERT INTO media_file \
+         (episode_id, path, size, modified_time, sha256_prefix_63m, sha256_full) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
          ON CONFLICT(path) DO UPDATE SET \
          episode_id = excluded.episode_id, \
+         sha256_prefix_63m = CASE \
+             WHEN media_file.size IS excluded.size \
+              AND media_file.modified_time IS excluded.modified_time \
+             THEN COALESCE(excluded.sha256_prefix_63m, media_file.sha256_prefix_63m) \
+             ELSE excluded.sha256_prefix_63m END, \
+         sha256_full = CASE \
+             WHEN media_file.size IS excluded.size \
+              AND media_file.modified_time IS excluded.modified_time \
+             THEN COALESCE(excluded.sha256_full, media_file.sha256_full) \
+             ELSE excluded.sha256_full END, \
          size = excluded.size, \
          modified_time = excluded.modified_time",
         params![
@@ -1371,6 +1547,8 @@ fn insert_record(
             record.relative_path,
             record.size,
             record.modified_time,
+            record.sha256_prefix_63m,
+            record.sha256_full,
         ],
     )
     .map_err(|e| AppError::LibraryIndexError(format!("写入 media_file 失败: {e}")))?;

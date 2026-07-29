@@ -68,6 +68,8 @@ impl JobOrigin {
 #[serde(tag = "type", content = "args", rename_all = "snake_case")]
 pub(crate) enum JobSpec {
     Organize(OrganizeArgs),
+    NormalizeLayout(crate::cli::NormalizeLayoutArgs),
+    CompactArtworkPacks(crate::cli::CompactArtworkPacksArgs),
     #[cfg(feature = "clouddrive")]
     RssPoll {
         subscription_id: i64,
@@ -106,6 +108,8 @@ impl JobSpec {
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             Self::Organize(_) => "organize",
+            Self::NormalizeLayout(_) => "normalize_layout",
+            Self::CompactArtworkPacks(_) => "compact_artwork_packs",
             #[cfg(feature = "clouddrive")]
             Self::RssPoll { .. } => "rss_poll",
             #[cfg(feature = "clouddrive")]
@@ -146,7 +150,7 @@ impl JobSpec {
 
     pub(crate) fn is_registered(&self) -> bool {
         match self {
-            Self::Organize(_) => true,
+            Self::Organize(_) | Self::NormalizeLayout(_) | Self::CompactArtworkPacks(_) => true,
             #[cfg(feature = "clouddrive")]
             Self::RssPoll { .. } | Self::RssPollAll | Self::CloudAddOffline(_) => true,
             #[cfg(feature = "scraper")]
@@ -196,6 +200,56 @@ impl JobSpec {
                     return Err(
                         "qBittorrent jobs require a qbittorrent:<info-hash> idempotency key"
                             .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            Self::NormalizeLayout(args) => {
+                if args.target.as_os_str().is_empty() {
+                    return Err("target is required".to_string());
+                }
+                if args.dry_run {
+                    if args.plan.is_none() || args.apply_plan.is_some() {
+                        return Err(
+                            "normalize dry-run requires plan and cannot include apply_plan"
+                                .to_string(),
+                        );
+                    }
+                } else if args.apply_plan.is_none() {
+                    return Err("normalize_layout requires dry_run+plan or apply_plan".to_string());
+                }
+                if args.apply_plan.is_some() && !confirmed {
+                    return Err("normalize layout apply requires confirmed=true".to_string());
+                }
+                if origin == JobOrigin::Qbittorrent {
+                    return Err(
+                        "normalize layout jobs cannot originate from qBittorrent".to_string()
+                    );
+                }
+                Ok(())
+            }
+            Self::CompactArtworkPacks(args) => {
+                if args.target.as_os_str().is_empty() {
+                    return Err("target is required".to_string());
+                }
+                if args.dry_run {
+                    if args.plan.is_none() || args.apply_plan.is_some() {
+                        return Err(
+                            "artwork compact dry-run requires plan and cannot include apply_plan"
+                                .to_string(),
+                        );
+                    }
+                } else if args.apply_plan.is_none() {
+                    return Err(
+                        "compact_artwork_packs requires dry_run+plan or apply_plan".to_string()
+                    );
+                }
+                if args.apply_plan.is_some() && !confirmed {
+                    return Err("artwork compact apply requires confirmed=true".to_string());
+                }
+                if origin == JobOrigin::Qbittorrent {
+                    return Err(
+                        "artwork compact jobs cannot originate from qBittorrent".to_string()
                     );
                 }
                 Ok(())
@@ -648,6 +702,40 @@ mod tests {
         assert_eq!(args.filename_parser, FilenameParserMode::Rules);
     }
 
+    #[test]
+    fn normalize_apply_requires_confirmation_but_dry_run_does_not() {
+        let apply = JobSpec::NormalizeLayout(crate::cli::NormalizeLayoutArgs {
+            target: PathBuf::from("target"),
+            dry_run: false,
+            plan: None,
+            apply_plan: Some(PathBuf::from("plan.json")),
+            force_rehash: false,
+        });
+        assert!(apply.validate(false, JobOrigin::Manual, None).is_err());
+        assert!(apply.validate(true, JobOrigin::Manual, None).is_ok());
+        assert!(apply
+            .validate(true, JobOrigin::Qbittorrent, Some("qbittorrent:hash"))
+            .is_err());
+
+        let dry_run = JobSpec::NormalizeLayout(crate::cli::NormalizeLayoutArgs {
+            target: PathBuf::from("target"),
+            dry_run: true,
+            plan: Some(PathBuf::from("plan.json")),
+            apply_plan: None,
+            force_rehash: false,
+        });
+        assert!(dry_run.validate(false, JobOrigin::Manual, None).is_ok());
+
+        let compact = JobSpec::CompactArtworkPacks(crate::cli::CompactArtworkPacksArgs {
+            target: PathBuf::from("target"),
+            dry_run: false,
+            plan: None,
+            apply_plan: Some(PathBuf::from("compact.json")),
+        });
+        assert!(compact.validate(false, JobOrigin::Manual, None).is_err());
+        assert!(compact.validate(true, JobOrigin::Manual, None).is_ok());
+    }
+
     fn assert_round_trip(spec: JobSpec) {
         let json = serde_json::to_vec(&spec).unwrap();
         let decoded: JobSpec = serde_json::from_slice(&json).unwrap();
@@ -657,6 +745,21 @@ mod tests {
     #[test]
     fn every_compiled_job_variant_round_trips() {
         assert_round_trip(JobSpec::Organize(organize()));
+        assert_round_trip(JobSpec::NormalizeLayout(crate::cli::NormalizeLayoutArgs {
+            target: PathBuf::from("target"),
+            dry_run: true,
+            plan: Some(PathBuf::from("plan.json")),
+            apply_plan: None,
+            force_rehash: false,
+        }));
+        assert_round_trip(JobSpec::CompactArtworkPacks(
+            crate::cli::CompactArtworkPacksArgs {
+                target: PathBuf::from("target"),
+                dry_run: true,
+                plan: Some(PathBuf::from("compact.json")),
+                apply_plan: None,
+            },
+        ));
         #[cfg(feature = "clouddrive")]
         {
             assert_round_trip(JobSpec::RssPoll { subscription_id: 1 });

@@ -1,11 +1,5 @@
 use anime_organizer::OperationMode;
-#[cfg(any(
-    feature = "scraper",
-    feature = "clouddrive",
-    feature = "torrent-scraper"
-))]
-use clap::Subcommand;
-use clap::{Args, Parser, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -36,11 +30,6 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) daemon: bool,
 
-    #[cfg(any(
-        feature = "scraper",
-        feature = "clouddrive",
-        feature = "torrent-scraper"
-    ))]
     #[command(subcommand)]
     pub(crate) command: Option<Commands>,
 
@@ -172,13 +161,56 @@ impl OrganizeArgs {
     }
 }
 
-#[cfg(any(
-    feature = "scraper",
-    feature = "clouddrive",
-    feature = "torrent-scraper"
-))]
+#[derive(Args, Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct NormalizeLayoutArgs {
+    /// 媒体库根目录
+    #[arg(long, value_name = "PATH")]
+    pub(crate) target: PathBuf,
+
+    /// 只读扫描并生成 plan
+    #[arg(long, conflicts_with = "apply_plan")]
+    pub(crate) dry_run: bool,
+
+    /// dry-run 输出 JSON plan
+    #[arg(long, value_name = "PATH", requires = "dry_run")]
+    pub(crate) plan: Option<PathBuf>,
+
+    /// 执行已经审核的固定 plan；daemon job 需要 confirmed=true
+    #[arg(long, value_name = "PATH", conflicts_with = "dry_run")]
+    pub(crate) apply_plan: Option<PathBuf>,
+
+    /// 忽略 library.db 中的媒体 hash 缓存
+    #[arg(long)]
+    pub(crate) force_rehash: bool,
+}
+
+#[derive(Args, Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct CompactArtworkPacksArgs {
+    /// 媒体库根目录
+    #[arg(long, value_name = "PATH")]
+    pub(crate) target: PathBuf,
+
+    /// 只读验证 catalog 并生成 compact plan
+    #[arg(long, conflicts_with = "apply_plan")]
+    pub(crate) dry_run: bool,
+
+    /// dry-run 输出 JSON plan
+    #[arg(long, value_name = "PATH", requires = "dry_run")]
+    pub(crate) plan: Option<PathBuf>,
+
+    /// 执行已经审核的 compact plan；daemon job 需要 confirmed=true
+    #[arg(long, value_name = "PATH", conflicts_with = "dry_run")]
+    pub(crate) apply_plan: Option<PathBuf>,
+}
+
 #[derive(Subcommand, Debug)]
 pub(crate) enum Commands {
+    /// 生成或执行媒体库布局统一计划
+    NormalizeLayout(NormalizeLayoutArgs),
+    /// 验证或压实 MLIP artwork packs
+    CompactArtworkPacks(CompactArtworkPacksArgs),
     #[cfg(feature = "scraper")]
     Scrape(ScrapeArgs),
     #[cfg(feature = "scraper")]

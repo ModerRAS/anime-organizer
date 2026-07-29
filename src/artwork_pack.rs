@@ -1,11 +1,17 @@
 use crate::error::{AppError, Result};
-use crate::library_index::{Artwork, ArtworkKind, LibraryIndexRecord, DATABASE_FILENAME};
+use crate::library_index::{
+    update_staged_database, Artwork, ArtworkKind, LibraryIndexRecord, DATABASE_FILENAME,
+};
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::UNIX_EPOCH;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 pub(crate) const ARTWORK_DIRECTORY: &str = "MLIP-Artwork";
 pub(crate) const TARGET_PACK_BYTES: u64 = 64 * 1024 * 1024;
@@ -14,6 +20,50 @@ const TAR_BLOCK: u64 = 512;
 const TAR_TRAILER_BYTES: u64 = TAR_BLOCK * 2;
 const MAX_IMAGE_DIMENSION: u32 = 32_768;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtworkCompactFileIdentity {
+    pub size: u64,
+    pub modified_time: Option<i64>,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtworkCompactPack {
+    pub path: String,
+    pub sha256: String,
+    pub byte_length: u64,
+    pub asset_count: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtworkCompactStats {
+    pub pack_count: usize,
+    pub single_asset_packs: usize,
+    pub asset_count: usize,
+    pub total_bytes: u64,
+    pub projected_pack_count: usize,
+    pub projected_request_reduction: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtworkCompactPlan {
+    pub version: u32,
+    pub created_at: String,
+    pub library_root: String,
+    pub database: ArtworkCompactFileIdentity,
+    pub current_packs: Vec<ArtworkCompactPack>,
+    pub orphan_packs: Vec<String>,
+    pub stats: ArtworkCompactStats,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtworkCompactApplySummary {
+    pub old_pack_count: usize,
+    pub new_pack_count: usize,
+    pub asset_count: usize,
+    pub removed_old_packs: usize,
+}
 
 #[derive(Debug, Clone)]
 struct ImageCandidate {
@@ -46,14 +96,42 @@ struct ArtworkAsset {
     height: u32,
 }
 
+#[derive(Debug)]
+struct PublishedPack {
+    target: PathBuf,
+    backup: Option<PathBuf>,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct ArtworkPacking {
     packs: Vec<ArtworkPack>,
     assets: Vec<ArtworkAsset>,
     binding_assets: HashMap<Artwork, String>,
+    published: Vec<PublishedPack>,
+}
+
+impl Drop for ArtworkPacking {
+    fn drop(&mut self) {
+        for publication in self.published.drain(..).rev() {
+            if let Some(backup) = publication.backup {
+                let _ = std::fs::copy(&backup, &publication.target);
+                let _ = std::fs::remove_file(backup);
+            } else {
+                let _ = std::fs::remove_file(publication.target);
+            }
+        }
+    }
 }
 
 impl ArtworkPacking {
+    pub(crate) fn commit(&mut self) {
+        for publication in self.published.drain(..) {
+            if let Some(backup) = publication.backup {
+                let _ = std::fs::remove_file(backup);
+            }
+        }
+    }
+
     pub(crate) fn write_catalog(&self, conn: &Connection) -> Result<HashMap<String, i64>> {
         let mut pack_ids = HashMap::new();
         let mut packs = self.packs.iter().collect::<Vec<_>>();
@@ -62,8 +140,8 @@ impl ArtworkPacking {
             conn.execute(
                 "INSERT INTO artwork_pack (sha256, path, byte_length, asset_count) \
                  VALUES (?1, ?2, ?3, ?4) \
-                 ON CONFLICT(sha256) DO UPDATE SET \
-                 path = excluded.path, byte_length = excluded.byte_length, \
+                 ON CONFLICT(path) DO UPDATE SET \
+                 sha256 = excluded.sha256, byte_length = excluded.byte_length, \
                  asset_count = excluded.asset_count",
                 params![
                     pack.sha256,
@@ -75,8 +153,8 @@ impl ArtworkPacking {
             .map_err(|error| catalog_error("写入 artwork_pack", error))?;
             let pack_id: i64 = conn
                 .query_row(
-                    "SELECT id FROM artwork_pack WHERE sha256 = ?1",
-                    params![pack.sha256],
+                    "SELECT id FROM artwork_pack WHERE path = ?1",
+                    params![pack.path],
                     |row| row.get(0),
                 )
                 .map_err(|error| catalog_error("读取 artwork_pack id", error))?;
@@ -137,6 +215,403 @@ impl ArtworkPacking {
     }
 }
 
+pub fn build_artwork_compact_plan(
+    target_root: &Path,
+    output: &Path,
+    log: &dyn Fn(&str),
+) -> Result<ArtworkCompactPlan> {
+    let root = target_root
+        .canonicalize()
+        .map_err(pack_io("读取媒体库根目录"))?;
+    let db_path = root.join(DATABASE_FILENAME);
+    let database = compact_file_identity(&db_path)?;
+    let prior = load_prior_catalog(&db_path)?.ok_or_else(|| {
+        AppError::LibraryIndexError("library.db 不是 MLIP v4 artwork catalog".to_string())
+    })?;
+    for pack in &prior.packs {
+        let assets = prior
+            .assets
+            .iter()
+            .filter(|asset| asset.pack_sha256 == pack.sha256)
+            .cloned()
+            .collect::<Vec<_>>();
+        verify_pack(&root, pack, &assets)?;
+    }
+    let referenced = prior
+        .packs
+        .iter()
+        .map(|pack| pack.path.as_str())
+        .collect::<BTreeSet<_>>();
+    let artwork_directory = root.join(ARTWORK_DIRECTORY);
+    let mut orphan_packs = if artwork_directory.is_dir() {
+        std::fs::read_dir(&artwork_directory)
+            .map_err(pack_io("读取 MLIP-Artwork 目录"))?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "tar"))
+            .filter_map(|entry| {
+                let relative = format!(
+                    "{ARTWORK_DIRECTORY}/{}",
+                    entry.file_name().to_string_lossy()
+                );
+                (!referenced.contains(relative.as_str())).then_some(relative)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    orphan_packs.sort();
+    let projected_pack_count = projected_shard_count(&prior.assets);
+    let stats = ArtworkCompactStats {
+        pack_count: prior.packs.len(),
+        single_asset_packs: prior
+            .packs
+            .iter()
+            .filter(|pack| pack.asset_count == 1)
+            .count(),
+        asset_count: prior.assets.len(),
+        total_bytes: prior.packs.iter().map(|pack| pack.byte_length).sum(),
+        projected_pack_count,
+        projected_request_reduction: prior.packs.len().saturating_sub(projected_pack_count),
+    };
+    let plan = ArtworkCompactPlan {
+        version: 1,
+        created_at: OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .map_err(|error| {
+                AppError::LibraryIndexError(format!("格式化 compact plan 时间失败: {error}"))
+            })?,
+        library_root: root.to_string_lossy().to_string(),
+        database,
+        current_packs: prior
+            .packs
+            .iter()
+            .map(|pack| ArtworkCompactPack {
+                path: pack.path.clone(),
+                sha256: pack.sha256.clone(),
+                byte_length: pack.byte_length,
+                asset_count: pack.asset_count,
+            })
+            .collect(),
+        orphan_packs,
+        stats,
+    };
+    if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(pack_io("创建 compact plan 目录"))?;
+    }
+    std::fs::write(
+        output,
+        serde_json::to_vec_pretty(&plan).map_err(|error| {
+            AppError::LibraryIndexError(format!("序列化 compact plan 失败: {error}"))
+        })?,
+    )
+    .map_err(pack_io("写入 compact plan"))?;
+    log(&format!(
+        "Artwork compact plan written to {}",
+        output.display()
+    ));
+    Ok(plan)
+}
+
+pub fn apply_artwork_compact_plan(
+    target_root: &Path,
+    input: &Path,
+    confirmed: bool,
+    log: &dyn Fn(&str),
+) -> Result<ArtworkCompactApplySummary> {
+    if !confirmed {
+        return Err(AppError::LibraryIndexError(
+            "artwork compact apply requires confirmed=true".to_string(),
+        ));
+    }
+    let plan: ArtworkCompactPlan =
+        serde_json::from_slice(&std::fs::read(input).map_err(pack_io("读取 compact plan"))?)
+            .map_err(|error| {
+                AppError::LibraryIndexError(format!("解析 compact plan 失败: {error}"))
+            })?;
+    if plan.version != 1 {
+        return Err(AppError::LibraryIndexError(format!(
+            "不支持的 compact plan 版本: {}",
+            plan.version
+        )));
+    }
+    let root = target_root
+        .canonicalize()
+        .map_err(pack_io("读取媒体库根目录"))?;
+    if root.to_string_lossy() != plan.library_root {
+        return Err(AppError::LibraryIndexError(
+            "compact plan 媒体库根目录不匹配".to_string(),
+        ));
+    }
+    let db_path = root.join(DATABASE_FILENAME);
+    if compact_file_identity(&db_path)? != plan.database {
+        return Err(AppError::LibraryIndexError(
+            "library.db 在 compact plan 生成后已改变".to_string(),
+        ));
+    }
+    let prior = load_prior_catalog(&db_path)?.ok_or_else(|| {
+        AppError::LibraryIndexError("library.db 缺少 artwork catalog".to_string())
+    })?;
+    let current = prior
+        .packs
+        .iter()
+        .map(|pack| ArtworkCompactPack {
+            path: pack.path.clone(),
+            sha256: pack.sha256.clone(),
+            byte_length: pack.byte_length,
+            asset_count: pack.asset_count,
+        })
+        .collect::<Vec<_>>();
+    if current != plan.current_packs {
+        return Err(AppError::LibraryIndexError(
+            "artwork catalog 在 compact plan 生成后已改变".to_string(),
+        ));
+    }
+
+    let staging = std::env::temp_dir().join("anime-organizer").join(format!(
+        "artwork-compact-{}-{}",
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&staging).map_err(pack_io("创建 compact staging"))?;
+    let result = (|| {
+        let candidates = extract_catalog_candidates(&root, &staging, &prior)?;
+        let shards = shard_candidates(candidates);
+        let prior_by_path = prior
+            .packs
+            .iter()
+            .map(|pack| (pack.path.clone(), pack))
+            .collect::<HashMap<_, _>>();
+        let mut packing = ArtworkPacking::default();
+        for (index, shard) in shards.iter().enumerate() {
+            let relative_path = numeric_pack_path((index + 1) as u32);
+            let local = staging.join(format!("artwork-{:06}.next.tar", index + 1));
+            let (pack, assets) = write_pack(&local, &relative_path, shard)?;
+            let publication = if let Some(prior_pack) = prior_by_path.get(&relative_path) {
+                if prior_pack.sha256 == pack.sha256 {
+                    verify_pack_file(&root.join(&relative_path), &pack)?;
+                    None
+                } else {
+                    Some(publish_replacement_pack(&root, &local, prior_pack, &pack)?)
+                }
+            } else {
+                publish_pack(&root, &local, &pack)?
+            };
+            packing.packs.push(pack);
+            packing.assets.extend(assets);
+            if let Some(publication) = publication {
+                packing.published.push(publication);
+            }
+        }
+        replace_compact_catalog(&root, &packing)?;
+        packing.commit();
+
+        let new_paths = packing
+            .packs
+            .iter()
+            .map(|pack| pack.path.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut removed = 0;
+        for pack in &prior.packs {
+            if !new_paths.contains(pack.path.as_str()) {
+                let path = safe_pack_path(&root, pack)?;
+                if path.exists() {
+                    std::fs::remove_file(&path).map_err(pack_io("删除旧 artwork pack"))?;
+                    removed += 1;
+                }
+            }
+        }
+        log(&format!(
+            "Compacted {} artwork packs into {} numeric packs",
+            prior.packs.len(),
+            packing.packs.len()
+        ));
+        Ok(ArtworkCompactApplySummary {
+            old_pack_count: prior.packs.len(),
+            new_pack_count: packing.packs.len(),
+            asset_count: packing.assets.len(),
+            removed_old_packs: removed,
+        })
+    })();
+    let _ = std::fs::remove_dir_all(&staging);
+    result
+}
+
+fn projected_shard_count(assets: &[ArtworkAsset]) -> usize {
+    let mut count = 0;
+    let mut size = TAR_TRAILER_BYTES;
+    for asset in assets {
+        let member_size = TAR_BLOCK + align_tar(asset.byte_length);
+        if size > TAR_TRAILER_BYTES && size.saturating_add(member_size) > TARGET_PACK_BYTES {
+            count += 1;
+            size = TAR_TRAILER_BYTES;
+        }
+        size = size.saturating_add(member_size);
+    }
+    count + usize::from(size > TAR_TRAILER_BYTES)
+}
+
+fn extract_catalog_candidates(
+    target_root: &Path,
+    staging: &Path,
+    prior: &PriorCatalog,
+) -> Result<Vec<ImageCandidate>> {
+    let packs = prior
+        .packs
+        .iter()
+        .map(|pack| (pack.sha256.as_str(), pack))
+        .collect::<HashMap<_, _>>();
+    for pack in &prior.packs {
+        let assets = prior
+            .assets
+            .iter()
+            .filter(|asset| asset.pack_sha256 == pack.sha256)
+            .cloned()
+            .collect::<Vec<_>>();
+        verify_pack(target_root, pack, &assets)?;
+    }
+    let mut candidates = Vec::with_capacity(prior.assets.len());
+    for asset in &prior.assets {
+        let pack = packs.get(asset.pack_sha256.as_str()).ok_or_else(|| {
+            AppError::LibraryIndexError(format!("artwork asset {} 引用了缺失 pack", asset.sha256))
+        })?;
+        let mut file = File::open(safe_pack_path(target_root, pack)?)
+            .map_err(pack_io("读取 compact artwork pack"))?;
+        file.seek(SeekFrom::Start(asset.data_offset))
+            .map_err(pack_io("定位 compact artwork asset"))?;
+        let length: usize = asset
+            .byte_length
+            .try_into()
+            .map_err(|_| AppError::LibraryIndexError("compact artwork asset 太大".to_string()))?;
+        let mut bytes = vec![0_u8; length];
+        file.read_exact(&mut bytes)
+            .map_err(pack_io("读取 compact artwork asset"))?;
+        if sha256_hex(&bytes) != asset.sha256 {
+            return Err(AppError::LibraryIndexError(format!(
+                "compact artwork asset {} SHA-256 不匹配",
+                asset.sha256
+            )));
+        }
+        let extension = asset
+            .member_name
+            .rsplit_once('.')
+            .map(|(_, extension)| extension)
+            .ok_or_else(|| AppError::LibraryIndexError("artwork member 缺少扩展名".to_string()))?;
+        let source_path = staging.join(&asset.member_name);
+        std::fs::write(&source_path, &bytes).map_err(pack_io("写入 compact staging asset"))?;
+        candidates.push(ImageCandidate {
+            source_path,
+            sha256: asset.sha256.clone(),
+            extension: extension.to_string(),
+            media_type: asset.media_type.clone(),
+            width: asset.width,
+            height: asset.height,
+            byte_length: asset.byte_length,
+        });
+    }
+    candidates.sort_by(|left, right| left.sha256.cmp(&right.sha256));
+    Ok(candidates)
+}
+
+fn replace_compact_catalog(target_root: &Path, packing: &ArtworkPacking) -> Result<()> {
+    update_staged_database(target_root, |conn| {
+        let tx = conn
+            .transaction()
+            .map_err(|error| catalog_error("开始 compact catalog 事务", error))?;
+        let mut pack_ids = tx
+            .prepare("SELECT id FROM artwork_pack ORDER BY id")
+            .map_err(|error| catalog_error("读取 compact pack ids", error))?
+            .query_map([], |row| row.get::<_, i64>(0))
+            .map_err(|error| catalog_error("查询 compact pack ids", error))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|error| catalog_error("解析 compact pack ids", error))?;
+        for id in &pack_ids {
+            let placeholder = sha256_hex(format!("compact-placeholder-{id}").as_bytes());
+            tx.execute(
+                "UPDATE artwork_pack SET sha256 = ?1, path = ?2 WHERE id = ?3",
+                params![placeholder, format!("__compact_old_{id}"), id],
+            )
+            .map_err(|error| catalog_error("暂存旧 compact pack", error))?;
+        }
+        while pack_ids.len() < packing.packs.len() {
+            let index = pack_ids.len();
+            let placeholder = sha256_hex(format!("compact-new-{index}").as_bytes());
+            tx.execute(
+                "INSERT INTO artwork_pack (sha256, path, byte_length, asset_count) \
+                 VALUES (?1, ?2, 1024, 1)",
+                params![placeholder, format!("__compact_new_{index}")],
+            )
+            .map_err(|error| catalog_error("创建 compact pack row", error))?;
+            pack_ids.push(tx.last_insert_rowid());
+        }
+        let mut pack_id_by_sha = HashMap::new();
+        for (index, pack) in packing.packs.iter().enumerate() {
+            let id = pack_ids[index];
+            tx.execute(
+                "UPDATE artwork_pack SET sha256 = ?1, path = ?2, byte_length = ?3, \
+                 asset_count = ?4 WHERE id = ?5",
+                params![
+                    pack.sha256,
+                    pack.path,
+                    to_i64(pack.byte_length, "compact pack byte_length")?,
+                    to_i64(pack.asset_count as u64, "compact pack asset_count")?,
+                    id
+                ],
+            )
+            .map_err(|error| catalog_error("更新 compact pack row", error))?;
+            pack_id_by_sha.insert(pack.sha256.as_str(), id);
+        }
+        for asset in &packing.assets {
+            let pack_id = pack_id_by_sha
+                .get(asset.pack_sha256.as_str())
+                .ok_or_else(|| {
+                    AppError::LibraryIndexError("compact asset 引用了未知 pack".to_string())
+                })?;
+            let changed = tx
+                .execute(
+                    "UPDATE artwork_asset SET pack_id = ?1, member_name = ?2, data_offset = ?3, \
+                     byte_length = ?4, media_type = ?5, width = ?6, height = ?7 WHERE sha256 = ?8",
+                    params![
+                        pack_id,
+                        asset.member_name,
+                        to_i64(asset.data_offset, "compact asset data_offset")?,
+                        to_i64(asset.byte_length, "compact asset byte_length")?,
+                        asset.media_type,
+                        i64::from(asset.width),
+                        i64::from(asset.height),
+                        asset.sha256
+                    ],
+                )
+                .map_err(|error| catalog_error("更新 compact asset", error))?;
+            if changed != 1 {
+                return Err(AppError::LibraryIndexError(format!(
+                    "compact asset {} 不在 catalog 中",
+                    asset.sha256
+                )));
+            }
+        }
+        for id in pack_ids.iter().skip(packing.packs.len()) {
+            tx.execute("DELETE FROM artwork_pack WHERE id = ?1", params![id])
+                .map_err(|error| catalog_error("删除旧 compact pack row", error))?;
+        }
+        tx.commit()
+            .map_err(|error| catalog_error("提交 compact catalog", error))?;
+        Ok(())
+    })
+}
+
+fn compact_file_identity(path: &Path) -> Result<ArtworkCompactFileIdentity> {
+    let metadata = std::fs::metadata(path).map_err(pack_io("读取 compact 文件信息"))?;
+    Ok(ArtworkCompactFileIdentity {
+        size: metadata.len(),
+        modified_time: metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .and_then(|duration| i64::try_from(duration.as_secs()).ok()),
+        sha256: sha256_file(path)?,
+    })
+}
+
 pub(crate) fn build_and_publish(
     target_root: &Path,
     records: &[LibraryIndexRecord],
@@ -161,17 +636,55 @@ pub(crate) fn build_and_publish_artwork(
     let (candidates, binding_assets) = collect_candidates(target_root, artwork)?;
     let needed_hashes = binding_assets.values().cloned().collect::<BTreeSet<_>>();
     let prior = load_prior_catalog(&target_root.join(DATABASE_FILENAME))?;
-    let mut packs = Vec::new();
-    let mut assets = Vec::new();
+    let mut packing = ArtworkPacking {
+        packs: Vec::new(),
+        assets: Vec::new(),
+        binding_assets,
+        published: Vec::new(),
+    };
     let mut reused_hashes = BTreeSet::new();
+    let mut active_tail = None;
+    let mut next_index = 1_u32;
 
     if let Some(prior) = prior {
-        let selected_packs = prior
+        let prior_hashes = prior
+            .assets
+            .iter()
+            .map(|asset| asset.sha256.as_str())
+            .collect::<BTreeSet<_>>();
+        let has_new = candidates
+            .keys()
+            .any(|hash| !prior_hashes.contains(hash.as_str()));
+        next_index = prior
+            .packs
+            .iter()
+            .filter_map(|pack| numeric_pack_index(&pack.path))
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        active_tail = has_new
+            .then(|| {
+                prior
+                    .packs
+                    .iter()
+                    .filter(|pack| {
+                        numeric_pack_index(&pack.path).is_some()
+                            && pack.byte_length < TARGET_PACK_BYTES
+                    })
+                    .max_by_key(|pack| numeric_pack_index(&pack.path))
+                    .cloned()
+            })
+            .flatten();
+
+        let mut selected_packs = prior
             .assets
             .iter()
             .filter(|asset| needed_hashes.contains(&asset.sha256))
             .map(|asset| asset.pack_sha256.clone())
             .collect::<BTreeSet<_>>();
+        if let Some(tail) = &active_tail {
+            selected_packs.insert(tail.sha256.clone());
+        }
         for pack_sha256 in selected_packs {
             let pack = prior
                 .packs
@@ -188,43 +701,91 @@ pub(crate) fn build_and_publish_artwork(
                 .filter(|asset| asset.pack_sha256 == pack_sha256)
                 .cloned()
                 .collect::<Vec<_>>();
+            recover_interrupted_replacement(target_root, pack)?;
             verify_pack(target_root, pack, &pack_assets)?;
             reused_hashes.extend(pack_assets.iter().map(|asset| asset.sha256.clone()));
-            packs.push(pack.clone());
-            assets.extend(pack_assets);
+            packing.packs.push(pack.clone());
+            packing.assets.extend(pack_assets);
         }
     }
 
-    let new_candidates = candidates
+    let mut new_candidates = candidates
         .values()
         .filter(|candidate| !reused_hashes.contains(&candidate.sha256))
         .cloned()
         .collect::<Vec<_>>();
-    for shard in shard_candidates(new_candidates) {
-        let (pack, pack_assets) = write_and_publish_pack(target_root, &shard)?;
-        packs.push(pack);
-        assets.extend(pack_assets);
+    new_candidates.sort_by(|left, right| left.sha256.cmp(&right.sha256));
+
+    if let Some(tail) = active_tail {
+        let tail_assets = packing
+            .assets
+            .iter()
+            .filter(|asset| asset.pack_sha256 == tail.sha256)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut append_count = 0;
+        let mut size = tail.byte_length;
+        for candidate in &new_candidates {
+            let member_size = TAR_BLOCK + align_tar(candidate.byte_length);
+            if size
+                .saturating_sub(TAR_TRAILER_BYTES)
+                .saturating_add(member_size)
+                .saturating_add(TAR_TRAILER_BYTES)
+                > TARGET_PACK_BYTES
+            {
+                break;
+            }
+            size = size.saturating_add(member_size);
+            append_count += 1;
+        }
+        if append_count > 0 {
+            let appended = new_candidates.drain(..append_count).collect::<Vec<_>>();
+            let (replacement, replacement_assets, publication) =
+                rewrite_and_publish_tail(target_root, &tail, &tail_assets, &appended)?;
+            packing.packs.retain(|pack| pack.sha256 != tail.sha256);
+            packing
+                .assets
+                .retain(|asset| asset.pack_sha256 != tail.sha256);
+            packing.packs.push(replacement);
+            packing.assets.extend(replacement_assets);
+            packing.published.push(publication);
+        }
     }
 
-    packs.sort_by(|left, right| left.sha256.cmp(&right.sha256));
-    packs.dedup_by(|left, right| left.sha256 == right.sha256);
-    assets.sort_by(|left, right| left.sha256.cmp(&right.sha256));
-    assets.dedup_by(|left, right| left.sha256 == right.sha256);
+    for shard in shard_candidates(new_candidates) {
+        let path = numeric_pack_path(next_index);
+        next_index = next_index.saturating_add(1);
+        let (pack, pack_assets, publication) = write_and_publish_pack(target_root, &path, &shard)?;
+        packing.packs.push(pack);
+        packing.assets.extend(pack_assets);
+        if let Some(publication) = publication {
+            packing.published.push(publication);
+        }
+    }
 
-    for pack in &packs {
-        let pack_assets = assets
+    packing
+        .packs
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    packing
+        .packs
+        .dedup_by(|left, right| left.path == right.path);
+    packing
+        .assets
+        .sort_by(|left, right| left.sha256.cmp(&right.sha256));
+    packing
+        .assets
+        .dedup_by(|left, right| left.sha256 == right.sha256);
+
+    for pack in &packing.packs {
+        let pack_assets = packing
+            .assets
             .iter()
             .filter(|asset| asset.pack_sha256 == pack.sha256)
             .cloned()
             .collect::<Vec<_>>();
         verify_pack(target_root, pack, &pack_assets)?;
     }
-
-    Ok(ArtworkPacking {
-        packs,
-        assets,
-        binding_assets,
-    })
+    Ok(packing)
 }
 
 fn collect_candidates(
@@ -487,86 +1048,167 @@ fn shard_candidates(mut candidates: Vec<ImageCandidate>) -> Vec<Vec<ImageCandida
     shards
 }
 
+fn numeric_pack_path(index: u32) -> String {
+    format!("{ARTWORK_DIRECTORY}/artwork-{index:06}.tar")
+}
+
+fn numeric_pack_index(path: &str) -> Option<u32> {
+    let digits = path
+        .strip_prefix(&format!("{ARTWORK_DIRECTORY}/artwork-"))?
+        .strip_suffix(".tar")?;
+    (digits.len() == 6 && digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| digits.parse().ok())
+        .flatten()
+}
+
 fn write_and_publish_pack(
     target_root: &Path,
+    relative_path: &str,
     candidates: &[ImageCandidate],
-) -> Result<(ArtworkPack, Vec<ArtworkAsset>)> {
+) -> Result<(ArtworkPack, Vec<ArtworkAsset>, Option<PublishedPack>)> {
     let local_path = temp_path("artwork-pack", "tar");
     let result = (|| {
-        let mut file = File::create(&local_path).map_err(pack_io("创建 artwork pack"))?;
-        let mut assets = Vec::with_capacity(candidates.len());
-        let mut offset = 0_u64;
-        for candidate in candidates {
-            let member_name = format!("{}.{}", candidate.sha256, candidate.extension);
-            let header = tar_header(&member_name, candidate.byte_length)?;
-            file.write_all(&header)
-                .map_err(pack_io("写入 tar header"))?;
-            offset += TAR_BLOCK;
-            let data_offset = offset;
-            let mut source = File::open(&candidate.source_path).map_err(pack_io("读取 artwork"))?;
-            let copied =
-                std::io::copy(&mut source, &mut file).map_err(pack_io("写入 artwork member"))?;
-            if copied != candidate.byte_length {
-                return Err(AppError::LibraryIndexError(format!(
-                    "artwork 在打包期间发生变化: {}",
-                    candidate.source_path.display()
-                )));
-            }
-            let padding = align_tar(candidate.byte_length) - candidate.byte_length;
-            write_zeros(&mut file, padding)?;
-            offset += candidate.byte_length + padding;
-            assets.push(ArtworkAsset {
-                sha256: candidate.sha256.clone(),
-                pack_sha256: String::new(),
-                member_name,
-                data_offset,
-                byte_length: candidate.byte_length,
-                media_type: candidate.media_type.clone(),
-                width: candidate.width,
-                height: candidate.height,
-            });
-        }
-        write_zeros(&mut file, TAR_TRAILER_BYTES)?;
-        file.sync_all().map_err(pack_io("同步 artwork pack"))?;
-        drop(file);
-
-        let byte_length = std::fs::metadata(&local_path)
-            .map_err(pack_io("读取 artwork pack 大小"))?
-            .len();
-        if byte_length > MAX_PACK_BYTES
-            && !(candidates.len() == 1
-                && TAR_BLOCK + align_tar(candidates[0].byte_length) + TAR_TRAILER_BYTES
-                    == byte_length)
-        {
-            return Err(AppError::LibraryIndexError(format!(
-                "artwork pack 超过 96 MiB 限制: {byte_length} bytes"
-            )));
-        }
-        let sha256 = sha256_file(&local_path)?;
-        for asset in &mut assets {
-            asset.pack_sha256.clone_from(&sha256);
-        }
-        let relative_path = format!("{ARTWORK_DIRECTORY}/{sha256}.tar");
-        let pack = ArtworkPack {
-            sha256,
-            path: relative_path,
-            byte_length,
-            asset_count: assets.len(),
-        };
-        verify_pack_contents(&local_path, &pack, &assets)?;
-        publish_pack(target_root, &local_path, &pack)?;
-        Ok((pack, assets))
+        let (pack, assets) = write_pack(&local_path, relative_path, candidates)?;
+        let publication = publish_pack(target_root, &local_path, &pack)?;
+        Ok((pack, assets, publication))
     })();
     let _ = std::fs::remove_file(&local_path);
     result
 }
 
-fn publish_pack(target_root: &Path, local_path: &Path, pack: &ArtworkPack) -> Result<()> {
+fn write_pack(
+    local_path: &Path,
+    relative_path: &str,
+    candidates: &[ImageCandidate],
+) -> Result<(ArtworkPack, Vec<ArtworkAsset>)> {
+    let mut file = File::create(local_path).map_err(pack_io("创建 artwork pack"))?;
+    let mut assets = Vec::with_capacity(candidates.len());
+    let mut offset = 0_u64;
+    append_candidates(&mut file, &mut offset, &mut assets, candidates)?;
+    write_zeros(&mut file, TAR_TRAILER_BYTES)?;
+    file.sync_all().map_err(pack_io("同步 artwork pack"))?;
+    drop(file);
+    finish_local_pack(local_path, relative_path, candidates.len(), assets)
+}
+
+fn rewrite_and_publish_tail(
+    target_root: &Path,
+    prior: &ArtworkPack,
+    prior_assets: &[ArtworkAsset],
+    candidates: &[ImageCandidate],
+) -> Result<(ArtworkPack, Vec<ArtworkAsset>, PublishedPack)> {
+    verify_pack(target_root, prior, prior_assets)?;
+    let local_path = temp_path("artwork-tail-next", "tar");
+    let result = (|| {
+        let source_path = safe_pack_path(target_root, prior)?;
+        let mut source = File::open(&source_path).map_err(pack_io("复制旧 artwork 尾包"))?;
+        let mut file = File::create(&local_path).map_err(pack_io("创建 artwork 尾包"))?;
+        let copied = std::io::copy(
+            &mut std::io::Read::by_ref(&mut source).take(prior.byte_length - TAR_TRAILER_BYTES),
+            &mut file,
+        )
+        .map_err(pack_io("复制旧 artwork 尾包成员"))?;
+        if copied != prior.byte_length - TAR_TRAILER_BYTES {
+            return Err(AppError::LibraryIndexError(
+                "旧 artwork 尾包在复制期间发生变化".to_string(),
+            ));
+        }
+        let mut assets = prior_assets.to_vec();
+        let mut offset = copied;
+        append_candidates(&mut file, &mut offset, &mut assets, candidates)?;
+        write_zeros(&mut file, TAR_TRAILER_BYTES)?;
+        file.sync_all().map_err(pack_io("同步 artwork 尾包"))?;
+        drop(file);
+        let (pack, assets) = finish_local_pack(
+            &local_path,
+            &prior.path,
+            prior_assets.len() + candidates.len(),
+            assets,
+        )?;
+        let publication = publish_replacement_pack(target_root, &local_path, prior, &pack)?;
+        Ok((pack, assets, publication))
+    })();
+    let _ = std::fs::remove_file(&local_path);
+    result
+}
+
+fn append_candidates(
+    file: &mut File,
+    offset: &mut u64,
+    assets: &mut Vec<ArtworkAsset>,
+    candidates: &[ImageCandidate],
+) -> Result<()> {
+    for candidate in candidates {
+        let member_name = format!("{}.{}", candidate.sha256, candidate.extension);
+        let header = tar_header(&member_name, candidate.byte_length)?;
+        file.write_all(&header)
+            .map_err(pack_io("写入 tar header"))?;
+        *offset += TAR_BLOCK;
+        let data_offset = *offset;
+        let mut source = File::open(&candidate.source_path).map_err(pack_io("读取 artwork"))?;
+        let copied = std::io::copy(&mut source, file).map_err(pack_io("写入 artwork member"))?;
+        if copied != candidate.byte_length {
+            return Err(AppError::LibraryIndexError(format!(
+                "artwork 在打包期间发生变化: {}",
+                candidate.source_path.display()
+            )));
+        }
+        let padding = align_tar(candidate.byte_length) - candidate.byte_length;
+        write_zeros(file, padding)?;
+        *offset += candidate.byte_length + padding;
+        assets.push(ArtworkAsset {
+            sha256: candidate.sha256.clone(),
+            pack_sha256: String::new(),
+            member_name,
+            data_offset,
+            byte_length: candidate.byte_length,
+            media_type: candidate.media_type.clone(),
+            width: candidate.width,
+            height: candidate.height,
+        });
+    }
+    Ok(())
+}
+
+fn finish_local_pack(
+    local_path: &Path,
+    relative_path: &str,
+    candidate_count: usize,
+    mut assets: Vec<ArtworkAsset>,
+) -> Result<(ArtworkPack, Vec<ArtworkAsset>)> {
+    let byte_length = std::fs::metadata(local_path)
+        .map_err(pack_io("读取 artwork pack 大小"))?
+        .len();
+    if byte_length > MAX_PACK_BYTES && candidate_count != 1 {
+        return Err(AppError::LibraryIndexError(format!(
+            "artwork pack 超过 96 MiB 限制: {byte_length} bytes"
+        )));
+    }
+    let sha256 = sha256_file(local_path)?;
+    for asset in &mut assets {
+        asset.pack_sha256.clone_from(&sha256);
+    }
+    let pack = ArtworkPack {
+        sha256,
+        path: relative_path.to_string(),
+        byte_length,
+        asset_count: assets.len(),
+    };
+    verify_pack_contents(local_path, &pack, &assets)?;
+    Ok((pack, assets))
+}
+
+fn publish_pack(
+    target_root: &Path,
+    local_path: &Path,
+    pack: &ArtworkPack,
+) -> Result<Option<PublishedPack>> {
     let directory = target_root.join(ARTWORK_DIRECTORY);
     std::fs::create_dir_all(&directory).map_err(pack_io("创建 MLIP-Artwork 目录"))?;
     let final_path = target_root.join(&pack.path);
     if final_path.exists() {
-        return verify_pack_file(&final_path, pack);
+        verify_pack_file(&final_path, pack)?;
+        return Ok(None);
     }
 
     let upload = directory.join(format!(
@@ -589,7 +1231,7 @@ fn publish_pack(target_root: &Path, local_path: &Path, pack: &ArtworkPack) -> Re
                         && verify_pack_file(&final_path, pack).is_ok() =>
                 {
                     let _ = std::fs::remove_file(&upload);
-                    return Ok(());
+                    return Ok(None);
                 }
                 Err(copy_error) => {
                     let _ = std::fs::remove_file(&upload);
@@ -601,7 +1243,7 @@ fn publish_pack(target_root: &Path, local_path: &Path, pack: &ArtworkPack) -> Re
         }
         Err(_) if final_path.exists() && verify_pack_file(&final_path, pack).is_ok() => {
             let _ = std::fs::remove_file(&upload);
-            return Ok(());
+            return Ok(None);
         }
         Err(error) => {
             let _ = std::fs::remove_file(&upload);
@@ -615,6 +1257,78 @@ fn publish_pack(target_root: &Path, local_path: &Path, pack: &ArtworkPack) -> Re
         let _ = std::fs::remove_file(&final_path);
         return Err(error);
     }
+    Ok(Some(PublishedPack {
+        target: final_path,
+        backup: None,
+    }))
+}
+
+fn publish_replacement_pack(
+    target_root: &Path,
+    local_path: &Path,
+    prior: &ArtworkPack,
+    replacement: &ArtworkPack,
+) -> Result<PublishedPack> {
+    if prior.path != replacement.path {
+        return Err(AppError::LibraryIndexError(
+            "artwork 尾包替换路径不一致".to_string(),
+        ));
+    }
+    let target = safe_pack_path(target_root, prior)?;
+    verify_pack_file(&target, prior)?;
+    let backup = replacement_backup_path(target_root, prior);
+    if backup.exists() {
+        verify_pack_file(&backup, prior)?;
+        std::fs::remove_file(&backup).map_err(pack_io("清理旧 artwork 恢复副本"))?;
+    }
+    std::fs::copy(&target, &backup).map_err(pack_io("备份旧 artwork 尾包"))?;
+    if let Err(error) = std::fs::copy(local_path, &target)
+        .map_err(pack_io("覆盖 artwork 尾包"))
+        .and_then(|_| verify_pack_file(&target, replacement))
+    {
+        let restore = std::fs::copy(&backup, &target)
+            .map_err(pack_io("恢复旧 artwork 尾包"))
+            .and_then(|_| verify_pack_file(&target, prior));
+        let _ = std::fs::remove_file(&backup);
+        return match restore {
+            Ok(()) => Err(error),
+            Err(restore_error) => Err(AppError::LibraryIndexError(format!(
+                "{error}; 恢复旧 artwork 尾包也失败: {restore_error}"
+            ))),
+        };
+    }
+    Ok(PublishedPack {
+        target,
+        backup: Some(backup),
+    })
+}
+
+fn replacement_backup_path(target_root: &Path, pack: &ArtworkPack) -> PathBuf {
+    let root = std::env::temp_dir().join("anime-organizer");
+    let _ = std::fs::create_dir_all(&root);
+    let canonical = target_root
+        .canonicalize()
+        .unwrap_or_else(|_| target_root.to_path_buf());
+    let library = sha256_hex(canonical.to_string_lossy().as_bytes());
+    root.join(format!(
+        "artwork-recovery-{}-{}.tar",
+        &library[..16],
+        pack.sha256
+    ))
+}
+
+fn recover_interrupted_replacement(target_root: &Path, pack: &ArtworkPack) -> Result<()> {
+    let backup = replacement_backup_path(target_root, pack);
+    if !backup.exists() {
+        return Ok(());
+    }
+    let target = safe_pack_path(target_root, pack)?;
+    if verify_pack_file(&target, pack).is_err() {
+        verify_pack_file(&backup, pack)?;
+        std::fs::copy(&backup, &target).map_err(pack_io("恢复中断的 artwork 尾包"))?;
+        verify_pack_file(&target, pack)?;
+    }
+    std::fs::remove_file(&backup).map_err(pack_io("清理 artwork 恢复副本"))?;
     Ok(())
 }
 
@@ -748,16 +1462,17 @@ fn verify_pack_contents(path: &Path, pack: &ArtworkPack, assets: &[ArtworkAsset]
 }
 
 fn safe_pack_path(target_root: &Path, pack: &ArtworkPack) -> Result<PathBuf> {
-    let expected = format!("{ARTWORK_DIRECTORY}/{}.tar", pack.sha256);
-    if pack.path != expected || pack.sha256.len() != 64 || !is_lower_hex(&pack.sha256) {
+    let legacy = format!("{ARTWORK_DIRECTORY}/{}.tar", pack.sha256);
+    if (pack.path != legacy && numeric_pack_index(&pack.path).is_none())
+        || pack.sha256.len() != 64
+        || !is_lower_hex(&pack.sha256)
+    {
         return Err(AppError::LibraryIndexError(format!(
             "非法 artwork pack 路径: {}",
             pack.path
         )));
     }
-    Ok(target_root
-        .join(ARTWORK_DIRECTORY)
-        .join(format!("{}.tar", pack.sha256)))
+    Ok(target_root.join(&pack.path))
 }
 
 fn verify_pack_file(path: &Path, pack: &ArtworkPack) -> Result<()> {
@@ -935,7 +1650,9 @@ fn write_zeros(writer: &mut File, mut length: u64) -> Result<()> {
 }
 
 fn temp_path(prefix: &str, extension: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
+    let root = std::env::temp_dir().join("anime-organizer");
+    let _ = std::fs::create_dir_all(&root);
+    root.join(format!(
         "aniorg-{prefix}-{}-{}.{}",
         std::process::id(),
         TEMP_COUNTER.fetch_add(1, Ordering::Relaxed),
@@ -974,9 +1691,24 @@ fn crc32(bytes: &[u8]) -> u32 {
     !crc
 }
 
-fn sha256_file(path: &Path) -> Result<String> {
+pub(crate) fn sha256_file(path: &Path) -> Result<String> {
     let mut reader = BufReader::new(File::open(path).map_err(pack_io("读取 SHA-256 文件"))?);
     sha256_reader(&mut reader)
+}
+
+pub(crate) fn sha256_file_prefix(path: &Path, limit: u64) -> Result<String> {
+    let file = File::open(path).map_err(pack_io("读取 SHA-256 文件"))?;
+    let mut reader = BufReader::new(file).take(limit);
+    let mut sha = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let count = reader.read(&mut buffer).map_err(pack_io("计算 SHA-256"))?;
+        if count == 0 {
+            break;
+        }
+        sha.update(&buffer[..count]);
+    }
+    Ok(hex(&sha.finalize()))
 }
 
 fn sha256_reader(reader: &mut impl Read) -> Result<String> {
@@ -1264,6 +1996,47 @@ mod tests {
         assert_eq!(tar_octal(&header[124..136]).unwrap(), 123);
         assert_eq!(tar_octal(&header[148..156]).unwrap(), tar_checksum(&header));
         assert_eq!(&header[257..265], b"ustar\x0000");
+    }
+
+    #[test]
+    fn publication_guard_restores_replaced_pack_until_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("tail.tar");
+        let backup = directory.path().join("tail.backup.tar");
+        std::fs::write(&target, b"new").unwrap();
+        std::fs::write(&backup, b"old").unwrap();
+        let mut packing = ArtworkPacking::default();
+        packing.published.push(PublishedPack {
+            target: target.clone(),
+            backup: Some(backup.clone()),
+        });
+        drop(packing);
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+        assert!(!backup.exists());
+
+        let created = directory.path().join("created.tar");
+        std::fs::write(&created, b"created").unwrap();
+        let mut packing = ArtworkPacking::default();
+        packing.published.push(PublishedPack {
+            target: created.clone(),
+            backup: None,
+        });
+        drop(packing);
+        assert!(!created.exists());
+
+        let committed = directory.path().join("committed.tar");
+        let committed_backup = directory.path().join("committed.backup.tar");
+        std::fs::write(&committed, b"new").unwrap();
+        std::fs::write(&committed_backup, b"old").unwrap();
+        let mut packing = ArtworkPacking::default();
+        packing.published.push(PublishedPack {
+            target: committed.clone(),
+            backup: Some(committed_backup.clone()),
+        });
+        packing.commit();
+        drop(packing);
+        assert_eq!(std::fs::read(&committed).unwrap(), b"new");
+        assert!(!committed_backup.exists());
     }
 
     #[test]

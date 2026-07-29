@@ -173,6 +173,46 @@ fn execute(
                 })
                 .map_err(|error| error.to_string())
         }
+        JobSpec::NormalizeLayout(args) => {
+            let data = crate::commands::run_normalize_layout(args, true, &|message| {
+                let _ = queue.append_log(job.id, "info", message);
+            })
+            .map_err(|error| error.to_string())?;
+            Ok(JobResult {
+                summary: if args.dry_run {
+                    "normalize layout plan created"
+                } else {
+                    "normalize layout plan applied"
+                }
+                .to_string(),
+                data,
+                artifacts: args
+                    .plan
+                    .iter()
+                    .map(|path| serde_json::json!({ "path": path.display().to_string() }))
+                    .collect(),
+            })
+        }
+        JobSpec::CompactArtworkPacks(args) => {
+            let data = crate::commands::run_compact_artwork(args, true, &|message| {
+                let _ = queue.append_log(job.id, "info", message);
+            })
+            .map_err(|error| error.to_string())?;
+            Ok(JobResult {
+                summary: if args.dry_run {
+                    "artwork compact plan created"
+                } else {
+                    "artwork compact plan applied"
+                }
+                .to_string(),
+                data,
+                artifacts: args
+                    .plan
+                    .iter()
+                    .map(|path| serde_json::json!({ "path": path.display().to_string() }))
+                    .collect(),
+            })
+        }
         #[cfg(feature = "clouddrive")]
         JobSpec::RssPoll { .. } | JobSpec::RssPollAll => {
             let runtime = tokio::runtime::Runtime::new()

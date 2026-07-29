@@ -12,11 +12,6 @@ mod mlip;
 mod title_resolver;
 
 use crate::cli::*;
-#[cfg(any(
-    feature = "scraper",
-    feature = "clouddrive",
-    feature = "torrent-scraper"
-))]
 use crate::commands::run_command;
 #[cfg(feature = "metadata")]
 use crate::mlip::{
@@ -69,11 +64,6 @@ fn main() {
     }
 }
 
-#[cfg(any(
-    feature = "scraper",
-    feature = "clouddrive",
-    feature = "torrent-scraper"
-))]
 fn run() -> Result<(), AppError> {
     let cli = Cli::parse();
 
@@ -90,30 +80,8 @@ fn run() -> Result<(), AppError> {
     run_organize_entry(cli.organize)
 }
 
-#[cfg(not(any(
-    feature = "scraper",
-    feature = "clouddrive",
-    feature = "torrent-scraper"
-)))]
-fn run() -> Result<(), AppError> {
-    let cli = Cli::parse();
-
-    #[cfg(feature = "daemon")]
-    if cli.daemon {
-        reject_daemon_conflicts(&cli)?;
-        return daemon::run();
-    }
-
-    run_organize_entry(cli.organize)
-}
-
 #[cfg(feature = "daemon")]
 fn reject_daemon_conflicts(cli: &Cli) -> Result<(), AppError> {
-    #[cfg(any(
-        feature = "scraper",
-        feature = "clouddrive",
-        feature = "torrent-scraper"
-    ))]
     if cli.command.is_some() {
         return Err(AppError::ParseError(
             "--daemon cannot be combined with a subcommand".to_string(),

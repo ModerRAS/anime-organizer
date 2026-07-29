@@ -1,14 +1,4 @@
-#[cfg(any(
-    feature = "scraper",
-    feature = "clouddrive",
-    feature = "torrent-scraper"
-))]
 use crate::cli::*;
-#[cfg(any(
-    feature = "scraper",
-    feature = "clouddrive",
-    feature = "torrent-scraper"
-))]
 use anime_organizer::error::AppError;
 #[cfg(feature = "scraper")]
 use anime_organizer::metadata::AliasLookup;
@@ -25,13 +15,28 @@ use std::io::Write;
 #[cfg(feature = "scraper")]
 use std::path::PathBuf;
 
-#[cfg(any(
-    feature = "scraper",
-    feature = "clouddrive",
-    feature = "torrent-scraper"
-))]
 pub(crate) fn run_command(command: Commands) -> Result<(), AppError> {
     match command {
+        Commands::NormalizeLayout(args) => {
+            let result = run_normalize_layout(&args, false, &|message| eprintln!("{message}"))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result).map_err(|error| {
+                    AppError::LibraryIndexError(format!("序列化 layout 结果失败: {error}"))
+                })?
+            );
+            Ok(())
+        }
+        Commands::CompactArtworkPacks(args) => {
+            let result = run_compact_artwork(&args, false, &|message| eprintln!("{message}"))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result).map_err(|error| {
+                    AppError::LibraryIndexError(format!("序列化 compact 结果失败: {error}"))
+                })?
+            );
+            Ok(())
+        }
         #[cfg(feature = "scraper")]
         Commands::Scrape(args) => {
             let runtime = tokio::runtime::Runtime::new()
@@ -63,6 +68,67 @@ pub(crate) fn run_command(command: Commands) -> Result<(), AppError> {
             runtime.block_on(run_torrent_scrape(args))
         }
     }
+}
+
+pub(crate) fn run_compact_artwork(
+    args: &CompactArtworkPacksArgs,
+    confirmed: bool,
+    log: &dyn Fn(&str),
+) -> Result<serde_json::Value, AppError> {
+    if args.dry_run {
+        let output = args.plan.as_ref().ok_or_else(|| {
+            AppError::ParseError("compact-artwork-packs --dry-run requires --plan".to_string())
+        })?;
+        if args.apply_plan.is_some() {
+            return Err(AppError::ParseError(
+                "--dry-run cannot be combined with --apply-plan".to_string(),
+            ));
+        }
+        let plan = anime_organizer::build_artwork_compact_plan(&args.target, output, log)?;
+        return serde_json::to_value(&plan.stats).map_err(|error| {
+            AppError::LibraryIndexError(format!("序列化 compact plan 汇总失败: {error}"))
+        });
+    }
+    let input = args.apply_plan.as_ref().ok_or_else(|| {
+        AppError::ParseError(
+            "compact-artwork-packs requires --dry-run --plan or --apply-plan".to_string(),
+        )
+    })?;
+    let summary = anime_organizer::apply_artwork_compact_plan(&args.target, input, confirmed, log)?;
+    serde_json::to_value(summary).map_err(|error| {
+        AppError::LibraryIndexError(format!("序列化 compact apply 汇总失败: {error}"))
+    })
+}
+
+pub(crate) fn run_normalize_layout(
+    args: &NormalizeLayoutArgs,
+    confirmed: bool,
+    log: &dyn Fn(&str),
+) -> Result<serde_json::Value, AppError> {
+    if args.dry_run {
+        let output = args.plan.as_ref().ok_or_else(|| {
+            AppError::ParseError("normalize-layout --dry-run requires --plan".to_string())
+        })?;
+        if args.apply_plan.is_some() {
+            return Err(AppError::ParseError(
+                "--dry-run cannot be combined with --apply-plan".to_string(),
+            ));
+        }
+        let plan =
+            anime_organizer::build_layout_plan(&args.target, output, args.force_rehash, log)?;
+        return serde_json::to_value(&plan.summary).map_err(|error| {
+            AppError::LibraryIndexError(format!("序列化 layout plan 汇总失败: {error}"))
+        });
+    }
+    let input = args.apply_plan.as_ref().ok_or_else(|| {
+        AppError::ParseError(
+            "normalize-layout requires --dry-run --plan or --apply-plan".to_string(),
+        )
+    })?;
+    let summary = anime_organizer::apply_layout_plan(&args.target, input, confirmed, log)?;
+    serde_json::to_value(summary).map_err(|error| {
+        AppError::LibraryIndexError(format!("序列化 layout apply 汇总失败: {error}"))
+    })
 }
 
 #[cfg(feature = "scraper")]

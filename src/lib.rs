@@ -38,6 +38,7 @@
 pub mod anifilebert;
 mod artwork_pack;
 pub mod error;
+pub mod layout_normalizer;
 pub mod library_index;
 pub mod metadata;
 pub mod nfo;
@@ -50,7 +51,14 @@ pub mod scraper;
 #[cfg(feature = "torrent-scraper")]
 pub mod torrent;
 
+pub use artwork_pack::{
+    apply_artwork_compact_plan, build_artwork_compact_plan, ArtworkCompactApplySummary,
+    ArtworkCompactPlan, ArtworkCompactStats,
+};
 pub use error::{AppError, Result};
+pub use layout_normalizer::{
+    apply_layout_plan, build_layout_plan, LayoutApplySummary, LayoutPlan, LayoutPlanSummary,
+};
 pub use library_index::{ExtraKind, LibraryExtraRecord, LibraryIndex, LibraryIndexRecord};
 pub use metadata::AnimeMetadata;
 pub use nfo::{EpisodeNfo, NfoWriter, TvShowNfo};

@@ -1,6 +1,7 @@
 use anime_organizer::library_index::{
     Artwork, ArtworkKind, ExternalProvider, LibraryIndex, LibraryIndexRecord, MLIP_SCHEMA_SQL,
 };
+use anime_organizer::{apply_artwork_compact_plan, build_artwork_compact_plan};
 use image::{codecs::png::PngEncoder, ExtendedColorType, ImageEncoder};
 use rusqlite::Connection;
 use std::fs;
@@ -281,13 +282,17 @@ fn pack_bytes_are_deterministic_and_unchanged_rebuild_reuses_the_pack() {
 }
 
 #[test]
-fn v4_incremental_update_preserves_existing_catalog_and_adds_one_pack() {
+fn v4_incremental_update_rebuilds_numeric_tail_without_adding_pack() {
     let directory = tempfile::tempdir().unwrap();
     let target = directory.path();
     let records = fixture(target);
     LibraryIndex::rebuild(target, &records).unwrap();
 
     let existing_pack = pack_path(target);
+    assert_eq!(
+        existing_pack.file_name().unwrap().to_string_lossy(),
+        "artwork-000001.tar"
+    );
     let existing_pack_name = existing_pack.file_name().unwrap().to_owned();
     let existing_pack_bytes = fs::read(&existing_pack).unwrap();
 
@@ -311,7 +316,7 @@ fn v4_incremental_update_preserves_existing_catalog_and_adds_one_pack() {
         conn.query_row("SELECT COUNT(*) FROM artwork_pack", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        2
+        1
     );
     assert_eq!(
         conn.query_row("SELECT COUNT(*) FROM artwork_asset", [], |row| row
@@ -334,7 +339,7 @@ fn v4_incremental_update_preserves_existing_catalog_and_adds_one_pack() {
         .unwrap(),
         1
     );
-    assert_eq!(
+    assert_ne!(
         fs::read(target.join("MLIP-Artwork").join(existing_pack_name)).unwrap(),
         existing_pack_bytes
     );
@@ -407,6 +412,81 @@ fn checked_shared_fixture_covers_base_and_incremental_contracts() {
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
+        1
+    );
+}
+
+fn copy_tree(source: &Path, target: &Path) {
+    fs::create_dir_all(target).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let destination = target.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_tree(&entry.path(), &destination);
+        } else {
+            fs::copy(entry.path(), destination).unwrap();
+        }
+    }
+}
+
+#[test]
+fn compact_plan_rewrites_referenced_legacy_packs_to_numeric_packs() {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mlip-v4/incremental");
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("library");
+    copy_tree(&source, &target);
+    let plan_path = directory.path().join("compact-plan.json");
+    let before = fs::read_dir(target.join("MLIP-Artwork"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+
+    let plan = build_artwork_compact_plan(&target, &plan_path, &|_| {}).unwrap();
+    assert_eq!(plan.stats.pack_count, 2);
+    assert_eq!(plan.stats.asset_count, 3);
+    assert_eq!(plan.stats.projected_pack_count, 1);
+    assert!(plan.orphan_packs.is_empty());
+    assert_eq!(
+        fs::read_dir(target.join("MLIP-Artwork"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>(),
+        before,
+        "compact dry-run must not change packs"
+    );
+    assert!(apply_artwork_compact_plan(&target, &plan_path, false, &|_| {}).is_err());
+
+    let summary = apply_artwork_compact_plan(&target, &plan_path, true, &|_| {}).unwrap();
+    assert_eq!(summary.old_pack_count, 2);
+    assert_eq!(summary.new_pack_count, 1);
+    assert_eq!(summary.asset_count, 3);
+    assert_eq!(summary.removed_old_packs, 2);
+
+    let conn = Connection::open(target.join("library.db")).unwrap();
+    assert_eq!(
+        conn.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM artwork_pack", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM artwork_asset", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
+    let path: String = conn
+        .query_row("SELECT path FROM artwork_pack", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(path, "MLIP-Artwork/artwork-000001.tar");
+    assert!(target.join(path).exists());
+    assert_eq!(
+        fs::read_dir(target.join("MLIP-Artwork")).unwrap().count(),
         1
     );
 }

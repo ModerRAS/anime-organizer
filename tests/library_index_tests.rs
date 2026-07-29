@@ -559,6 +559,67 @@ fn incremental_update_adds_optional_tables_to_legacy_v1_database() {
 }
 
 #[test]
+fn media_hash_cache_is_inherited_and_invalidated_by_file_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path();
+    let media_path = target.join("Hash Show").join("01.mkv");
+    fs::create_dir_all(media_path.parent().unwrap()).unwrap();
+    fs::write(&media_path, b"video").unwrap();
+
+    let record = LibraryIndexRecord::from_target_path(target, &media_path)
+        .unwrap()
+        .unwrap();
+    LibraryIndex::rebuild(target, std::slice::from_ref(&record)).unwrap();
+    let db_path = target.join("library.db");
+    let conn = Connection::open(&db_path).unwrap();
+    conn.execute(
+        "UPDATE media_file SET sha256_prefix_63m = ?1, sha256_full = ?2",
+        ["a".repeat(64), "b".repeat(64)],
+    )
+    .unwrap();
+    assert!(conn
+        .execute("UPDATE media_file SET sha256_full = 'invalid'", [])
+        .is_err());
+    drop(conn);
+
+    LibraryIndex::update(target, std::slice::from_ref(&record)).unwrap();
+    let read_hashes = || {
+        Connection::open(&db_path)
+            .unwrap()
+            .query_row(
+                "SELECT sha256_prefix_63m, sha256_full FROM media_file",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+    assert_eq!(read_hashes(), (Some("a".repeat(64)), Some("b".repeat(64))));
+
+    fs::write(&media_path, b"video changed").unwrap();
+    let mut changed = LibraryIndexRecord::from_target_path(target, &media_path)
+        .unwrap()
+        .unwrap();
+    LibraryIndex::update(target, std::slice::from_ref(&changed)).unwrap();
+    assert_eq!(read_hashes(), (None, None));
+
+    changed.sha256_prefix_63m = Some("c".repeat(64));
+    changed.sha256_full = Some("d".repeat(64));
+    LibraryIndex::update(target, std::slice::from_ref(&changed)).unwrap();
+    assert_eq!(read_hashes(), (Some("c".repeat(64)), Some("d".repeat(64))));
+
+    let rebuilt = LibraryIndexRecord::from_target_path(target, &media_path)
+        .unwrap()
+        .unwrap();
+    LibraryIndex::rebuild(target, &[rebuilt]).unwrap();
+    assert_eq!(read_hashes(), (Some("c".repeat(64)), Some("d".repeat(64))));
+}
+
+#[test]
 fn records_store_metadata_genres_external_ids_and_artwork() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path();
