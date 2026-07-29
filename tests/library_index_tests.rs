@@ -2,6 +2,7 @@ use anime_organizer::library_index::{
     ArtworkKind, ExternalId, ExternalProvider, ExtraKind, LibraryExtraRecord, LibraryIndex,
     LibraryIndexRecord, ReleaseDate,
 };
+use anime_organizer::parser::AnimeFileInfo;
 use rusqlite::Connection;
 use std::fs;
 
@@ -230,6 +231,59 @@ fn target_path_parser_reads_flat_and_season_layouts() {
     assert_eq!(title_season_record.series_title, "終究，與你相戀。第二季");
     assert_eq!(title_season_record.season, 2);
     assert_eq!(title_season_record.episode, 13.0);
+}
+
+#[test]
+fn parsed_anime_file_builds_record_when_target_rules_cannot() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path();
+    let path = target
+        .join("Shibou Yuugi de Meshi wo Kuu")
+        .join("Season 1")
+        .join(
+            "[LoliHouse] Shibou Yuugi de Meshi wo Kuu. 44 Cloudy Beach \
+             [WebRip 1080p HEVC-10bit AAC SRTx2].mkv",
+        );
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, b"video").unwrap();
+    assert!(LibraryIndexRecord::from_target_path(target, &path)
+        .unwrap()
+        .is_none());
+
+    let info = AnimeFileInfo {
+        publisher: "LoliHouse".to_string(),
+        anime_name: "Shibou Yuugi de Meshi wo Kuu".to_string(),
+        episode: "44".to_string(),
+        tags: "[WebRip 1080p HEVC-10bit AAC SRTx2]".to_string(),
+        extension: ".mkv".to_string(),
+        original_path: path.display().to_string(),
+    };
+    let record = LibraryIndexRecord::from_anime_file(target, &path, &info).unwrap();
+    assert_eq!(record.series_title, "Shibou Yuugi de Meshi wo Kuu");
+    assert_eq!(record.season, 1);
+    assert_eq!(record.episode, 44.0);
+    assert_eq!(
+        record.relative_path,
+        "Shibou Yuugi de Meshi wo Kuu/Season 1/[LoliHouse] Shibou Yuugi de Meshi wo Kuu. 44 Cloudy Beach [WebRip 1080p HEVC-10bit AAC SRTx2].mkv"
+    );
+
+    let versioned_path = target
+        .join("The World Is Dancing")
+        .join("Season 1")
+        .join("[Group] The World Is Dancing - 01v2 [1080p].mkv");
+    fs::create_dir_all(versioned_path.parent().unwrap()).unwrap();
+    fs::write(&versioned_path, b"versioned").unwrap();
+    let versioned_info = AnimeFileInfo {
+        publisher: "Group".to_string(),
+        anime_name: "The World Is Dancing".to_string(),
+        episode: "01v2".to_string(),
+        tags: "[1080p]".to_string(),
+        extension: ".mkv".to_string(),
+        original_path: versioned_path.display().to_string(),
+    };
+    let versioned =
+        LibraryIndexRecord::from_anime_file(target, &versioned_path, &versioned_info).unwrap();
+    assert_eq!(versioned.episode, 1.0);
 }
 
 #[test]

@@ -251,12 +251,10 @@ fn run_organize(args: OrganizeArgs, log: &dyn Fn(&str)) -> Result<(), AppError> 
             Ok(target_path) => {
                 succeeded += 1;
                 if args.writes_library_index() {
-                    if let Some(mut record) =
-                        LibraryIndexRecord::from_target_path(&target, &target_path)?
-                    {
-                        apply_runtime_probe(&mut record, &target, probe_runtime, args.verbose);
-                        library_records.push(record);
-                    }
+                    let mut record =
+                        LibraryIndexRecord::from_anime_file(&target, &target_path, &anime_file)?;
+                    apply_runtime_probe(&mut record, &target, probe_runtime, args.verbose);
+                    library_records.push(record);
                 }
             }
             Err(_) => failed += 1,
@@ -448,26 +446,19 @@ async fn run_with_metadata(args: OrganizeArgs, log: &dyn Fn(&str)) -> Result<(),
                     succeeded += 1;
 
                     if args.writes_library_index() {
-                        if let Some(mut record) =
-                            LibraryIndexRecord::from_target_path(&target, &target_path)?
-                        {
-                            if let Some(ref meta) = metadata {
-                                record.apply_metadata(meta);
-                                apply_bangumi_episode_details(
-                                    &mut record,
-                                    episodes.as_deref(),
-                                    group_min_episode,
-                                );
-                                add_metadata_artwork(
-                                    &mut record,
-                                    &target,
-                                    &anime_root,
-                                    season_number,
-                                );
-                            }
-                            apply_runtime_probe(&mut record, &target, probe_runtime, args.verbose);
-                            library_records.push(record);
+                        let mut record =
+                            LibraryIndexRecord::from_anime_file(&target, &target_path, &file)?;
+                        if let Some(ref meta) = metadata {
+                            record.apply_metadata(meta);
+                            apply_bangumi_episode_details(
+                                &mut record,
+                                episodes.as_deref(),
+                                group_min_episode,
+                            );
+                            add_metadata_artwork(&mut record, &target, &anime_root, season_number);
                         }
+                        apply_runtime_probe(&mut record, &target, probe_runtime, args.verbose);
+                        library_records.push(record);
                     }
 
                     if args.scrape_metadata {
@@ -789,7 +780,12 @@ fn finish_library_index(
             mode,
             LibraryIndexWriteMode::Initialize | LibraryIndexWriteMode::Rebuild
         ) {
-            let records = collect_target_library_records(target, extensions, args.verbose)?;
+            let records = collect_target_library_records(
+                target,
+                extensions,
+                args.filename_parser,
+                args.verbose,
+            )?;
             let extras = collect_target_library_extras(target, extensions, &records)?;
             records.len() + extras.len()
         } else {
@@ -806,7 +802,12 @@ fn finish_library_index(
 
     let stats = match mode {
         LibraryIndexWriteMode::Initialize | LibraryIndexWriteMode::Rebuild => {
-            let mut records = collect_target_library_records(target, extensions, args.verbose)?;
+            let mut records = collect_target_library_records(
+                target,
+                extensions,
+                args.filename_parser,
+                args.verbose,
+            )?;
             let probe_runtime = runtime_probe_enabled(args);
             apply_runtime_probe_to_records(&mut records, target, probe_runtime, args.verbose);
             let extras = collect_target_library_extras(target, extensions, &records)?;
@@ -830,6 +831,7 @@ fn finish_library_index(
 fn collect_target_library_records(
     target: &Path,
     extensions: &HashSet<String>,
+    filename_parser: FilenameParserMode,
     verbose: bool,
 ) -> Result<Vec<LibraryIndexRecord>, AppError> {
     let mut records = Vec::new();
@@ -851,7 +853,18 @@ fn collect_target_library_records(
             continue;
         }
 
-        match LibraryIndexRecord::from_target_path(target, path)? {
+        let record = match LibraryIndexRecord::from_target_path(target, path)? {
+            some @ Some(_) => some,
+            None if filename_parser != FilenameParserMode::Rules
+                && !path.ancestors().any(is_supplemental_video_path) =>
+            {
+                parse_anime_file(path, filename_parser, verbose)?
+                    .map(|info| LibraryIndexRecord::from_anime_file(target, path, &info))
+                    .transpose()?
+            }
+            None => None,
+        };
+        match record {
             Some(record) => records.push(record),
             None if verbose => eprintln!(
                 "跳过：无法加入媒体库索引 {}",
@@ -1032,7 +1045,12 @@ async fn finish_library_index_with_metadata(
             mode,
             LibraryIndexWriteMode::Initialize | LibraryIndexWriteMode::Rebuild
         ) {
-            let records = collect_target_library_records(target, extensions, args.verbose)?;
+            let records = collect_target_library_records(
+                target,
+                extensions,
+                args.filename_parser,
+                args.verbose,
+            )?;
             let extras = collect_target_library_extras(target, extensions, &records)?;
             records.len() + extras.len()
         } else {
@@ -1049,7 +1067,12 @@ async fn finish_library_index_with_metadata(
 
     let stats = match mode {
         LibraryIndexWriteMode::Initialize | LibraryIndexWriteMode::Rebuild => {
-            let mut records = collect_target_library_records(target, extensions, args.verbose)?;
+            let mut records = collect_target_library_records(
+                target,
+                extensions,
+                args.filename_parser,
+                args.verbose,
+            )?;
             enrich_library_index_records(&mut records, target, &mut context).await;
             let extras = collect_target_library_extras(target, extensions, &records)?;
             LibraryIndex::rebuild_with_extras(target, &records, &extras)?

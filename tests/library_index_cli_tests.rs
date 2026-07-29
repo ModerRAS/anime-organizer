@@ -285,6 +285,79 @@ fn existing_database_is_incremental_until_rebuild_is_requested() {
     assert_eq!(media_count(&target.path().join("library.db")), 2);
 }
 
+#[cfg(feature = "anifilebert")]
+#[test]
+fn auto_parser_rebuild_indexes_special_filename_and_removes_stale_path() {
+    let initial_source = tempfile::tempdir().unwrap();
+    let empty_source = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let stale_source = initial_source
+        .path()
+        .join("[ANi] Stale Show - 01 [1080P].mkv");
+    fs::write(&stale_source, b"stale").unwrap();
+
+    let initial = run_aniorg(&[
+        "--source".to_string(),
+        initial_source.path().display().to_string(),
+        "--target".to_string(),
+        target.path().display().to_string(),
+        "--mode".to_string(),
+        "copy".to_string(),
+        "--library-index".to_string(),
+    ]);
+    assert!(initial.status.success());
+    fs::remove_file(
+        target
+            .path()
+            .join("Stale Show")
+            .join("[ANi] Stale Show - 01 [1080P].mkv"),
+    )
+    .unwrap();
+
+    let filename =
+        "[Studio GreenTea&LoliHouse] The World Is Dancing - 01v2 [WebRip 1080p HEVC-10bit AAC ASSx2].mkv";
+    let special = target
+        .path()
+        .join("The World Is Dancing")
+        .join("Season 1")
+        .join(filename);
+    fs::create_dir_all(special.parent().unwrap()).unwrap();
+    fs::write(&special, b"special").unwrap();
+
+    let rebuild = run_aniorg(&[
+        "--source".to_string(),
+        empty_source.path().display().to_string(),
+        "--target".to_string(),
+        target.path().display().to_string(),
+        "--mode".to_string(),
+        "copy".to_string(),
+        "--library-index".to_string(),
+        "--rebuild-library-index".to_string(),
+        "--filename-parser".to_string(),
+        "auto".to_string(),
+    ]);
+    assert!(
+        rebuild.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&rebuild.stdout),
+        String::from_utf8_lossy(&rebuild.stderr)
+    );
+
+    let db_path = target.path().join("library.db");
+    let conn = Connection::open(db_path).unwrap();
+    let paths = conn
+        .prepare("SELECT path FROM media_file ORDER BY path")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        paths,
+        vec![format!("The World Is Dancing/Season 1/{filename}")]
+    );
+}
+
 #[test]
 fn dry_run_library_index_does_not_create_database() {
     let source = tempfile::tempdir().unwrap();

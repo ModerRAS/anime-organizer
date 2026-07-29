@@ -6,7 +6,7 @@
 use crate::artwork_pack::{build_and_publish, build_and_publish_artwork, ArtworkPacking};
 use crate::error::{AppError, Result};
 use crate::organizer::FileOrganizer;
-use crate::parser::{split_series_and_season, FilenameParser};
+use crate::parser::{split_series_and_season, AnimeFileInfo, FilenameParser};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Read};
@@ -526,12 +526,7 @@ impl LibraryIndexRecord {
         let directory_identity = season_directory_identity(&components);
 
         if let Some(info) = FilenameParser::parse(path) {
-            let episode = parse_episode_number(&info.episode)?;
-            let (series_title, season) = directory_identity
-                .unwrap_or_else(|| (info.series_name(), info.season_number().unwrap_or(1) as i64));
-            return Self::new(series_title, season, episode, relative_path, path)
-                .with_external_subtitles(target_root, path)
-                .map(Some);
+            return Self::from_anime_file(target_root, path, &info).map(Some);
         }
 
         let Some((episode, _tags)) = parse_target_filename(file_name) else {
@@ -547,6 +542,24 @@ impl LibraryIndexRecord {
         Self::new(series_title, season, episode, relative_path, path)
             .with_external_subtitles(target_root, path)
             .map(Some)
+    }
+
+    /// Build an MLIP record from the parser result already selected by the caller.
+    pub fn from_anime_file(target_root: &Path, path: &Path, info: &AnimeFileInfo) -> Result<Self> {
+        let relative_path = relative_path(target_root, path)?;
+        let relative = path.strip_prefix(target_root).map_err(|_| {
+            AppError::LibraryIndexError(format!("媒体文件不在目标目录内: {}", path.display()))
+        })?;
+        let components = normal_components(relative);
+        let episode = parse_episode_number(&info.episode)?;
+        let (series_title, season) = season_directory_identity(&components).unwrap_or_else(|| {
+            (
+                info.series_name(),
+                i64::from(info.season_number().unwrap_or(1)),
+            )
+        });
+        Self::new(series_title, season, episode, relative_path, path)
+            .with_external_subtitles(target_root, path)
     }
 
     #[must_use]
@@ -1761,8 +1774,16 @@ fn title_season_number(value: &str) -> Option<i64> {
 }
 
 fn parse_episode_number(value: &str) -> Result<f64> {
-    value
-        .trim()
+    let value = value.trim();
+    let numeric = value
+        .rsplit_once(['v', 'V'])
+        .filter(|(episode, version)| {
+            !episode.is_empty()
+                && !version.is_empty()
+                && version.chars().all(|character| character.is_ascii_digit())
+        })
+        .map_or(value, |(episode, _version)| episode);
+    numeric
         .parse::<f64>()
         .map_err(|e| AppError::LibraryIndexError(format!("无法解析集数 {value}: {e}")))
 }
