@@ -8,7 +8,10 @@ param(
     [Parameter(Mandatory = $true, Position = 1)]
     [string]$ContentPath,
     [Parameter(Mandatory = $true, Position = 2)]
-    [string]$TorrentHash
+    [string]$TorrentHash,
+    [Parameter(Position = 3)]
+    [ValidateSet('copy', 'move')]
+    [string]$Mode = 'copy'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,13 +47,13 @@ $idempotencyKey = "qbittorrent:$($TorrentHash.ToLowerInvariant())"
 $payload = @{
     idempotency_key = $idempotencyKey
     origin = 'qbittorrent'
-    confirmed = $false
+    confirmed = ($Mode -eq 'move')
     job = @{
         type = 'organize'
         args = @{
             source = $ContentPath
             target = $targetDir
-            mode = 'copy'
+            mode = $Mode
             mlip = $true
             verbose = $true
         }

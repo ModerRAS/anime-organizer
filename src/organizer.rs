@@ -280,6 +280,9 @@ impl FileOrganizer {
         }
         if target_path.exists() {
             if Self::files_match_quick(source_path, target_path)? {
+                if mode == OperationMode::Move {
+                    fs::remove_file(source_path)?;
+                }
                 return Ok(());
             }
             fs::remove_file(target_path)?;
@@ -415,6 +418,29 @@ mod tests {
         assert!(expected_path.exists());
         assert!(!source_file.exists());
         assert_eq!(fs::read_to_string(&expected_path).unwrap(), "test content");
+    }
+
+    #[test]
+    fn move_removes_source_when_matching_target_exists() {
+        let source_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let source_file = create_test_file(source_dir.path(), "test.mp4", "same content");
+        let target_anime_dir = target_dir.path().join("测试");
+        fs::create_dir(&target_anime_dir).unwrap();
+        let target_file = create_test_file(&target_anime_dir, "test.mp4", "same content");
+        let anime_info = create_test_anime_info(&source_file);
+
+        FileOrganizer::organize(
+            &anime_info,
+            target_dir.path(),
+            OperationMode::Move,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert!(!source_file.exists());
+        assert_eq!(fs::read_to_string(target_file).unwrap(), "same content");
     }
 
     #[test]
