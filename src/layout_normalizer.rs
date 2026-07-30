@@ -198,12 +198,11 @@ pub fn build_layout_plan(
             });
             continue;
         };
-        let prefix = if !force_rehash {
-            cached.and_then(|cached| cached.prefix.clone())
-        } else {
+        let prefix = if force_rehash {
             None
-        }
-        .map_or_else(|| sha256_file_prefix(path, PREFIX_BYTES), Ok)?;
+        } else {
+            cached.and_then(|cached| cached.prefix.clone())
+        };
         let full = if force_rehash {
             None
         } else {
@@ -225,7 +224,7 @@ pub fn build_layout_plan(
                 identity: Some(logical),
                 size: metadata.size,
                 modified_time: metadata.modified_time,
-                sha256_prefix_63m: Some(prefix),
+                sha256_prefix_63m: prefix,
                 sha256_full: full,
                 sidecars: Vec::new(),
                 reason: None,
@@ -414,69 +413,87 @@ fn classify_path(
 }
 
 fn identify_duplicates(root: &Path, items: &mut [InventoryItem], force_rehash: bool) -> Result<()> {
-    let mut candidates: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut logical_candidates: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (index, item) in items.iter().enumerate() {
         let Some(identity) = &item.action.identity else {
             continue;
         };
-        let Some(prefix) = &item.action.sha256_prefix_63m else {
-            continue;
-        };
-        candidates
+        logical_candidates
             .entry(format!(
-                "{}|{}|{:016x}|{}|{}",
+                "{}|{}|{:016x}|{}",
                 logical_key(identity),
                 identity.season,
                 identity.episode.to_bits(),
-                item.action.size,
-                prefix
+                item.action.size
             ))
             .or_default()
             .push(index);
     }
-    for group in candidates.values().filter(|group| group.len() > 1) {
-        for index in group {
-            if force_rehash || items[*index].action.sha256_full.is_none() {
+    for logical_group in logical_candidates.values().filter(|group| group.len() > 1) {
+        for index in logical_group {
+            if force_rehash || items[*index].action.sha256_prefix_63m.is_none() {
                 let path = safe_join(root, &items[*index].action.source)?;
-                items[*index].action.sha256_full = Some(sha256_file(&path)?);
+                items[*index].action.sha256_prefix_63m =
+                    Some(sha256_file_prefix(&path, PREFIX_BYTES)?);
             }
         }
-        let mut by_full: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        for index in group {
-            by_full
-                .entry(items[*index].action.sha256_full.clone().unwrap_or_default())
+        let mut by_prefix: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for index in logical_group {
+            by_prefix
+                .entry(
+                    items[*index]
+                        .action
+                        .sha256_prefix_63m
+                        .clone()
+                        .unwrap_or_default(),
+                )
                 .or_default()
                 .push(*index);
         }
-        for identical in by_full.values().filter(|identical| identical.len() > 1) {
-            let keeper = *identical
-                .iter()
-                .max_by(|left, right| {
-                    items[**left]
-                        .action
-                        .layout
-                        .priority()
-                        .cmp(&items[**right].action.layout.priority())
-                        .then_with(|| {
-                            items[**right]
-                                .action
-                                .source
-                                .cmp(&items[**left].action.source)
-                        })
-                })
-                .unwrap();
-            let keeper_target = items[keeper].target.clone().unwrap();
-            items[keeper].action.kind = if items[keeper].action.source == keeper_target {
-                LayoutActionKind::Keep
-            } else {
-                LayoutActionKind::Move
-            };
-            items[keeper].action.target = Some(keeper_target.clone());
-            for index in identical.iter().copied().filter(|index| *index != keeper) {
-                items[index].action.kind = LayoutActionKind::Deduplicate;
-                items[index].action.keeper = Some(keeper_target.clone());
-                items[index].action.target = None;
-                items[index].target = None;
+        for group in by_prefix.values().filter(|group| group.len() > 1) {
+            for index in group {
+                if force_rehash || items[*index].action.sha256_full.is_none() {
+                    let path = safe_join(root, &items[*index].action.source)?;
+                    items[*index].action.sha256_full = Some(sha256_file(&path)?);
+                }
+            }
+            let mut by_full: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+            for index in group {
+                by_full
+                    .entry(items[*index].action.sha256_full.clone().unwrap_or_default())
+                    .or_default()
+                    .push(*index);
+            }
+            for identical in by_full.values().filter(|identical| identical.len() > 1) {
+                let keeper = *identical
+                    .iter()
+                    .max_by(|left, right| {
+                        items[**left]
+                            .action
+                            .layout
+                            .priority()
+                            .cmp(&items[**right].action.layout.priority())
+                            .then_with(|| {
+                                items[**right]
+                                    .action
+                                    .source
+                                    .cmp(&items[**left].action.source)
+                            })
+                    })
+                    .unwrap();
+                let keeper_target = items[keeper].target.clone().unwrap();
+                items[keeper].action.kind = if items[keeper].action.source == keeper_target {
+                    LayoutActionKind::Keep
+                } else {
+                    LayoutActionKind::Move
+                };
+                items[keeper].action.target = Some(keeper_target.clone());
+                for index in identical.iter().copied().filter(|index| *index != keeper) {
+                    items[index].action.kind = LayoutActionKind::Deduplicate;
+                    items[index].action.keeper = Some(keeper_target.clone());
+                    items[index].action.target = None;
+                    items[index].target = None;
+                }
             }
         }
     }

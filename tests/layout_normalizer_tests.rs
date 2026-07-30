@@ -133,6 +133,13 @@ fn planner_classifies_four_layouts_and_apply_keeps_original_canonical_copy() {
     );
     assert_eq!(old_flat.sidecars.len(), 1);
     assert_eq!(old_flat.sidecars[0].kind, SidecarActionKind::Move);
+    let unique = plan
+        .actions
+        .iter()
+        .find(|action| action.source == "Show S2/02 [1080p].mkv")
+        .unwrap();
+    assert!(unique.sha256_prefix_63m.is_none());
+    assert!(unique.sha256_full.is_none());
 
     assert!(apply_layout_plan(&target, &plan_path, false, &|_| {}).is_err());
     let applied = apply_layout_plan(&target, &plan_path, true, &|_| {}).unwrap();
@@ -175,7 +182,7 @@ fn planner_classifies_four_layouts_and_apply_keeps_original_canonical_copy() {
             |row| row.get::<_, i64>(0)
         )
         .unwrap(),
-        2
+        1
     );
     assert_eq!(
         conn.query_row("SELECT COUNT(*) FROM media_subtitle", [], |row| {
