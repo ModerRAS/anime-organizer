@@ -84,6 +84,22 @@ fn library_index_flag_creates_target_root_database() {
         .query_row("SELECT path FROM media_file", [], |row| row.get(0))
         .unwrap();
     assert_eq!(media_path, "Test Show/[ANi] Test Show - 01 [1080P].mkv");
+    let sha256_full: String = conn
+        .query_row("SELECT sha256_full FROM media_file", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        sha256_full,
+        "0cab1c9617404faf2b24e221e189ca5945813e14d3f766345b09ca13bbe28ffc"
+    );
+    let has_prefix_column: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('media_file') \
+             WHERE name = 'sha256_prefix_63m')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!has_prefix_column);
     let subtitle_path: String = conn
         .query_row("SELECT path FROM media_subtitle", [], |row| row.get(0))
         .unwrap();

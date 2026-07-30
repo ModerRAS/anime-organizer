@@ -92,9 +92,6 @@ CREATE TABLE media_file
     path                TEXT NOT NULL UNIQUE,
     size                INTEGER,
     modified_time       INTEGER,
-    sha256_prefix_63m   TEXT CHECK (
-        sha256_prefix_63m IS NULL OR length(sha256_prefix_63m) = 64
-    ),
     sha256_full         TEXT CHECK (
         sha256_full IS NULL OR length(sha256_full) = 64
     ),
@@ -496,7 +493,6 @@ pub struct LibraryIndexRecord {
     pub relative_path: String,
     pub size: Option<i64>,
     pub modified_time: Option<i64>,
-    pub sha256_prefix_63m: Option<String>,
     pub sha256_full: Option<String>,
     pub subtitle_paths: Vec<String>,
     pub genres: Vec<String>,
@@ -596,7 +592,6 @@ impl LibraryIndexRecord {
             relative_path,
             size,
             modified_time,
-            sha256_prefix_63m: None,
             sha256_full: None,
             subtitle_paths: Vec::new(),
             genres: Vec::new(),
@@ -863,7 +858,7 @@ impl LibraryIndex {
                     .map_err(|e| {
                         AppError::LibraryIndexError(format!("升级 MLIP v4 schema 失败: {e}"))
                     })?;
-                ensure_media_hash_columns(&conn)?;
+                ensure_media_hash_column(&conn)?;
                 let tx = conn.transaction().map_err(|e| {
                     AppError::LibraryIndexError(format!("开始 v4 迁移事务失败: {e}"))
                 })?;
@@ -1061,7 +1056,7 @@ pub(crate) fn update_staged_database(
                 .map_err(|e| AppError::LibraryIndexError(format!("打开本地媒体库索引失败: {e}")))?;
             conn.execute_batch("PRAGMA foreign_keys = ON;")
                 .map_err(|e| AppError::LibraryIndexError(format!("设置 PRAGMA 失败: {e}")))?;
-            ensure_media_hash_columns(&conn)?;
+            ensure_media_hash_column(&conn)?;
             update(&mut conn)?;
             let integrity: String = conn
                 .query_row("PRAGMA integrity_check", [], |row| row.get(0))
@@ -1129,13 +1124,12 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     Ok(false)
 }
 
-fn ensure_media_hash_columns(conn: &Connection) -> Result<()> {
-    if !column_exists(conn, "media_file", "sha256_prefix_63m")? {
-        conn.execute_batch(
-            "ALTER TABLE media_file ADD COLUMN sha256_prefix_63m TEXT \
-             CHECK (sha256_prefix_63m IS NULL OR length(sha256_prefix_63m) = 64)",
-        )
-        .map_err(|e| AppError::LibraryIndexError(format!("添加媒体 quick hash 字段失败: {e}")))?;
+fn ensure_media_hash_column(conn: &Connection) -> Result<()> {
+    if column_exists(conn, "media_file", "sha256_prefix_63m")? {
+        conn.execute_batch("ALTER TABLE media_file DROP COLUMN sha256_prefix_63m")
+            .map_err(|e| {
+                AppError::LibraryIndexError(format!("删除旧媒体 prefix hash 字段失败: {e}"))
+            })?;
     }
     if !column_exists(conn, "media_file", "sha256_full")? {
         conn.execute_batch(
@@ -1153,15 +1147,13 @@ fn inherit_media_hashes(db_path: &Path, records: &mut [LibraryIndexRecord]) -> R
     }
     let conn = Connection::open(db_path)
         .map_err(|e| AppError::LibraryIndexError(format!("打开旧媒体 hash 缓存失败: {e}")))?;
-    if !column_exists(&conn, "media_file", "sha256_prefix_63m")?
-        || !column_exists(&conn, "media_file", "sha256_full")?
-    {
+    if !column_exists(&conn, "media_file", "sha256_full")? {
         return Ok(());
     }
     let mut statement = conn
         .prepare(
-            "SELECT path, size, modified_time, sha256_prefix_63m, sha256_full \
-             FROM media_file WHERE sha256_prefix_63m IS NOT NULL OR sha256_full IS NOT NULL",
+            "SELECT path, size, modified_time, sha256_full \
+             FROM media_file WHERE sha256_full IS NOT NULL",
         )
         .map_err(|e| AppError::LibraryIndexError(format!("读取旧媒体 hash 缓存失败: {e}")))?;
     let rows = statement
@@ -1172,18 +1164,15 @@ fn inherit_media_hashes(db_path: &Path, records: &mut [LibraryIndexRecord]) -> R
                     row.get::<_, Option<i64>>(1)?,
                     row.get::<_, Option<i64>>(2)?,
                 ),
-                (
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                ),
+                row.get::<_, Option<String>>(3)?,
             ))
         })
         .map_err(|e| AppError::LibraryIndexError(format!("查询旧媒体 hash 缓存失败: {e}")))?;
     let mut cache = HashMap::new();
     for row in rows {
-        let (key, hashes) =
+        let (key, full) =
             row.map_err(|e| AppError::LibraryIndexError(format!("解析旧媒体 hash 缓存失败: {e}")))?;
-        cache.insert(key, hashes);
+        cache.insert(key, full);
     }
     for record in records {
         let key = (
@@ -1191,10 +1180,7 @@ fn inherit_media_hashes(db_path: &Path, records: &mut [LibraryIndexRecord]) -> R
             record.size,
             record.modified_time,
         );
-        if let Some((prefix, full)) = cache.get(&key) {
-            if record.sha256_prefix_63m.is_none() {
-                record.sha256_prefix_63m.clone_from(prefix);
-            }
+        if let Some(full) = cache.get(&key) {
             if record.sha256_full.is_none() {
                 record.sha256_full.clone_from(full);
             }
@@ -1297,7 +1283,7 @@ fn write_records(
     include_static_meta: bool,
 ) -> Result<()> {
     ensure_schema_extensions(conn)?;
-    ensure_media_hash_columns(conn)?;
+    ensure_media_hash_column(conn)?;
     let tx = conn
         .transaction()
         .map_err(|e| AppError::LibraryIndexError(format!("开始事务失败: {e}")))?;
@@ -1324,7 +1310,7 @@ fn write_records_v4(
     extras: &[LibraryExtraRecord],
     packing: &ArtworkPacking,
 ) -> Result<()> {
-    ensure_media_hash_columns(conn)?;
+    ensure_media_hash_column(conn)?;
     let tx = conn
         .transaction()
         .map_err(|e| AppError::LibraryIndexError(format!("开始 v4 事务失败: {e}")))?;
@@ -1526,15 +1512,10 @@ fn insert_record(
 
     conn.execute(
         "INSERT INTO media_file \
-         (episode_id, path, size, modified_time, sha256_prefix_63m, sha256_full) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+         (episode_id, path, size, modified_time, sha256_full) \
+         VALUES (?1, ?2, ?3, ?4, ?5) \
          ON CONFLICT(path) DO UPDATE SET \
          episode_id = excluded.episode_id, \
-         sha256_prefix_63m = CASE \
-             WHEN media_file.size IS excluded.size \
-              AND media_file.modified_time IS excluded.modified_time \
-             THEN COALESCE(excluded.sha256_prefix_63m, media_file.sha256_prefix_63m) \
-             ELSE excluded.sha256_prefix_63m END, \
          sha256_full = CASE \
              WHEN media_file.size IS excluded.size \
               AND media_file.modified_time IS excluded.modified_time \
@@ -1547,7 +1528,6 @@ fn insert_record(
             record.relative_path,
             record.size,
             record.modified_time,
-            record.sha256_prefix_63m,
             record.sha256_full,
         ],
     )

@@ -559,7 +559,7 @@ fn incremental_update_adds_optional_tables_to_legacy_v1_database() {
 }
 
 #[test]
-fn media_hash_cache_is_inherited_and_invalidated_by_file_identity() {
+fn media_full_hash_cache_is_inherited_invalidated_and_drops_legacy_prefix() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path();
     let media_path = target.join("Hash Show").join("01.mkv");
@@ -572,6 +572,11 @@ fn media_hash_cache_is_inherited_and_invalidated_by_file_identity() {
     LibraryIndex::rebuild(target, std::slice::from_ref(&record)).unwrap();
     let db_path = target.join("library.db");
     let conn = Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        "ALTER TABLE media_file ADD COLUMN sha256_prefix_63m TEXT \
+         CHECK (sha256_prefix_63m IS NULL OR length(sha256_prefix_63m) = 64)",
+    )
+    .unwrap();
     conn.execute(
         "UPDATE media_file SET sha256_prefix_63m = ?1, sha256_full = ?2",
         ["a".repeat(64), "b".repeat(64)],
@@ -583,40 +588,43 @@ fn media_hash_cache_is_inherited_and_invalidated_by_file_identity() {
     drop(conn);
 
     LibraryIndex::update(target, std::slice::from_ref(&record)).unwrap();
-    let read_hashes = || {
+    let read_hash = || {
         Connection::open(&db_path)
             .unwrap()
-            .query_row(
-                "SELECT sha256_prefix_63m, sha256_full FROM media_file",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                    ))
-                },
-            )
+            .query_row("SELECT sha256_full FROM media_file", [], |row| {
+                row.get::<_, Option<String>>(0)
+            })
             .unwrap()
     };
-    assert_eq!(read_hashes(), (Some("a".repeat(64)), Some("b".repeat(64))));
+    assert_eq!(read_hash(), Some("b".repeat(64)));
+    let conn = Connection::open(&db_path).unwrap();
+    let has_prefix: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('media_file') \
+             WHERE name = 'sha256_prefix_63m')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!has_prefix);
+    drop(conn);
 
     fs::write(&media_path, b"video changed").unwrap();
     let mut changed = LibraryIndexRecord::from_target_path(target, &media_path)
         .unwrap()
         .unwrap();
     LibraryIndex::update(target, std::slice::from_ref(&changed)).unwrap();
-    assert_eq!(read_hashes(), (None, None));
+    assert_eq!(read_hash(), None);
 
-    changed.sha256_prefix_63m = Some("c".repeat(64));
     changed.sha256_full = Some("d".repeat(64));
     LibraryIndex::update(target, std::slice::from_ref(&changed)).unwrap();
-    assert_eq!(read_hashes(), (Some("c".repeat(64)), Some("d".repeat(64))));
+    assert_eq!(read_hash(), Some("d".repeat(64)));
 
     let rebuilt = LibraryIndexRecord::from_target_path(target, &media_path)
         .unwrap()
         .unwrap();
     LibraryIndex::rebuild(target, &[rebuilt]).unwrap();
-    assert_eq!(read_hashes(), (Some("c".repeat(64)), Some("d".repeat(64))));
+    assert_eq!(read_hash(), Some("d".repeat(64)));
 }
 
 #[test]

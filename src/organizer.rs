@@ -34,8 +34,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-const QUICK_MATCH_PREFIX_SIZE: u64 = 63 * 1024 * 1024;
-const QUICK_MATCH_BUFFER_SIZE: usize = 1024 * 1024;
+const FILE_COMPARE_BUFFER_SIZE: usize = 1024 * 1024;
 
 /// 文件操作模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, Serialize, Deserialize)]
@@ -282,7 +281,7 @@ impl FileOrganizer {
             return Ok(());
         }
         if target_path.exists() {
-            if Self::files_match_quick(source_path, target_path)? {
+            if Self::files_match(source_path, target_path)? {
                 if mode == OperationMode::Move {
                     fs::remove_file(source_path)?;
                 }
@@ -305,7 +304,7 @@ impl FileOrganizer {
         Ok(())
     }
 
-    fn files_match_quick(source_path: &Path, target_path: &Path) -> std::io::Result<bool> {
+    fn files_match(source_path: &Path, target_path: &Path) -> std::io::Result<bool> {
         let source_metadata = fs::metadata(source_path)?;
         let target_metadata = fs::metadata(target_path)?;
         let source_len = source_metadata.len();
@@ -313,13 +312,13 @@ impl FileOrganizer {
             return Ok(false);
         }
 
-        let mut remaining = source_len.min(QUICK_MATCH_PREFIX_SIZE);
+        let mut remaining = source_len;
         let mut source = fs::File::open(source_path)?;
         let mut target = fs::File::open(target_path)?;
-        let mut source_buffer = vec![0; QUICK_MATCH_BUFFER_SIZE];
-        let mut target_buffer = vec![0; QUICK_MATCH_BUFFER_SIZE];
+        let mut source_buffer = vec![0; FILE_COMPARE_BUFFER_SIZE];
+        let mut target_buffer = vec![0; FILE_COMPARE_BUFFER_SIZE];
         while remaining > 0 {
-            let chunk = remaining.min(QUICK_MATCH_BUFFER_SIZE as u64) as usize;
+            let chunk = remaining.min(FILE_COMPARE_BUFFER_SIZE as u64) as usize;
             source.read_exact(&mut source_buffer[..chunk])?;
             target.read_exact(&mut target_buffer[..chunk])?;
             if source_buffer[..chunk] != target_buffer[..chunk] {
@@ -461,33 +460,29 @@ mod tests {
     }
 
     #[test]
-    fn quick_file_match_stays_within_clouddrive_cached_prefix() {
+    fn existing_file_match_checks_the_entire_file() {
         let directory = TempDir::new().unwrap();
         let source_path = directory.path().join("source.mkv");
         let target_path = directory.path().join("target.mkv");
-        let file_len = QUICK_MATCH_PREFIX_SIZE + 1;
-        let mut source = fs::File::create(&source_path).unwrap();
+        let file_len = FILE_COMPARE_BUFFER_SIZE as u64 + 1;
+        let source = fs::File::create(&source_path).unwrap();
         let mut target = fs::File::create(&target_path).unwrap();
         source.set_len(file_len).unwrap();
         target.set_len(file_len).unwrap();
 
-        assert!(FileOrganizer::files_match_quick(&source_path, &target_path).unwrap());
+        assert!(FileOrganizer::files_match(&source_path, &target_path).unwrap());
 
-        target
-            .seek(SeekFrom::Start(QUICK_MATCH_PREFIX_SIZE - 1))
-            .unwrap();
-        target.write_all(b"x").unwrap();
-        assert!(!FileOrganizer::files_match_quick(&source_path, &target_path).unwrap());
-
-        source
-            .seek(SeekFrom::Start(QUICK_MATCH_PREFIX_SIZE - 1))
-            .unwrap();
-        source.write_all(b"x").unwrap();
-        target
-            .seek(SeekFrom::Start(QUICK_MATCH_PREFIX_SIZE))
-            .unwrap();
+        target.seek(SeekFrom::Start(file_len - 1)).unwrap();
         target.write_all(b"y").unwrap();
-        assert!(FileOrganizer::files_match_quick(&source_path, &target_path).unwrap());
+        assert!(!FileOrganizer::files_match(&source_path, &target_path).unwrap());
+
+        let mut source = fs::OpenOptions::new()
+            .write(true)
+            .open(&source_path)
+            .unwrap();
+        source.seek(SeekFrom::Start(file_len - 1)).unwrap();
+        source.write_all(b"y").unwrap();
+        assert!(FileOrganizer::files_match(&source_path, &target_path).unwrap());
     }
 
     #[test]

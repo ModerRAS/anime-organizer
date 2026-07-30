@@ -1691,24 +1691,10 @@ fn crc32(bytes: &[u8]) -> u32 {
     !crc
 }
 
-pub(crate) fn sha256_file(path: &Path) -> Result<String> {
+/// Compute the lowercase SHA-256 digest of an entire file.
+pub fn sha256_file(path: &Path) -> Result<String> {
     let mut reader = BufReader::new(File::open(path).map_err(pack_io("读取 SHA-256 文件"))?);
     sha256_reader(&mut reader)
-}
-
-pub(crate) fn sha256_file_prefix(path: &Path, limit: u64) -> Result<String> {
-    let file = File::open(path).map_err(pack_io("读取 SHA-256 文件"))?;
-    let mut reader = BufReader::new(file).take(limit);
-    let mut sha = Sha256::new();
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let count = reader.read(&mut buffer).map_err(pack_io("计算 SHA-256"))?;
-        if count == 0 {
-            break;
-        }
-        sha.update(&buffer[..count]);
-    }
-    Ok(hex(&sha.finalize()))
 }
 
 fn sha256_reader(reader: &mut impl Read) -> Result<String> {

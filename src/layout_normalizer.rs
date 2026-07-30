@@ -1,6 +1,6 @@
 //! Auditable library layout normalization planner and applier.
 
-use crate::artwork_pack::{sha256_file, sha256_file_prefix};
+use crate::artwork_pack::sha256_file;
 use crate::error::{AppError, Result};
 use crate::library_index::{update_staged_database, DATABASE_FILENAME};
 use crate::parser::{split_series_and_season, FilenameParser};
@@ -15,7 +15,6 @@ use time::OffsetDateTime;
 use walkdir::WalkDir;
 
 const PLAN_VERSION: u32 = 1;
-const PREFIX_BYTES: u64 = 63 * 1024 * 1024;
 const VIDEO_EXTENSIONS: &[&str] = &[
     "mkv", "mp4", "avi", "mov", "wmv", "flv", "webm", "m4v", "ts", "rmvb",
 ];
@@ -99,7 +98,6 @@ pub struct LayoutAction {
     pub identity: Option<LogicalIdentity>,
     pub size: u64,
     pub modified_time: Option<i64>,
-    pub sha256_prefix_63m: Option<String>,
     pub sha256_full: Option<String>,
     pub sidecars: Vec<SidecarAction>,
     pub reason: Option<String>,
@@ -139,7 +137,6 @@ struct CachedIdentity {
     logical: LogicalIdentity,
     size: Option<i64>,
     modified_time: Option<i64>,
-    prefix: Option<String>,
     full: Option<String>,
 }
 
@@ -190,18 +187,12 @@ pub fn build_layout_plan(
                     identity: None,
                     size: metadata.size,
                     modified_time: metadata.modified_time,
-                    sha256_prefix_63m: None,
                     sha256_full: None,
                     sidecars: Vec::new(),
                     reason: Some("无法唯一识别作品、季或集数，或路径属于其他嵌套布局".to_string()),
                 },
             });
             continue;
-        };
-        let prefix = if force_rehash {
-            None
-        } else {
-            cached.and_then(|cached| cached.prefix.clone())
         };
         let full = if force_rehash {
             None
@@ -224,7 +215,6 @@ pub fn build_layout_plan(
                 identity: Some(logical),
                 size: metadata.size,
                 modified_time: metadata.modified_time,
-                sha256_prefix_63m: prefix,
                 sha256_full: full,
                 sidecars: Vec::new(),
                 reason: None,
@@ -431,69 +421,47 @@ fn identify_duplicates(root: &Path, items: &mut [InventoryItem], force_rehash: b
     }
     for logical_group in logical_candidates.values().filter(|group| group.len() > 1) {
         for index in logical_group {
-            if force_rehash || items[*index].action.sha256_prefix_63m.is_none() {
+            if force_rehash || items[*index].action.sha256_full.is_none() {
                 let path = safe_join(root, &items[*index].action.source)?;
-                items[*index].action.sha256_prefix_63m =
-                    Some(sha256_file_prefix(&path, PREFIX_BYTES)?);
+                items[*index].action.sha256_full = Some(sha256_file(&path)?);
             }
         }
-        let mut by_prefix: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        let mut by_full: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for index in logical_group {
-            by_prefix
-                .entry(
-                    items[*index]
-                        .action
-                        .sha256_prefix_63m
-                        .clone()
-                        .unwrap_or_default(),
-                )
+            by_full
+                .entry(items[*index].action.sha256_full.clone().unwrap_or_default())
                 .or_default()
                 .push(*index);
         }
-        for group in by_prefix.values().filter(|group| group.len() > 1) {
-            for index in group {
-                if force_rehash || items[*index].action.sha256_full.is_none() {
-                    let path = safe_join(root, &items[*index].action.source)?;
-                    items[*index].action.sha256_full = Some(sha256_file(&path)?);
-                }
-            }
-            let mut by_full: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-            for index in group {
-                by_full
-                    .entry(items[*index].action.sha256_full.clone().unwrap_or_default())
-                    .or_default()
-                    .push(*index);
-            }
-            for identical in by_full.values().filter(|identical| identical.len() > 1) {
-                let keeper = *identical
-                    .iter()
-                    .max_by(|left, right| {
-                        items[**left]
-                            .action
-                            .layout
-                            .priority()
-                            .cmp(&items[**right].action.layout.priority())
-                            .then_with(|| {
-                                items[**right]
-                                    .action
-                                    .source
-                                    .cmp(&items[**left].action.source)
-                            })
-                    })
-                    .unwrap();
-                let keeper_target = items[keeper].target.clone().unwrap();
-                items[keeper].action.kind = if items[keeper].action.source == keeper_target {
-                    LayoutActionKind::Keep
-                } else {
-                    LayoutActionKind::Move
-                };
-                items[keeper].action.target = Some(keeper_target.clone());
-                for index in identical.iter().copied().filter(|index| *index != keeper) {
-                    items[index].action.kind = LayoutActionKind::Deduplicate;
-                    items[index].action.keeper = Some(keeper_target.clone());
-                    items[index].action.target = None;
-                    items[index].target = None;
-                }
+        for identical in by_full.values().filter(|identical| identical.len() > 1) {
+            let keeper = *identical
+                .iter()
+                .max_by(|left, right| {
+                    items[**left]
+                        .action
+                        .layout
+                        .priority()
+                        .cmp(&items[**right].action.layout.priority())
+                        .then_with(|| {
+                            items[**right]
+                                .action
+                                .source
+                                .cmp(&items[**left].action.source)
+                        })
+                })
+                .unwrap();
+            let keeper_target = items[keeper].target.clone().unwrap();
+            items[keeper].action.kind = if items[keeper].action.source == keeper_target {
+                LayoutActionKind::Keep
+            } else {
+                LayoutActionKind::Move
+            };
+            items[keeper].action.target = Some(keeper_target.clone());
+            for index in identical.iter().copied().filter(|index| *index != keeper) {
+                items[index].action.kind = LayoutActionKind::Deduplicate;
+                items[index].action.keeper = Some(keeper_target.clone());
+                items[index].action.target = None;
+                items[index].target = None;
             }
         }
     }
@@ -803,21 +771,15 @@ fn update_database(root: &Path, actions: &[LayoutAction]) -> Result<()> {
             match action.kind {
                 LayoutActionKind::Move => {
                     tx.execute(
-                        "UPDATE media_file SET path = ?1, sha256_prefix_63m = ?2, sha256_full = ?3 \
-                         WHERE path = ?4",
-                        params![
-                            action.target,
-                            action.sha256_prefix_63m,
-                            action.sha256_full,
-                            action.source
-                        ],
+                        "UPDATE media_file SET path = ?1, sha256_full = ?2 WHERE path = ?3",
+                        params![action.target, action.sha256_full, action.source],
                     )
                     .map_err(|error| plan_error(format!("更新媒体路径索引失败: {error}")))?;
                 }
                 LayoutActionKind::Keep => {
                     tx.execute(
-                        "UPDATE media_file SET sha256_prefix_63m = ?1, sha256_full = ?2 WHERE path = ?3",
-                        params![action.sha256_prefix_63m, action.sha256_full, action.source],
+                        "UPDATE media_file SET sha256_full = ?1 WHERE path = ?2",
+                        params![action.sha256_full, action.source],
                     )
                     .map_err(|error| plan_error(format!("更新媒体 hash 索引失败: {error}")))?;
                 }
@@ -887,13 +849,7 @@ fn update_database(root: &Path, actions: &[LayoutAction]) -> Result<()> {
 fn load_cache(db_path: &Path) -> Result<HashMap<String, CachedIdentity>> {
     let conn = Connection::open(db_path)
         .map_err(|error| plan_error(format!("打开 library.db 失败: {error}")))?;
-    let has_prefix = column_exists(&conn, "sha256_prefix_63m")?;
     let has_full = column_exists(&conn, "sha256_full")?;
-    let prefix = if has_prefix {
-        "media_file.sha256_prefix_63m"
-    } else {
-        "NULL"
-    };
     let full = if has_full {
         "media_file.sha256_full"
     } else {
@@ -901,7 +857,7 @@ fn load_cache(db_path: &Path) -> Result<HashMap<String, CachedIdentity>> {
     };
     let sql = format!(
         "SELECT media_file.path, series.title, episode.season, episode.episode, \
-         media_file.size, media_file.modified_time, {prefix}, {full}, \
+         media_file.size, media_file.modified_time, {full}, \
          (SELECT value FROM series_external_id \
           WHERE series_external_id.series_id = series.id AND provider = 1 LIMIT 1) \
          FROM media_file \
@@ -920,12 +876,11 @@ fn load_cache(db_path: &Path) -> Result<HashMap<String, CachedIdentity>> {
                         series: row.get(1)?,
                         season: row.get(2)?,
                         episode: row.get(3)?,
-                        bangumi_id: row.get(8)?,
+                        bangumi_id: row.get(7)?,
                     },
                     size: row.get(4)?,
                     modified_time: row.get(5)?,
-                    prefix: row.get(6)?,
-                    full: row.get(7)?,
+                    full: row.get(6)?,
                 },
             ))
         })

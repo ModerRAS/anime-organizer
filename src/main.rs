@@ -22,7 +22,7 @@ use crate::mlip::{
 #[cfg(feature = "metadata")]
 use anime_organizer::library_index::{Artwork, ArtworkKind, ExternalProvider};
 use anime_organizer::{
-    error::AppError, AnimeFileInfo, FileOrganizer, FilenameParser, LibraryExtraRecord,
+    error::AppError, sha256_file, AnimeFileInfo, FileOrganizer, FilenameParser, LibraryExtraRecord,
     LibraryIndex, LibraryIndexRecord, OperationMode,
 };
 #[cfg(feature = "metadata")]
@@ -214,13 +214,15 @@ fn run_organize(args: OrganizeArgs, log: &dyn Fn(&str)) -> Result<(), AppError> 
             fallback_mode,
             args.verbose,
             &subtitle_candidates,
+            args.writes_library_index() && !args.dry_run,
             log,
         ) {
-            Ok(target_path) => {
+            Ok((target_path, sha256_full)) => {
                 succeeded += 1;
                 if args.writes_library_index() {
                     let mut record =
                         LibraryIndexRecord::from_anime_file(&target, &target_path, &anime_file)?;
+                    record.sha256_full = sha256_full;
                     apply_runtime_probe(&mut record, &target, probe_runtime, args.verbose);
                     library_records.push(record);
                 }
@@ -408,14 +410,16 @@ async fn run_with_metadata(args: OrganizeArgs, log: &dyn Fn(&str)) -> Result<(),
                 fallback_mode,
                 args.verbose,
                 &subtitle_candidates,
+                args.writes_library_index() && !args.dry_run,
                 log,
             ) {
-                Ok(target_path) => {
+                Ok((target_path, sha256_full)) => {
                     succeeded += 1;
 
                     if args.writes_library_index() {
                         let mut record =
                             LibraryIndexRecord::from_anime_file(&target, &target_path, &file)?;
+                        record.sha256_full = sha256_full;
                         if let Some(ref meta) = metadata {
                             record.apply_metadata(meta);
                             apply_bangumi_episode_details(
@@ -624,8 +628,27 @@ fn organize_file_to_dir(
     fallback_mode: Option<OperationMode>,
     verbose: bool,
     subtitle_candidates: &[PathBuf],
+    hash_source: bool,
     log: &dyn Fn(&str),
-) -> Result<PathBuf, AppError> {
+) -> Result<(PathBuf, Option<String>), AppError> {
+    let source_hash = if hash_source {
+        match sha256_file(Path::new(&anime_file.original_path)) {
+            Ok(hash) => Some(hash),
+            Err(error) => {
+                eprintln!(
+                    "计算文件 SHA-256 失败 {}: {error}",
+                    anime_file.original_path
+                );
+                log(&format!(
+                    "Failed to hash {}: {error}",
+                    anime_file.original_path
+                ));
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     let subtitles = FileOrganizer::find_external_subtitles_from(
         Path::new(&anime_file.original_path),
         subtitle_candidates,
@@ -642,7 +665,7 @@ fn organize_file_to_dir(
                 );
             }
             log(&format!("Organized {}", target_path.display()));
-            Ok(target_path)
+            Ok((target_path, source_hash))
         }
         Err(error) => {
             if mode == OperationMode::Link {
@@ -661,6 +684,7 @@ fn organize_file_to_dir(
                         return FileOrganizer::organize_to_dir_with_subtitles(
                             anime_file, target_dir, fallback, dry_run, &subtitles,
                         )
+                        .map(|target_path| (target_path, source_hash))
                         .map_err(|fallback_error| {
                             eprintln!(
                                 "处理文件失败 {}: {fallback_error}",
@@ -776,6 +800,7 @@ fn finish_library_index(
                 args.filename_parser,
                 args.verbose,
             )?;
+            merge_current_media_hashes(&mut records, current_records);
             let probe_runtime = runtime_probe_enabled(args);
             apply_runtime_probe_to_records(&mut records, target, probe_runtime, args.verbose);
             let extras = collect_target_library_extras(target, extensions, &records)?;
@@ -794,6 +819,36 @@ fn finish_library_index(
         LibraryIndex::database_path(target).display()
     );
     Ok(())
+}
+
+fn merge_current_media_hashes(
+    records: &mut [LibraryIndexRecord],
+    current_records: &[LibraryIndexRecord],
+) {
+    let hashes = current_records
+        .iter()
+        .filter_map(|record| {
+            record.sha256_full.as_ref().map(|hash| {
+                (
+                    (
+                        record.relative_path.as_str(),
+                        record.size,
+                        record.modified_time,
+                    ),
+                    hash,
+                )
+            })
+        })
+        .collect::<HashMap<_, _>>();
+    for record in records {
+        if let Some(hash) = hashes.get(&(
+            record.relative_path.as_str(),
+            record.size,
+            record.modified_time,
+        )) {
+            record.sha256_full = Some((*hash).clone());
+        }
+    }
 }
 
 fn collect_target_library_records(
@@ -1041,6 +1096,7 @@ async fn finish_library_index_with_metadata(
                 args.filename_parser,
                 args.verbose,
             )?;
+            merge_current_media_hashes(&mut records, current_records);
             enrich_library_index_records(&mut records, target, &mut context).await;
             let extras = collect_target_library_extras(target, extensions, &records)?;
             LibraryIndex::rebuild_with_extras(target, &records, &extras)?

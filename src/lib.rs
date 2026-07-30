@@ -52,8 +52,8 @@ pub mod scraper;
 pub mod torrent;
 
 pub use artwork_pack::{
-    apply_artwork_compact_plan, build_artwork_compact_plan, ArtworkCompactApplySummary,
-    ArtworkCompactPlan, ArtworkCompactStats,
+    apply_artwork_compact_plan, build_artwork_compact_plan, sha256_file,
+    ArtworkCompactApplySummary, ArtworkCompactPlan, ArtworkCompactStats,
 };
 pub use error::{AppError, Result};
 pub use layout_normalizer::{
