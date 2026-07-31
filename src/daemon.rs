@@ -26,6 +26,7 @@ pub(crate) struct DaemonState {
     pub(crate) started_at: Instant,
     pub(crate) wake: mpsc::Sender<()>,
     pub(crate) worker: Arc<Mutex<WorkerSnapshot>>,
+    pub(crate) cancel_requested: Arc<AtomicBool>,
 }
 
 pub(crate) fn run() -> Result<(), AppError> {
@@ -41,6 +42,7 @@ pub(crate) fn run() -> Result<(), AppError> {
     let (wake_tx, wake_rx) = mpsc::channel();
     let worker = Arc::new(Mutex::new(WorkerSnapshot::default()));
     let shutting_down = Arc::new(AtomicBool::new(false));
+    let cancel_requested = Arc::new(AtomicBool::new(false));
     #[cfg(feature = "clouddrive")]
     let rss_db_path = anime_organizer::rss::db::default_db_path();
     let state = Arc::new(DaemonState {
@@ -52,6 +54,7 @@ pub(crate) fn run() -> Result<(), AppError> {
         started_at: Instant::now(),
         wake: wake_tx.clone(),
         worker: worker.clone(),
+        cancel_requested: cancel_requested.clone(),
     });
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|error| AppError::MetadataFetchError(format!("创建异步运行时失败: {error}")))?;
@@ -60,6 +63,7 @@ pub(crate) fn run() -> Result<(), AppError> {
         wake_rx,
         worker,
         shutting_down.clone(),
+        cancel_requested,
         #[cfg(feature = "clouddrive")]
         rss_schedule::RssRuntime {
             cloud: state.cloud.clone(),

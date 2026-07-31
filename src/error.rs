@@ -79,6 +79,10 @@ pub enum AppError {
     #[error("TMDB API 错误: {0}")]
     TmdbApiError(String),
 
+    /// 操作由 daemon 用户请求取消
+    #[error("操作已取消")]
+    Canceled,
+
     /// Torrent 页面获取失败
     #[error("Torrent 获取失败: {0}")]
     TorrentFetchError(String),

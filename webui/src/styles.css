@@ -160,6 +160,16 @@ dd { color: #35424b; margin: 3px 0 0; overflow-wrap: anywhere; }
 .about-grid { display: grid; gap: 20px; grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 20px; }
 .about-grid strong, .about-grid code { color: #36444d; display: block; overflow-wrap: anywhere; }
 .scraper-forms { display: grid; gap: 28px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.maintenance-grid { display: grid; gap: 28px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 25px; }
+.maintenance-grid > .section-block { margin-bottom: 0; min-width: 0; }
+.maintenance-form { display: grid; gap: 17px; }
+.mode-switch { border: 1px solid #ccd7de; border-radius: 4px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: hidden; }
+.mode-switch button { align-items: center; background: #fff; border: 0; color: #53606a; cursor: pointer; display: inline-flex; gap: 7px; justify-content: center; min-height: 36px; padding: 7px 10px; }
+.mode-switch button + button { border-left: 1px solid #ccd7de; }
+.mode-switch button.active { background: #e8f1f7; color: #135d95; font-weight: 650; }
+.mode-switch button:focus-visible { outline: 2px solid #1769aa; outline-offset: -2px; }
+.button.danger { background: #a24b41; color: #fff; }
+.button.danger:hover { background: #8f3f35; }
 .scraper-forms > .section-block { margin-bottom: 0; }
 .scraper-form { border-top-width: 2px; padding: 20px; }
 .scraper-form .section-heading > svg { color: #1769aa; }
@@ -202,7 +212,7 @@ dd { color: #35424b; margin: 3px 0 0; overflow-wrap: anywhere; }
   .detail-grid { grid-template-columns: 1fr; }
   .job-log-line { gap: 4px; grid-template-columns: 1fr; }
   .job-log-line time { font-size: 11px; }
-  .scraper-forms { grid-template-columns: 1fr; }
+  .scraper-forms, .maintenance-grid { grid-template-columns: 1fr; }
   .form-grid { grid-template-columns: 1fr; }
   .checkbox-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .preset-bar { align-items: stretch; }

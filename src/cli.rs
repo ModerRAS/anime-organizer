@@ -179,10 +179,6 @@ pub(crate) struct NormalizeLayoutArgs {
     /// 执行已经审核的固定 plan；daemon job 需要 confirmed=true
     #[arg(long, value_name = "PATH", conflicts_with = "dry_run")]
     pub(crate) apply_plan: Option<PathBuf>,
-
-    /// 忽略 library.db 中的媒体 hash 缓存
-    #[arg(long)]
-    pub(crate) force_rehash: bool,
 }
 
 #[derive(Args, Debug, Clone, Default, Serialize, Deserialize)]

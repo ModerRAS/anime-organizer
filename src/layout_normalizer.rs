@@ -85,7 +85,8 @@ pub struct SidecarAction {
     pub target: String,
     pub size: u64,
     pub modified_time: Option<i64>,
-    pub sha256_full: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256_full: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -149,9 +150,19 @@ struct InventoryItem {
 pub fn build_layout_plan(
     target_root: &Path,
     output: &Path,
-    force_rehash: bool,
     log: &dyn Fn(&str),
 ) -> Result<LayoutPlan> {
+    build_layout_plan_with_cancel(target_root, output, log, &|| false)
+}
+
+/// Builds a metadata-only layout plan and stops at directory-entry boundaries when canceled.
+pub fn build_layout_plan_with_cancel(
+    target_root: &Path,
+    output: &Path,
+    log: &dyn Fn(&str),
+    cancel: &dyn Fn() -> bool,
+) -> Result<LayoutPlan> {
+    ensure_not_canceled(cancel)?;
     let root = canonical_root(target_root)?;
     let db_path = root.join(DATABASE_FILENAME);
     let database = file_identity(&db_path, true)?;
@@ -163,6 +174,7 @@ pub fn build_layout_plan(
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.file_type().is_file())
     {
+        ensure_not_canceled(cancel)?;
         let path = entry.path();
         if !is_video(path) {
             continue;
@@ -194,11 +206,7 @@ pub fn build_layout_plan(
             });
             continue;
         };
-        let full = if force_rehash {
-            None
-        } else {
-            cached.and_then(|cached| cached.full.clone())
-        };
+        let full = cached.and_then(|cached| cached.full.clone());
         let kind = if relative == target {
             LayoutActionKind::Keep
         } else {
@@ -221,11 +229,15 @@ pub fn build_layout_plan(
             },
         });
     }
-    log(&format!("Scanned {} video files", items.len()));
+    log(&format!(
+        "Scanned {} video paths without reading media contents",
+        items.len()
+    ));
 
-    identify_duplicates(&root, &mut items, force_rehash)?;
+    identify_duplicates(&mut items);
     identify_target_conflicts(&root, &mut items);
-    attach_sidecars(&root, &mut items)?;
+    attach_sidecars(&root, &mut items, cancel)?;
+    ensure_not_canceled(cancel)?;
     resolve_sidecar_conflicts(&mut items);
 
     let mut actions = items
@@ -253,6 +265,7 @@ pub fn build_layout_plan(
     }
     let bytes = serde_json::to_vec_pretty(&plan)
         .map_err(|error| plan_error(format!("序列化 layout plan 失败: {error}")))?;
+    ensure_not_canceled(cancel)?;
     fs::write(output, bytes)
         .map_err(|error| plan_error(format!("写入 layout plan 失败: {error}")))?;
     log(&format!("Layout plan written to {}", output.display()));
@@ -402,7 +415,7 @@ fn classify_path(
     Some((layout, logical, target))
 }
 
-fn identify_duplicates(root: &Path, items: &mut [InventoryItem], force_rehash: bool) -> Result<()> {
+fn identify_duplicates(items: &mut [InventoryItem]) {
     let mut logical_candidates: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (index, item) in items.iter().enumerate() {
         let Some(identity) = &item.action.identity else {
@@ -420,18 +433,11 @@ fn identify_duplicates(root: &Path, items: &mut [InventoryItem], force_rehash: b
             .push(index);
     }
     for logical_group in logical_candidates.values().filter(|group| group.len() > 1) {
-        for index in logical_group {
-            if force_rehash || items[*index].action.sha256_full.is_none() {
-                let path = safe_join(root, &items[*index].action.source)?;
-                items[*index].action.sha256_full = Some(sha256_file(&path)?);
-            }
-        }
         let mut by_full: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for index in logical_group {
-            by_full
-                .entry(items[*index].action.sha256_full.clone().unwrap_or_default())
-                .or_default()
-                .push(*index);
+            if let Some(full) = &items[*index].action.sha256_full {
+                by_full.entry(full.clone()).or_default().push(*index);
+            }
         }
         for identical in by_full.values().filter(|identical| identical.len() > 1) {
             let keeper = *identical
@@ -465,7 +471,6 @@ fn identify_duplicates(root: &Path, items: &mut [InventoryItem], force_rehash: b
             }
         }
     }
-    Ok(())
 }
 
 fn identify_target_conflicts(root: &Path, items: &mut [InventoryItem]) {
@@ -500,8 +505,13 @@ fn identify_target_conflicts(root: &Path, items: &mut [InventoryItem]) {
     }
 }
 
-fn attach_sidecars(root: &Path, items: &mut [InventoryItem]) -> Result<()> {
+fn attach_sidecars(
+    root: &Path,
+    items: &mut [InventoryItem],
+    cancel: &dyn Fn() -> bool,
+) -> Result<()> {
     for item in items {
+        ensure_not_canceled(cancel)?;
         let destination_video = match item.action.kind {
             LayoutActionKind::Move => item.action.target.as_deref(),
             LayoutActionKind::Deduplicate => item.action.keeper.as_deref(),
@@ -527,6 +537,7 @@ fn attach_sidecars(root: &Path, items: &mut [InventoryItem]) -> Result<()> {
         for entry in fs::read_dir(parent)
             .map_err(|error| plan_error(format!("读取 sidecar 目录失败: {error}")))?
         {
+            ensure_not_canceled(cancel)?;
             let path = entry
                 .map_err(|error| plan_error(format!("读取 sidecar 失败: {error}")))?
                 .path();
@@ -556,15 +567,11 @@ fn attach_sidecars(root: &Path, items: &mut [InventoryItem]) -> Result<()> {
             let target = destination_video.parent().unwrap_or(root).join(target_name);
             let source_relative = relative_path(root, &path)?;
             let target_relative = relative_path(root, &target)?;
-            let identity = file_identity(&path, true)?;
+            let identity = file_identity(&path, false)?;
             let kind = if path == target {
                 SidecarActionKind::Keep
             } else if target.exists() {
-                if sha256_file(&target)? == identity.sha256.as_deref().unwrap_or_default() {
-                    SidecarActionKind::Deduplicate
-                } else {
-                    SidecarActionKind::Conflict
-                }
+                SidecarActionKind::Conflict
             } else {
                 SidecarActionKind::Move
             };
@@ -574,7 +581,7 @@ fn attach_sidecars(root: &Path, items: &mut [InventoryItem]) -> Result<()> {
                 target: target_relative,
                 size: identity.size,
                 modified_time: identity.modified_time,
-                sha256_full: identity.sha256.unwrap(),
+                sha256_full: None,
             });
         }
         item.action
@@ -602,9 +609,16 @@ fn resolve_sidecar_conflicts(items: &mut [InventoryItem]) {
     for locations in targets.values().filter(|locations| locations.len() > 1) {
         let hashes = locations
             .iter()
-            .map(|(item, sidecar)| items[*item].action.sidecars[*sidecar].sha256_full.as_str())
+            .filter_map(|(item, sidecar)| {
+                items[*item].action.sidecars[*sidecar]
+                    .sha256_full
+                    .as_deref()
+            })
             .collect::<BTreeSet<_>>();
-        if hashes.len() > 1 {
+        let all_hashed = locations
+            .iter()
+            .all(|(item, sidecar)| items[*item].action.sidecars[*sidecar].sha256_full.is_some());
+        if !all_hashed || hashes.len() != 1 {
             for (item, sidecar) in locations {
                 items[*item].action.sidecars[*sidecar].kind = SidecarActionKind::Conflict;
             }
@@ -652,21 +666,41 @@ fn validate_actions(root: &Path, actions: &[LayoutAction]) -> Result<()> {
         let source = safe_join(root, &sidecar.source)?;
         let target = safe_join(root, &sidecar.target)?;
         if source.exists() {
-            let identity = file_identity(&source, true)?;
+            let identity = file_identity(&source, false)?;
+            let hash_matches = match sidecar.sha256_full.as_deref() {
+                Some(expected) => sha256_file(&source)? == expected,
+                None => true,
+            };
             if identity.size != sidecar.size
                 || identity.modified_time != sidecar.modified_time
-                || identity.sha256.as_deref() != Some(&sidecar.sha256_full)
+                || !hash_matches
             {
                 return Err(plan_error(format!(
                     "plan sidecar 已改变: {}",
                     source.display()
                 )));
             }
-        } else if !target.exists() || sha256_file(&target)? != sidecar.sha256_full {
-            return Err(plan_error(format!(
-                "plan sidecar 不存在: {}",
-                source.display()
-            )));
+        } else {
+            if !target.exists() {
+                return Err(plan_error(format!(
+                    "plan sidecar 不存在: {}",
+                    source.display()
+                )));
+            }
+            let identity = file_identity(&target, false)?;
+            let hash_matches = match sidecar.sha256_full.as_deref() {
+                Some(expected) => sha256_file(&target)? == expected,
+                None => true,
+            };
+            if identity.size != sidecar.size
+                || identity.modified_time != sidecar.modified_time
+                || !hash_matches
+            {
+                return Err(plan_error(format!(
+                    "plan sidecar 已改变: {}",
+                    target.display()
+                )));
+            }
         }
     }
     for action in actions.iter().filter(|action| {
@@ -714,10 +748,14 @@ fn apply_sidecars(
         let target = safe_join(root, &sidecar.target)?;
         match sidecar.kind {
             SidecarActionKind::Move if source.exists() => {
-                let identity = file_identity(&source, true)?;
+                let identity = file_identity(&source, false)?;
+                let hash_matches = match sidecar.sha256_full.as_deref() {
+                    Some(expected) => sha256_file(&source)? == expected,
+                    None => true,
+                };
                 if identity.size != sidecar.size
                     || identity.modified_time != sidecar.modified_time
-                    || identity.sha256.as_deref() != Some(&sidecar.sha256_full)
+                    || !hash_matches
                 {
                     return Err(plan_error(format!("sidecar 已改变: {}", source.display())));
                 }
@@ -734,9 +772,10 @@ fn apply_sidecars(
                 summary.sidecars_moved += 1;
             }
             SidecarActionKind::Deduplicate if source.exists() => {
-                if sha256_file(&source)? != sidecar.sha256_full
-                    || sha256_file(&target)? != sidecar.sha256_full
-                {
+                let expected = sidecar.sha256_full.as_deref().ok_or_else(|| {
+                    plan_error(format!("sidecar 去重缺少 hash: {}", source.display()))
+                })?;
+                if sha256_file(&source)? != expected || sha256_file(&target)? != expected {
                     return Err(plan_error(format!(
                         "sidecar 去重 hash 不匹配: {}",
                         source.display()
@@ -1052,6 +1091,14 @@ fn normalize_key(value: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
+}
+
+fn ensure_not_canceled(cancel: &dyn Fn() -> bool) -> Result<()> {
+    if cancel() {
+        Err(AppError::Canceled)
+    } else {
+        Ok(())
+    }
 }
 
 fn plan_error(message: impl Into<String>) -> AppError {

@@ -105,6 +105,18 @@ pub(crate) fn run_normalize_layout(
     confirmed: bool,
     log: &dyn Fn(&str),
 ) -> Result<serde_json::Value, AppError> {
+    run_normalize_layout_with_cancel(args, confirmed, log, &|| false)
+}
+
+pub(crate) fn run_normalize_layout_with_cancel(
+    args: &NormalizeLayoutArgs,
+    confirmed: bool,
+    log: &dyn Fn(&str),
+    cancel: &dyn Fn() -> bool,
+) -> Result<serde_json::Value, AppError> {
+    if cancel() {
+        return Err(AppError::Canceled);
+    }
     if args.dry_run {
         let output = args.plan.as_ref().ok_or_else(|| {
             AppError::ParseError("normalize-layout --dry-run requires --plan".to_string())
@@ -115,7 +127,7 @@ pub(crate) fn run_normalize_layout(
             ));
         }
         let plan =
-            anime_organizer::build_layout_plan(&args.target, output, args.force_rehash, log)?;
+            anime_organizer::build_layout_plan_with_cancel(&args.target, output, log, cancel)?;
         return serde_json::to_value(&plan.summary).map_err(|error| {
             AppError::LibraryIndexError(format!("序列化 layout plan 汇总失败: {error}"))
         });
@@ -125,6 +137,9 @@ pub(crate) fn run_normalize_layout(
             "normalize-layout requires --dry-run --plan or --apply-plan".to_string(),
         )
     })?;
+    if cancel() {
+        return Err(AppError::Canceled);
+    }
     let summary = anime_organizer::apply_layout_plan(&args.target, input, confirmed, log)?;
     serde_json::to_value(summary).map_err(|error| {
         AppError::LibraryIndexError(format!("序列化 layout apply 汇总失败: {error}"))

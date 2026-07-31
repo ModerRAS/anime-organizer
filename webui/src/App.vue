@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
-import { Activity, BriefcaseBusiness, ClipboardList, Cloud, FileSearch, Menu, Monitor, Radio, Tags, X } from 'lucide-vue-next'
+import { Activity, BriefcaseBusiness, ClipboardList, Cloud, FileSearch, Menu, Monitor, Radio, Tags, Wrench, X } from 'lucide-vue-next'
 import { locale, setLocale, t } from './i18n'
 import { useStatus } from './stores/status'
 
@@ -12,6 +12,7 @@ const clouddriveAvailable = computed(() => state.capabilities?.features.includes
 const scraperAvailable = computed(() => state.capabilities?.job_types.includes('scrape') === true && state.capabilities?.job_types.includes('match_aliases') === true)
 const torrentAvailable = computed(() => state.capabilities?.job_types.includes('torrent_scrape') === true)
 const aliasesAvailable = computed(() => state.capabilities?.job_types.includes('build_bangumi_db') === true)
+const maintenanceAvailable = computed(() => state.capabilities?.job_types.includes('normalize_layout') === true && state.capabilities?.job_types.includes('compact_artwork_packs') === true)
 
 function closeNav() {
   navOpen.value = false
@@ -48,6 +49,7 @@ function closeNav() {
           <RouterLink to="/" @click="closeNav"><Monitor :size="17" aria-hidden="true" />{{ t('Dashboard') }}</RouterLink>
           <RouterLink to="/jobs" @click="closeNav"><BriefcaseBusiness :size="17" aria-hidden="true" />{{ t('Jobs') }}</RouterLink>
           <RouterLink to="/organize" @click="closeNav"><ClipboardList :size="17" aria-hidden="true" />{{ t('Organize') }}</RouterLink>
+          <RouterLink v-if="maintenanceAvailable" to="/maintenance" @click="closeNav"><Wrench :size="17" aria-hidden="true" />{{ t('Maintenance') }}</RouterLink>
           <RouterLink v-if="scraperAvailable" to="/scraper" @click="closeNav"><FileSearch :size="17" aria-hidden="true" />{{ t('Scraper') }}</RouterLink>
           <RouterLink v-if="torrentAvailable" to="/torrent" @click="closeNav"><FileSearch :size="17" aria-hidden="true" />{{ t('Torrents') }}</RouterLink>
           <RouterLink v-if="aliasesAvailable" to="/aliases" @click="closeNav"><Tags :size="17" aria-hidden="true" />{{ t('Aliases') }}</RouterLink>

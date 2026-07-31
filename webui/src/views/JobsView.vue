@@ -66,7 +66,7 @@ function updateQuery() {
   void router.replace({ query: { ...(selectedState.value ? { state: selectedState.value } : {}), ...(kind.value ? { kind: kind.value } : {}) } })
 }
 async function cancel(job: Job) {
-  if (!window.confirm(t('Cancel this queued job?'))) return
+  if (!window.confirm(t(job.state === 'running' ? 'Request cancellation for this running job?' : 'Cancel this queued job?'))) return
   actionError.value = ''
   try { await api.cancel(job.id); await load() } catch (reason) { actionError.value = errorMessage(reason) }
 }
@@ -95,7 +95,7 @@ onBeforeUnmount(() => { if (timer !== undefined) window.clearInterval(timer) })
 </script>
 
 <template>
-  <div class="page-header"><div><p class="eyebrow">{{ t('Queue') }}</p><h1>{{ t('Jobs') }}</h1><p class="page-subtitle">{{ t('Inspect accepted work and control jobs that have not started.') }}</p></div><span class="record-count">{{ t('{count} records', { count: jobs.length }) }}</span></div>
+  <div class="page-header"><div><p class="eyebrow">{{ t('Queue') }}</p><h1>{{ t('Jobs') }}</h1><p class="page-subtitle">{{ t('Inspect accepted work and control queued or safely cancelable running jobs.') }}</p></div><span class="record-count">{{ t('{count} records', { count: jobs.length }) }}</span></div>
   <p v-if="error" class="alert error" role="alert">{{ error }}</p>
   <p v-if="actionError" class="alert error" role="alert">{{ actionError }}</p>
   <section class="section-block jobs-panel" aria-labelledby="jobs-table-heading">
@@ -105,7 +105,7 @@ onBeforeUnmount(() => { if (timer !== undefined) window.clearInterval(timer) })
       <button class="button secondary filter-reset" type="button" :disabled="!selectedState && !kind" @click="selectedState = ''; kind = ''; updateQuery()"><ChevronDown :size="15" aria-hidden="true" />{{ t('Clear filters') }}</button>
     </div>
     <div class="table-wrap"><table><caption id="jobs-table-heading" class="sr-only">{{ t('Daemon jobs') }}</caption><thead><tr><th>{{ t('Job') }}</th><th>{{ t('Type') }}</th><th>{{ t('Origin') }}</th><th>{{ t('State') }}</th><th>{{ t('Created') }}</th><th>{{ t('Finished') }}</th><th>{{ t('Duration') }}</th><th><span class="sr-only">{{ t('Actions') }}</span></th></tr></thead><tbody>
-      <tr v-for="job in jobs" :key="job.id"><td><RouterLink :to="`/jobs/${job.id}`">#{{ job.id }}</RouterLink><small v-if="job.progress_message" class="table-subtext">{{ job.progress_message }}</small></td><td>{{ valueLabel(job.kind) }}</td><td>{{ valueLabel(job.origin) }}</td><td><span class="state" :class="statusClass(job.state)">{{ valueLabel(job.state) }}</span></td><td>{{ formatDateTime(job.created_at) }}</td><td>{{ formatDateTime(job.finished_at) }}</td><td>{{ formatDuration(job.started_at, job.finished_at) }}</td><td class="actions"><button v-if="job.state === 'queued'" class="icon-button danger-action" type="button" :title="t('Cancel queued job')" :aria-label="t('Cancel queued job')" @click="cancel(job)"><CircleSlash :size="16" aria-hidden="true" /></button><button v-if="job.state === 'failed' || job.state === 'canceled'" class="icon-button" type="button" :title="t('Retry job')" :aria-label="t('Retry job')" @click="retry(job)"><RotateCcw :size="16" aria-hidden="true" /></button></td></tr>
+      <tr v-for="job in jobs" :key="job.id"><td><RouterLink :to="`/jobs/${job.id}`">#{{ job.id }}</RouterLink><small v-if="job.progress_message" class="table-subtext">{{ job.progress_message }}</small></td><td>{{ valueLabel(job.kind) }}</td><td>{{ valueLabel(job.origin) }}</td><td><span class="state" :class="statusClass(job.state)">{{ valueLabel(job.state) }}</span></td><td>{{ formatDateTime(job.created_at) }}</td><td>{{ formatDateTime(job.finished_at) }}</td><td>{{ formatDuration(job.started_at, job.finished_at) }}</td><td class="actions"><button v-if="job.cancelable" class="icon-button danger-action" type="button" :title="t(job.cancel_requested ? 'Cancel requested' : job.state === 'running' ? 'Request cancellation' : 'Cancel queued job')" :aria-label="t(job.cancel_requested ? 'Cancel requested' : job.state === 'running' ? 'Request cancellation' : 'Cancel queued job')" :disabled="job.cancel_requested" @click="cancel(job)"><CircleSlash :size="16" aria-hidden="true" /></button><button v-if="job.state === 'failed' || job.state === 'canceled'" class="icon-button" type="button" :title="t('Retry job')" :aria-label="t('Retry job')" @click="retry(job)"><RotateCcw :size="16" aria-hidden="true" /></button></td></tr>
       <tr v-if="!loading && !jobs.length"><td colspan="8" class="empty-cell">{{ t('No jobs match these filters.') }}</td></tr>
     </tbody></table></div>
     <p v-if="loading" class="loading-line">{{ t('Refreshing queue...') }}</p>

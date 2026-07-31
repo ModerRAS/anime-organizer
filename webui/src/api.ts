@@ -1,7 +1,7 @@
 export type JobState = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
 export type JobArtifact = { id: number; name: string; content_type: string; size: number; download_url: string }
 export type JobLog = { id: number; level: string; message: string; created_at: string }
-export type Job = { id: number; idempotency_key: string | null; origin: string; kind: string; resource_key: string | null; request: unknown; state: JobState; priority: number; attempts: number; progress_current: number | null; progress_total: number | null; progress_message: string | null; result: unknown; error: string | null; created_at: string; started_at: string | null; finished_at: string | null }
+export type Job = { id: number; idempotency_key: string | null; origin: string; kind: string; resource_key: string | null; request: unknown; state: JobState; priority: number; attempts: number; progress_current: number | null; progress_total: number | null; progress_message: string | null; cancel_requested: boolean; cancelable: boolean; result: unknown; error: string | null; created_at: string; started_at: string | null; finished_at: string | null }
 export type Status = { uptime_seconds: number; worker_state: string; current_job_id: number | null; queue_counts: Record<JobState, number>; database_path: string }
 export type Capabilities = { features: string[]; job_types: string[]; resources: string[] }
 export type OrganizeArgs = {
@@ -26,6 +26,18 @@ export type OrganizeArgs = {
   rebuild_library_index: boolean
   probe_runtime: boolean
   filename_parser: 'rules' | 'anifilebert' | 'auto'
+}
+export type NormalizeLayoutArgs = {
+  target: string
+  dry_run: boolean
+  plan: string | null
+  apply_plan: string | null
+}
+export type CompactArtworkPacksArgs = {
+  target: string
+  dry_run: boolean
+  plan: string | null
+  apply_plan: string | null
 }
 
 export class ApiError extends Error {
@@ -58,6 +70,8 @@ export const api = {
   cancel: (id: number) => request<Job>(`/jobs/${id}`, { method: 'DELETE' }),
   retry: (id: number) => request<Job>(`/jobs/${id}/retry`, { method: 'POST' }),
   enqueueOrganize: (args: OrganizeArgs, confirmed: boolean) => request<{ job: Job; duplicate: boolean }>('/jobs', { method: 'POST', body: JSON.stringify({ origin: 'manual', confirmed, job: { type: 'organize', args } }) }),
+  enqueueNormalizeLayout: (args: NormalizeLayoutArgs, confirmed: boolean) => request<{ job: Job; duplicate: boolean }>('/jobs', { method: 'POST', body: JSON.stringify({ origin: 'manual', confirmed, job: { type: 'normalize_layout', args } }) }),
+  enqueueCompactArtworkPacks: (args: CompactArtworkPacksArgs, confirmed: boolean) => request<{ job: Job; duplicate: boolean }>('/jobs', { method: 'POST', body: JSON.stringify({ origin: 'manual', confirmed, job: { type: 'compact_artwork_packs', args } }) }),
   enqueueScrape: (args: { days: number; format: 'json' | 'pretty'; tmdb_api_key?: string | null }) => request<{ job: Job; duplicate: boolean }>('/jobs', { method: 'POST', body: JSON.stringify({ origin: 'manual', job: { type: 'scrape', args } }) }),
   enqueueMatchAliases: (args: { input: string; format: 'json' | 'github' }) => request<{ job: Job; duplicate: boolean }>('/jobs', { method: 'POST', body: JSON.stringify({ origin: 'manual', job: { type: 'match_aliases', args } }) }),
   enqueueBuildBangumiDb: (args: { output: string; include_relations: boolean; verbose: boolean }, confirmed: boolean) => request<{ job: Job; duplicate: boolean }>('/jobs', { method: 'POST', body: JSON.stringify({ origin: 'manual', confirmed, job: { type: 'build_bangumi_db', args } }) }),

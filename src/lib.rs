@@ -57,7 +57,8 @@ pub use artwork_pack::{
 };
 pub use error::{AppError, Result};
 pub use layout_normalizer::{
-    apply_layout_plan, build_layout_plan, LayoutApplySummary, LayoutPlan, LayoutPlanSummary,
+    apply_layout_plan, build_layout_plan, build_layout_plan_with_cancel, LayoutApplySummary,
+    LayoutPlan, LayoutPlanSummary,
 };
 pub use library_index::{ExtraKind, LibraryExtraRecord, LibraryIndex, LibraryIndexRecord};
 pub use metadata::AnimeMetadata;

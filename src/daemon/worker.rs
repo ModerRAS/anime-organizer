@@ -44,6 +44,7 @@ pub(crate) fn start(
     wake_rx: mpsc::Receiver<()>,
     snapshot: Arc<Mutex<WorkerSnapshot>>,
     shutting_down: Arc<AtomicBool>,
+    cancel_requested: Arc<AtomicBool>,
     #[cfg(feature = "clouddrive")] rss_runtime: RssRuntime,
 ) -> WorkerHandle {
     let thread = thread::Builder::new()
@@ -54,6 +55,7 @@ pub(crate) fn start(
                 wake_rx,
                 snapshot,
                 shutting_down,
+                cancel_requested,
                 #[cfg(feature = "clouddrive")]
                 rss_runtime,
             )
@@ -69,6 +71,7 @@ fn worker_loop(
     wake_rx: mpsc::Receiver<()>,
     snapshot: Arc<Mutex<WorkerSnapshot>>,
     shutting_down: Arc<AtomicBool>,
+    cancel_requested: Arc<AtomicBool>,
     #[cfg(feature = "clouddrive")] rss_runtime: RssRuntime,
 ) {
     set_snapshot(&snapshot, "idle", None);
@@ -78,20 +81,40 @@ fn worker_loop(
             return;
         }
 
+        cancel_requested.store(false, Ordering::Release);
         match queue.claim_next() {
             Ok(Some(job)) => {
                 set_snapshot(&snapshot, "validating", Some(job.id));
                 let _ = queue.set_progress(job.id, "validating");
                 let _ = queue.append_log(job.id, "info", "Worker started the job");
+                let cancellation_requested = || cancel_requested.load(Ordering::Acquire);
                 let outcome = catch_unwind(AssertUnwindSafe(|| {
                     execute(
                         &queue,
                         &job,
+                        &cancellation_requested,
                         #[cfg(feature = "clouddrive")]
                         &rss_runtime,
                     )
                 }));
+                let canceled = cancellation_requested();
                 match outcome {
+                    Ok(Ok(_)) if canceled => {
+                        let _ = queue.append_log(
+                            job.id,
+                            "warning",
+                            "Job canceled at a safe checkpoint",
+                        );
+                        let _ = queue.mark_canceled(job.id);
+                    }
+                    Ok(Err(_)) if canceled => {
+                        let _ = queue.append_log(
+                            job.id,
+                            "warning",
+                            "Job canceled at a safe checkpoint",
+                        );
+                        let _ = queue.mark_canceled(job.id);
+                    }
                     Ok(Ok(result)) => {
                         let json = serde_json::to_string(&result)
                             .unwrap_or_else(|_| "{\"summary\":\"succeeded\"}".to_string());
@@ -129,13 +152,17 @@ fn worker_loop(
 fn execute(
     queue: &QueueRepository,
     job: &super::model::StoredJob,
+    cancel: &dyn Fn() -> bool,
     #[cfg(feature = "clouddrive")] rss_runtime: &RssRuntime,
 ) -> Result<JobResult, String> {
+    if cancel() {
+        return Err("job cancellation requested".to_string());
+    }
     let spec: JobSpec = serde_json::from_str(&job.request_json)
         .map_err(|error| format!("invalid stored job request: {error}"))?;
     let _ = queue.set_progress(job.id, "running");
     #[allow(unreachable_patterns)]
-    match &spec {
+    let result = match &spec {
         JobSpec::Organize(args) => {
             if args.rebuild_library_index {
                 let target = args.target.as_ref().map_or_else(
@@ -155,9 +182,13 @@ fn execute(
                     &format!("Starting MLIP rebuild for {target} {artwork}"),
                 );
             }
-            let result = crate::run_organize_entry_with_log(args.clone(), &|message| {
-                let _ = queue.append_log(job.id, "info", message);
-            });
+            let result = crate::run_organize_entry_with_cancel(
+                args.clone(),
+                &|message| {
+                    let _ = queue.append_log(job.id, "info", message);
+                },
+                cancel,
+            );
             if result.is_ok() && args.rebuild_library_index {
                 let _ = queue.append_log(
                     job.id,
@@ -174,9 +205,14 @@ fn execute(
                 .map_err(|error| error.to_string())
         }
         JobSpec::NormalizeLayout(args) => {
-            let data = crate::commands::run_normalize_layout(args, true, &|message| {
-                let _ = queue.append_log(job.id, "info", message);
-            })
+            let data = crate::commands::run_normalize_layout_with_cancel(
+                args,
+                true,
+                &|message| {
+                    let _ = queue.append_log(job.id, "info", message);
+                },
+                cancel,
+            )
             .map_err(|error| error.to_string())?;
             Ok(JobResult {
                 summary: if args.dry_run {
@@ -241,6 +277,11 @@ fn execute(
             "job type '{}' has no registered executor",
             job.kind
         )),
+    };
+    if cancel() {
+        Err("job cancellation requested".to_string())
+    } else {
+        result
     }
 }
 

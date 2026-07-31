@@ -128,12 +128,22 @@ pub(crate) fn run_organize_entry_with_log(
     args: OrganizeArgs,
     log: &dyn Fn(&str),
 ) -> Result<(), AppError> {
+    run_organize_entry_with_cancel(args, log, &|| false)
+}
+
+#[cfg(feature = "metadata")]
+pub(crate) fn run_organize_entry_with_cancel(
+    args: OrganizeArgs,
+    log: &dyn Fn(&str),
+    cancel: &dyn Fn() -> bool,
+) -> Result<(), AppError> {
+    ensure_not_canceled(cancel)?;
     if args.scrape_metadata || args.mlip {
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| AppError::MetadataFetchError(format!("创建异步运行时失败: {e}")))?;
-        runtime.block_on(run_with_metadata(args, log))
+        runtime.block_on(run_with_metadata(args, log, cancel))
     } else {
-        run_organize(args, log)
+        run_organize(args, log, cancel)
     }
 }
 
@@ -147,17 +157,40 @@ pub(crate) fn run_organize_entry_with_log(
     args: OrganizeArgs,
     log: &dyn Fn(&str),
 ) -> Result<(), AppError> {
+    run_organize_entry_with_cancel(args, log, &|| false)
+}
+
+#[cfg(not(feature = "metadata"))]
+pub(crate) fn run_organize_entry_with_cancel(
+    args: OrganizeArgs,
+    log: &dyn Fn(&str),
+    cancel: &dyn Fn() -> bool,
+) -> Result<(), AppError> {
+    ensure_not_canceled(cancel)?;
     if args.scrape_metadata || args.mlip {
         return Err(AppError::MetadataFetchError(
             "元数据功能未启用，请使用 --features metadata 编译".to_string(),
         ));
     }
 
-    run_organize(args, log)
+    run_organize(args, log, cancel)
+}
+
+fn ensure_not_canceled(cancel: &dyn Fn() -> bool) -> Result<(), AppError> {
+    if cancel() {
+        Err(AppError::Canceled)
+    } else {
+        Ok(())
+    }
 }
 
 /// 仅文件整理流程（无元数据）
-fn run_organize(args: OrganizeArgs, log: &dyn Fn(&str)) -> Result<(), AppError> {
+fn run_organize(
+    args: OrganizeArgs,
+    log: &dyn Fn(&str),
+    cancel: &dyn Fn() -> bool,
+) -> Result<(), AppError> {
+    ensure_not_canceled(cancel)?;
     validate_library_index_args(&args)?;
     validate_filename_parser_args(&args)?;
     let (source, target) = resolve_source_and_target(&args)?;
@@ -172,6 +205,7 @@ fn run_organize(args: OrganizeArgs, log: &dyn Fn(&str)) -> Result<(), AppError> 
     let mut processed = 0;
     let mut succeeded = 0;
     let mut failed = 0;
+    let mut canceled = false;
     let mut library_records = Vec::new();
 
     for entry in WalkDir::new(&source)
@@ -180,6 +214,13 @@ fn run_organize(args: OrganizeArgs, log: &dyn Fn(&str)) -> Result<(), AppError> 
         .filter_map(|item| item.ok())
         .filter(|item| item.file_type().is_file())
     {
+        if cancel() {
+            if processed == 0 {
+                return Err(AppError::Canceled);
+            }
+            canceled = true;
+            break;
+        }
         let path = entry.path();
         if !has_valid_extension(path, &extensions) {
             continue;
@@ -235,13 +276,22 @@ fn run_organize(args: OrganizeArgs, log: &dyn Fn(&str)) -> Result<(), AppError> 
     log(&format!(
         "Processed {processed} files: {succeeded} succeeded, {failed} failed"
     ));
+    canceled |= cancel();
     finish_library_index(&args, &target, &extensions, &library_records)?;
+    if canceled {
+        return Err(AppError::Canceled);
+    }
     Ok(())
 }
 
 /// 带元数据刮削的流程
 #[cfg(feature = "metadata")]
-async fn run_with_metadata(args: OrganizeArgs, log: &dyn Fn(&str)) -> Result<(), AppError> {
+async fn run_with_metadata(
+    args: OrganizeArgs,
+    log: &dyn Fn(&str),
+    cancel: &dyn Fn() -> bool,
+) -> Result<(), AppError> {
+    ensure_not_canceled(cancel)?;
     validate_library_index_args(&args)?;
     validate_filename_parser_args(&args)?;
     let (source, target) = resolve_source_and_target(&args)?;
@@ -326,9 +376,18 @@ async fn run_with_metadata(args: OrganizeArgs, log: &dyn Fn(&str)) -> Result<(),
         "Metadata prefetch completed for {} groups",
         metadata_cache.len()
     ));
+    ensure_not_canceled(cancel)?;
+    let mut canceled = false;
     let mut library_records = Vec::new();
 
-    for (anime_name, files) in anime_groups {
+    'groups: for (anime_name, files) in anime_groups {
+        if cancel() {
+            if processed == 0 {
+                return Err(AppError::Canceled);
+            }
+            canceled = true;
+            break;
+        }
         let Some(first_file) = files.first() else {
             continue;
         };
@@ -399,6 +458,13 @@ async fn run_with_metadata(args: OrganizeArgs, log: &dyn Fn(&str)) -> Result<(),
         }
 
         for file in files {
+            if cancel() {
+                if processed == 0 {
+                    return Err(AppError::Canceled);
+                }
+                canceled = true;
+                break 'groups;
+            }
             let season_dir = target.join(file.series_name()).join(file.season_dir_name());
             processed += 1;
 
@@ -471,6 +537,7 @@ async fn run_with_metadata(args: OrganizeArgs, log: &dyn Fn(&str)) -> Result<(),
         println!("元数据匹配：{matched}/{} 部动画", metadata_cache.len());
     }
 
+    canceled |= cancel();
     finish_library_index_with_metadata(
         &args,
         &target,
@@ -493,6 +560,9 @@ async fn run_with_metadata(args: OrganizeArgs, log: &dyn Fn(&str)) -> Result<(),
     )
     .await?;
 
+    if canceled {
+        return Err(AppError::Canceled);
+    }
     Ok(())
 }
 
@@ -1654,6 +1724,52 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM media_subtitle", [], |row| row.get(0))
             .unwrap();
         assert_eq!(subtitle_count, 1);
+    }
+
+    #[test]
+    fn organize_cancellation_indexes_completed_files() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        for episode in [1, 2] {
+            std::fs::write(
+                source
+                    .path()
+                    .join(format!("[ANi] Test Anime - {episode:02}.mkv")),
+                b"video",
+            )
+            .unwrap();
+        }
+        let checks = std::cell::Cell::new(0);
+        let cancel = || {
+            let current = checks.get();
+            checks.set(current + 1);
+            current >= 2
+        };
+
+        let result = run_organize(
+            OrganizeArgs {
+                source: Some(source.path().to_path_buf()),
+                target: Some(target.path().to_path_buf()),
+                mode: OperationMode::Copy,
+                library_index: true,
+                ..OrganizeArgs::default()
+            },
+            &|_| {},
+            &cancel,
+        );
+        assert!(matches!(result, Err(AppError::Canceled)));
+
+        let media_count = std::fs::read_dir(target.path().join("Test Anime"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "mkv"))
+            .count();
+        assert_eq!(media_count, 1);
+        let conn = rusqlite::Connection::open(LibraryIndex::database_path(target.path())).unwrap();
+        let indexed_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM media_file", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(indexed_count, 1);
     }
 
     #[test]

@@ -45,6 +45,24 @@ describe('API errors and job filters', () => {
     expect(matchBody.job).toEqual({ type: 'match_aliases', args: { input: 'scraped.json', format: 'github' } })
   })
 
+  it('submits typed maintenance plans and confirmed applies', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ job: { id: 11 }, duplicate: false }), { status: 202 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await api.enqueueNormalizeLayout({ target: 'S:\\Anime', dry_run: true, plan: 'layout.json', apply_plan: null }, false)
+    await api.enqueueCompactArtworkPacks({ target: 'S:\\Anime', dry_run: false, plan: null, apply_plan: 'artwork.json' }, true)
+    const planBody = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+    const applyBody = JSON.parse(fetchMock.mock.calls[1][1].body as string)
+    expect(planBody).toEqual({ origin: 'manual', confirmed: false, job: { type: 'normalize_layout', args: { target: 'S:\\Anime', dry_run: true, plan: 'layout.json', apply_plan: null } } })
+    expect(applyBody).toEqual({ origin: 'manual', confirmed: true, job: { type: 'compact_artwork_packs', args: { target: 'S:\\Anime', dry_run: false, plan: null, apply_plan: 'artwork.json' } } })
+  })
+
+  it('requests cancellation for a running job through DELETE', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: 12, state: 'running', cancel_requested: true }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await api.cancel(12)
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/jobs/12', expect.objectContaining({ method: 'DELETE' }))
+  })
+
   it('submits a CloudDrive offline job without credentials', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ job: { id: 10 }, duplicate: false }), { status: 202 }))
     vi.stubGlobal('fetch', fetchMock)

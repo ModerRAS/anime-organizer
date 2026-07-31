@@ -134,7 +134,7 @@ aniorg normalize-layout --target="/path/to/anime" --dry-run --plan="layout-plan.
 aniorg compact-artwork-packs --target="/path/to/anime" --dry-run --plan="artwork-compact-plan.json"
 ```
 
-`normalize-layout --apply-plan` 和 `compact-artwork-packs --apply-plan` 只能作为 daemon typed job 执行，并要求请求顶层 `confirmed=true`。直接 CLI apply 会拒绝执行。请先审核 JSON plan 中的 conflict、unresolved、删除数量和预计释放空间；生成 plan 本身不会修改媒体文件、artwork pack 或 `library.db`。
+`normalize-layout --apply-plan` 和 `compact-artwork-packs --apply-plan` 只能作为 daemon typed job 执行，并要求请求顶层 `confirmed=true`。直接 CLI apply 会拒绝执行。请先审核 JSON plan 中的 conflict、unresolved、删除数量和预计释放空间；生成 layout plan 只枚举路径、文件名、大小/时间和 `library.db` 缓存，不读取媒体或 sidecar 内容，也不计算新 hash。
 
 #### 预览模式
 

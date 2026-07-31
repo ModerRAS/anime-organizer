@@ -4,6 +4,7 @@ import JobsView from './views/JobsView.vue'
 import JobDetailView from './views/JobDetailView.vue'
 import AboutView from './views/AboutView.vue'
 import OrganizeView from './views/OrganizeView.vue'
+import MaintenanceView from './views/MaintenanceView.vue'
 import ScraperView from './views/ScraperView.vue'
 import TorrentView from './views/TorrentView.vue'
 import AliasesView from './views/AliasesView.vue'
@@ -22,6 +23,7 @@ export const router = createRouter({
     { path: '/jobs', component: JobsView },
     { path: '/jobs/:id', component: JobDetailView },
     { path: '/organize', component: OrganizeView },
+    { path: '/maintenance', component: MaintenanceView, meta: { capability: { field: 'job_types', values: ['normalize_layout', 'compact_artwork_packs'] } } },
     { path: '/scraper', component: ScraperView, meta: { capability: { field: 'job_types', values: ['scrape', 'match_aliases'] } } },
     { path: '/torrent', component: TorrentView, meta: { capability: { field: 'job_types', values: ['torrent_scrape'] } } },
     { path: '/aliases', component: AliasesView, meta: { capability: { field: 'job_types', values: ['build_bangumi_db'] } } },

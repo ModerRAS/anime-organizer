@@ -331,11 +331,22 @@ pub(crate) struct StoredJob {
     pub(crate) progress_current: Option<i64>,
     pub(crate) progress_total: Option<i64>,
     pub(crate) progress_message: Option<String>,
+    pub(crate) cancel_requested: bool,
     pub(crate) result_json: Option<String>,
     pub(crate) error: Option<String>,
     pub(crate) created_at: String,
     pub(crate) started_at: Option<String>,
     pub(crate) finished_at: Option<String>,
+}
+
+impl StoredJob {
+    pub(crate) fn supports_running_cancel(&self) -> bool {
+        match serde_json::from_str::<JobSpec>(&self.request_json) {
+            Ok(JobSpec::Organize(_)) => true,
+            Ok(JobSpec::NormalizeLayout(args)) => args.dry_run,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -352,6 +363,8 @@ pub(crate) struct JobView {
     pub(crate) progress_current: Option<i64>,
     pub(crate) progress_total: Option<i64>,
     pub(crate) progress_message: Option<String>,
+    pub(crate) cancel_requested: bool,
+    pub(crate) cancelable: bool,
     pub(crate) result: Option<Value>,
     pub(crate) error: Option<String>,
     pub(crate) created_at: String,
@@ -361,6 +374,8 @@ pub(crate) struct JobView {
 
 impl From<StoredJob> for JobView {
     fn from(job: StoredJob) -> Self {
+        let cancelable = job.state == JobState::Queued
+            || (job.state == JobState::Running && job.supports_running_cancel());
         let mut request = serde_json::from_str(&job.request_json).unwrap_or(Value::Null);
         if job.kind == "cloud_add_offline" {
             if let Some(url) = request.pointer_mut("/args/url") {
@@ -389,6 +404,8 @@ impl From<StoredJob> for JobView {
             progress_current: job.progress_current,
             progress_total: job.progress_total,
             progress_message: job.progress_message,
+            cancel_requested: job.cancel_requested,
+            cancelable,
             result,
             error: job.error,
             created_at: format_job_timestamp(job.created_at),
@@ -526,6 +543,7 @@ mod tests {
             progress_current: None,
             progress_total: None,
             progress_message: None,
+            cancel_requested: false,
             result_json: None,
             error: None,
             created_at: "0".to_string(),
@@ -536,6 +554,7 @@ mod tests {
         assert!(!response.contains("secret"));
         assert!(response.contains("[redacted]"));
         assert!(response.contains("1970-01-01T00:00:00Z"));
+        assert!(response.contains("\"cancelable\":true"));
     }
 
     #[cfg(feature = "clouddrive")]
@@ -559,6 +578,7 @@ mod tests {
             progress_current: None,
             progress_total: None,
             progress_message: None,
+            cancel_requested: false,
             result_json: None,
             error: None,
             created_at: "0".to_string(),
@@ -709,7 +729,6 @@ mod tests {
             dry_run: false,
             plan: None,
             apply_plan: Some(PathBuf::from("plan.json")),
-            force_rehash: false,
         });
         assert!(apply.validate(false, JobOrigin::Manual, None).is_err());
         assert!(apply.validate(true, JobOrigin::Manual, None).is_ok());
@@ -722,7 +741,6 @@ mod tests {
             dry_run: true,
             plan: Some(PathBuf::from("plan.json")),
             apply_plan: None,
-            force_rehash: false,
         });
         assert!(dry_run.validate(false, JobOrigin::Manual, None).is_ok());
 
@@ -750,7 +768,6 @@ mod tests {
             dry_run: true,
             plan: Some(PathBuf::from("plan.json")),
             apply_plan: None,
-            force_rehash: false,
         }));
         assert_round_trip(JobSpec::CompactArtworkPacks(
             crate::cli::CompactArtworkPacksArgs {

@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     progress_current INTEGER,
     progress_total INTEGER,
     progress_message TEXT,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
     result_json TEXT,
     error TEXT,
     created_at TEXT NOT NULL,
@@ -35,7 +36,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS jobs_one_active_resource
 ON jobs(resource_key)
 WHERE resource_key IS NOT NULL AND state IN ('queued', 'running');
 
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 
 CREATE TABLE IF NOT EXISTS job_artifacts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,6 +107,22 @@ impl QueueRepository {
         };
         repository.with_connection(|conn| {
             conn.execute_batch(SCHEMA)
+                .map_err(|error| QueueError::Database(error.to_string()))?;
+            let has_cancel_requested = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('jobs') WHERE name = 'cancel_requested')",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| QueueError::Database(error.to_string()))?
+                != 0;
+            if !has_cancel_requested {
+                conn.execute_batch(
+                    "ALTER TABLE jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0;",
+                )
+                .map_err(|error| QueueError::Database(error.to_string()))?;
+            }
+            conn.execute_batch("PRAGMA user_version = 2;")
                 .map_err(|error| QueueError::Database(error.to_string()))
         })?;
         Ok(repository)
@@ -390,7 +407,7 @@ impl QueueRepository {
             };
             let changed = transaction
                 .execute(
-                    "UPDATE jobs SET state = 'running', attempts = attempts + 1, started_at = ?1, progress_message = 'validating' WHERE id = ?2 AND state = 'queued'",
+                    "UPDATE jobs SET state = 'running', attempts = attempts + 1, started_at = ?1, progress_message = 'validating', cancel_requested = 0 WHERE id = ?2 AND state = 'queued'",
                     params![now_string(), id],
                 )
                 .map_err(|error| QueueError::Database(error.to_string()))?;
@@ -431,6 +448,10 @@ impl QueueRepository {
         self.finish(id, "failed", None, Some(error))
     }
 
+    pub(crate) fn mark_canceled(&self, id: i64) -> QueueResult<()> {
+        self.finish(id, "canceled", None, None)
+    }
+
     fn finish(
         &self,
         id: i64,
@@ -454,13 +475,26 @@ impl QueueRepository {
     }
 
     pub(crate) fn cancel(&self, id: i64) -> QueueResult<StoredJob> {
+        let job = self.get(id)?;
+        if job.state == JobState::Canceled && job.cancel_requested {
+            return Ok(job);
+        }
+        if job.state == JobState::Running && !job.supports_running_cancel() {
+            return Err(QueueError::InvalidState);
+        }
         self.with_connection(|conn| {
-            let changed = conn
-                .execute(
-                    "UPDATE jobs SET state = 'canceled', finished_at = ?1, progress_message = 'canceled' WHERE id = ?2 AND state = 'queued'",
+            let changed = match job.state {
+                JobState::Queued => conn.execute(
+                    "UPDATE jobs SET state = 'canceled', finished_at = ?1, progress_message = 'canceled', cancel_requested = 1 WHERE id = ?2 AND state = 'queued'",
                     params![now_string(), id],
-                )
-                .map_err(|error| QueueError::Database(error.to_string()))?;
+                ),
+                JobState::Running => conn.execute(
+                    "UPDATE jobs SET cancel_requested = 1, progress_message = 'canceling' WHERE id = ?1 AND state = 'running'",
+                    params![id],
+                ),
+                _ => return Err(QueueError::InvalidState),
+            }
+            .map_err(|error| QueueError::Database(error.to_string()))?;
             if changed != 1 {
                 return Err(self.invalid_transition(conn, id));
             }
@@ -472,7 +506,7 @@ impl QueueRepository {
         self.with_connection(|conn| {
             let changed = conn
                 .execute(
-                    "UPDATE jobs SET state = 'queued', attempts = attempts, progress_current = NULL, progress_total = NULL, result_json = NULL, error = NULL, started_at = NULL, finished_at = NULL, progress_message = 'queued for retry' WHERE id = ?1 AND state IN ('failed', 'canceled')",
+                    "UPDATE jobs SET state = 'queued', attempts = attempts, progress_current = NULL, progress_total = NULL, result_json = NULL, error = NULL, started_at = NULL, finished_at = NULL, progress_message = 'queued for retry', cancel_requested = 0 WHERE id = ?1 AND state IN ('failed', 'canceled')",
                     params![id],
                 )
                 .map_err(|error| QueueError::Database(error.to_string()))?;
@@ -531,11 +565,19 @@ impl QueueRepository {
 
     pub(crate) fn recover_running(&self) -> QueueResult<usize> {
         self.with_connection(|conn| {
-            conn.execute(
-                "UPDATE jobs SET state = 'queued', progress_message = 'daemon interrupted; queued for retry', started_at = NULL WHERE state = 'running'",
-                [],
-            )
-            .map_err(|error| QueueError::Database(error.to_string()))
+            let canceled = conn
+                .execute(
+                    "UPDATE jobs SET state = 'canceled', progress_message = 'canceled', finished_at = ?1 WHERE state = 'running' AND cancel_requested = 1",
+                    params![now_string()],
+                )
+                .map_err(|error| QueueError::Database(error.to_string()))?;
+            let requeued = conn
+                .execute(
+                    "UPDATE jobs SET state = 'queued', progress_message = 'daemon interrupted; queued for retry', started_at = NULL WHERE state = 'running'",
+                    [],
+                )
+                .map_err(|error| QueueError::Database(error.to_string()))?;
+            Ok(canceled + requeued)
         })
     }
 
@@ -586,11 +628,12 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredJob> {
         progress_current: row.get(9)?,
         progress_total: row.get(10)?,
         progress_message: row.get(11)?,
-        result_json: row.get(12)?,
-        error: row.get(13)?,
-        created_at: row.get(14)?,
-        started_at: row.get(15)?,
-        finished_at: row.get(16)?,
+        cancel_requested: row.get(12)?,
+        result_json: row.get(13)?,
+        error: row.get(14)?,
+        created_at: row.get(15)?,
+        started_at: row.get(16)?,
+        finished_at: row.get(17)?,
     })
 }
 
@@ -602,8 +645,8 @@ fn parse_origin(value: &str) -> JobOrigin {
     }
 }
 
-const JOB_COLUMNS: &str = "id, idempotency_key, origin, kind, resource_key, request_json, state, priority, attempts, progress_current, progress_total, progress_message, result_json, error, created_at, started_at, finished_at";
-const SELECT_JOB: &str = "SELECT id, idempotency_key, origin, kind, resource_key, request_json, state, priority, attempts, progress_current, progress_total, progress_message, result_json, error, created_at, started_at, finished_at FROM jobs WHERE id = ?1";
+const JOB_COLUMNS: &str = "id, idempotency_key, origin, kind, resource_key, request_json, state, priority, attempts, progress_current, progress_total, progress_message, cancel_requested, result_json, error, created_at, started_at, finished_at";
+const SELECT_JOB: &str = "SELECT id, idempotency_key, origin, kind, resource_key, request_json, state, priority, attempts, progress_current, progress_total, progress_message, cancel_requested, result_json, error, created_at, started_at, finished_at FROM jobs WHERE id = ?1";
 
 fn now_string() -> String {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
@@ -739,6 +782,76 @@ mod tests {
     }
 
     #[test]
+    fn legacy_queue_schema_adds_cancel_requested_column() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("daemon.db");
+        let legacy_schema = SCHEMA
+            .replace("    cancel_requested INTEGER NOT NULL DEFAULT 0,\n", "")
+            .replace("PRAGMA user_version = 2;", "PRAGMA user_version = 1;");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(&legacy_schema)
+            .unwrap();
+
+        QueueRepository::new(&path).unwrap();
+        let conn = Connection::open(path).unwrap();
+        let has_column: i64 = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('jobs') WHERE name = 'cancel_requested')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(has_column, 1);
+        assert_eq!(version, 2);
+    }
+
+    #[test]
+    fn cancellation_is_idempotent() {
+        let directory = tempdir().unwrap();
+        let queue = QueueRepository::new(&directory.path().join("daemon.db")).unwrap();
+        let queued = queue
+            .enqueue(&request(None, JobOrigin::Manual))
+            .unwrap()
+            .job;
+        assert_eq!(queue.cancel(queued.id).unwrap().state, JobState::Canceled);
+        assert_eq!(queue.cancel(queued.id).unwrap().state, JobState::Canceled);
+
+        let running = queue
+            .enqueue(&request(None, JobOrigin::Manual))
+            .unwrap()
+            .job;
+        assert_eq!(queue.claim_next().unwrap().unwrap().id, running.id);
+        assert_eq!(queue.cancel(running.id).unwrap().state, JobState::Running);
+        assert_eq!(queue.cancel(running.id).unwrap().state, JobState::Running);
+        queue.mark_canceled(running.id).unwrap();
+    }
+
+    #[test]
+    fn running_unsafe_jobs_cannot_be_canceled() {
+        let directory = tempdir().unwrap();
+        let queue = QueueRepository::new(&directory.path().join("daemon.db")).unwrap();
+        let job = queue
+            .enqueue(&EnqueueRequest {
+                idempotency_key: None,
+                origin: JobOrigin::Manual,
+                confirmed: true,
+                job: JobSpec::CompactArtworkPacks(crate::cli::CompactArtworkPacksArgs::default()),
+            })
+            .unwrap()
+            .job;
+        assert_eq!(queue.claim_next().unwrap().unwrap().id, job.id);
+        assert!(matches!(
+            queue.cancel(job.id),
+            Err(QueueError::InvalidState)
+        ));
+        queue.mark_succeeded(job.id, "{}").unwrap();
+    }
+
+    #[test]
     fn recovery_and_transitions_are_restricted() {
         let directory = tempdir().unwrap();
         let queue = QueueRepository::new(&directory.path().join("daemon.db")).unwrap();
@@ -750,9 +863,23 @@ mod tests {
             queue.claim_next().unwrap().unwrap().state,
             JobState::Running
         );
-        assert!(queue.cancel(job.id).is_err());
+        let canceling = queue.cancel(job.id).unwrap();
+        assert_eq!(canceling.state, JobState::Running);
+        assert!(canceling.cancel_requested);
+        assert_eq!(canceling.progress_message.as_deref(), Some("canceling"));
+        assert_eq!(queue.recover_running().unwrap(), 1);
+        assert_eq!(queue.get(job.id).unwrap().state, JobState::Canceled);
+
+        assert!(queue.retry(job.id).is_ok());
+        assert_eq!(queue.get(job.id).unwrap().state, JobState::Queued);
+        assert!(!queue.get(job.id).unwrap().cancel_requested);
+        assert_eq!(
+            queue.claim_next().unwrap().unwrap().state,
+            JobState::Running
+        );
         assert_eq!(queue.recover_running().unwrap(), 1);
         assert_eq!(queue.get(job.id).unwrap().state, JobState::Queued);
+
         let claimed = queue.claim_next().unwrap().unwrap();
         queue.mark_failed(claimed.id, "bad input").unwrap();
         assert!(queue.retry(claimed.id).is_ok());

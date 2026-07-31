@@ -20,6 +20,7 @@ use axum::routing::put;
 use axum::routing::{delete, get, post};
 use axum::{response::IntoResponse, Router};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 #[cfg(feature = "clouddrive")]
 use std::time::Duration;
@@ -394,7 +395,19 @@ async fn get_job_logs(
 async fn cancel_job(State(state): State<Arc<DaemonState>>, Path(id): Path<i64>) -> Response {
     match state.queue.cancel(id) {
         Ok(job) => {
-            let _ = state.queue.append_log(id, "warning", "Job canceled");
+            if job.cancel_requested && job.state == JobState::Running {
+                state.cancel_requested.store(true, Ordering::Release);
+                let _ = state
+                    .queue
+                    .append_log(id, "warning", "Cancellation requested");
+                if let Ok(mut worker) = state.worker.lock() {
+                    if worker.current_job_id == Some(id) {
+                        worker.state = "canceling".to_string();
+                    }
+                }
+            } else {
+                let _ = state.queue.append_log(id, "warning", "Job canceled");
+            }
             Json(JobView::from(job)).into_response()
         }
         Err(error) => queue_error(error),
@@ -1300,6 +1313,7 @@ mod tests {
                     started_at: std::time::Instant::now(),
                     wake,
                     worker: Arc::new(Mutex::new(WorkerSnapshot::default())),
+                    cancel_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 }),
                 login_calls,
             )
