@@ -121,6 +121,115 @@ fn planner_does_not_hash_duplicate_candidates_without_cached_hashes() {
 }
 
 #[test]
+fn planner_recognizes_observed_episode_revision_and_title_formats() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("library");
+    let files = [
+        (
+            "Shibou Yuugi de Meshi wo Kuu",
+            "[LoliHouse] Shibou Yuugi de Meshi wo Kuu. 44 Cloudy Beach [WebRip 1080p HEVC-10bit AAC SRTx2].mkv",
+            44.0,
+        ),
+        (
+            "The World Is Dancing",
+            "[Studio GreenTea&LoliHouse] The World Is Dancing - 01v2 [WebRip 1080p HEVC-10bit AAC ASSx2].mkv",
+            1.0,
+        ),
+    ];
+    let mut records = Vec::new();
+    for (root, file, episode) in files {
+        let path = target.join(root).join("Season 1").join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"video").unwrap();
+        records.push(LibraryIndexRecord::new(
+            root.to_string(),
+            1,
+            episode,
+            format!("{root}/Season 1/{file}"),
+            &path,
+        ));
+    }
+    LibraryIndex::rebuild(&target, &records).unwrap();
+
+    let plan = build_layout_plan(&target, &directory.path().join("plan.json"), &|_| {}).unwrap();
+    assert_eq!(plan.summary.unresolved, 0);
+    assert_eq!(plan.summary.keep, 2);
+    for (root, file, episode) in files {
+        let source = format!("{root}/Season 1/{file}");
+        let action = plan
+            .actions
+            .iter()
+            .find(|action| action.source == source)
+            .unwrap_or_else(|| panic!("missing plan action for {source}"));
+        assert_eq!(action.kind, LayoutActionKind::Keep);
+        assert_eq!(action.identity.as_ref().unwrap().episode, episode);
+    }
+}
+
+#[test]
+fn planner_normalizes_observed_season_markers_in_roots() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("library");
+    let cases = [
+        (
+            "[VCB-Studio] Maou Gakuin no Futekigousha S2 [Ma10p_1080p]",
+            None,
+            "[VCB-Studio] Maou Gakuin no Futekigousha [Ma10p_1080p]",
+            2,
+        ),
+        ("一拳超人(第三季)", None, "一拳超人", 3),
+        (
+            "卡片戰鬥!! 先導者 Divinez 第五季「幻真星戰篇」",
+            None,
+            "卡片戰鬥!! 先導者 Divinez「幻真星戰篇」",
+            5,
+        ),
+        (
+            "歡迎來到實力至上主義的教室 第四季 2年級篇 第一學期",
+            Some("Season 1"),
+            "歡迎來到實力至上主義的教室 2年級篇 第一學期",
+            4,
+        ),
+        (
+            "青之壬生浪 第二季 芹澤暗殺篇",
+            None,
+            "青之壬生浪 芹澤暗殺篇",
+            2,
+        ),
+    ];
+    let mut records = Vec::new();
+    for (root, directory, _, _) in &cases {
+        let path = directory
+            .as_ref()
+            .map_or_else(
+                || target.join(root),
+                |directory| target.join(root).join(directory),
+            )
+            .join("01 [1080p].mkv");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"video").unwrap();
+        records.push(record(&target, &path));
+    }
+    LibraryIndex::rebuild(&target, &records).unwrap();
+
+    let plan = build_layout_plan(&target, &directory.path().join("plan.json"), &|_| {}).unwrap();
+    for (root, directory, expected_root, expected_season) in cases {
+        let source = directory.map_or_else(
+            || format!("{root}/01 [1080p].mkv"),
+            |directory| format!("{root}/{directory}/01 [1080p].mkv"),
+        );
+        let action = plan
+            .actions
+            .iter()
+            .find(|action| action.source == source)
+            .unwrap_or_else(|| panic!("missing plan action for {source}"));
+        assert_eq!(action.kind, LayoutActionKind::Move);
+        let expected_target = format!("{expected_root}/Season {expected_season}/01 [1080p].mkv");
+        assert_eq!(action.target.as_deref(), Some(expected_target.as_str()));
+    }
+}
+
+#[test]
 fn planner_classifies_four_layouts_and_apply_keeps_original_canonical_copy() {
     let directory = tempfile::tempdir().unwrap();
     let target = directory.path().join("library");

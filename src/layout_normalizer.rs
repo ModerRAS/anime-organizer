@@ -4,11 +4,13 @@ use crate::artwork_pack::sha256_file;
 use crate::error::{AppError, Result};
 use crate::library_index::{update_staged_database, DATABASE_FILENAME};
 use crate::parser::{split_series_and_season, FilenameParser};
+use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::UNIX_EPOCH;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -21,6 +23,23 @@ const VIDEO_EXTENSIONS: &[&str] = &[
 const SIDECAR_EXTENSIONS: &[&str] = &[
     "srt", "ass", "ssa", "sub", "vtt", "nfo", "jpg", "jpeg", "png", "webp",
 ];
+
+static LAYOUT_ROOT_SEASON_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![
+        Regex::new(
+            r"^(?P<title>.+?)\s*[（(]\s*第?\s*(?P<num>\d{1,2}|[一二三四五六七八九十]+)\s*季\s*[）)](?P<tail>.*)$",
+        )
+        .expect("layout 根目录季号正则无效"),
+        Regex::new(
+            r"^(?P<title>.+?)\s*第\s*(?P<num>\d{1,2}|[一二三四五六七八九十]+)\s*季(?P<tail>.*)$",
+        )
+        .expect("layout 根目录季号正则无效"),
+        Regex::new(r"(?i)^(?P<title>.+?)\s+s(?P<num>\d{1,2})(?P<tail>(?:\s+\[[^\]]+\])+)$")
+            .expect("layout 根目录季号正则无效"),
+        Regex::new(r"(?i)^(?P<title>.+?)\s+season\s*(?P<num>\d{1,2})(?P<tail>(?:\s+\[[^\]]+\])+)$")
+            .expect("layout 根目录季号正则无效"),
+    ]
+});
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileIdentity {
@@ -381,28 +400,31 @@ fn classify_path(
         path.ancestors().nth(components.len())?,
         path,
     )
-    .ok()??;
-    let logical = cached.map_or_else(
-        || LogicalIdentity {
-            bangumi_id: None,
-            series: record.series_title.clone(),
-            season: season_directory.unwrap_or(record.season),
-            episode: record.episode,
-        },
-        |cached| cached.logical.clone(),
-    );
+    .ok()
+    .flatten();
+    let (series_root, root_season) = split_layout_root_and_season(root_name);
+    let mut logical = match cached {
+        Some(cached) => cached.logical.clone(),
+        None => {
+            let record = record.as_ref()?;
+            LogicalIdentity {
+                bangumi_id: None,
+                series: record.series_title.clone(),
+                season: season_directory.unwrap_or(record.season),
+                episode: record.episode,
+            }
+        }
+    };
+    if let Some(season) = root_season.or(season_directory) {
+        logical.season = season;
+    }
     if logical.season <= 0 || !logical.episode.is_finite() {
         return None;
     }
-    let series_root = if season_directory.is_some() {
-        root_name.to_string()
+    let series_root = if series_root.trim().is_empty() {
+        logical.series.clone()
     } else {
-        let split = split_series_and_season(root_name).0;
-        if split.trim().is_empty() {
-            record.series_title.clone()
-        } else {
-            split
-        }
+        series_root
     };
     let layout = match (season_directory.is_some(), original) {
         (false, false) => LayoutKind::FlatGenerated,
@@ -413,6 +435,65 @@ fn classify_path(
     let file_name = relative.rsplit('/').next()?;
     let target = format!("{series_root}/Season {}/{file_name}", logical.season);
     Some((layout, logical, target))
+}
+
+fn split_layout_root_and_season(value: &str) -> (String, Option<i64>) {
+    let trimmed = value.trim();
+    let (series, season) = split_series_and_season(trimmed);
+    if let Some(season) = season {
+        return (series, Some(i64::from(season)));
+    }
+
+    for pattern in LAYOUT_ROOT_SEASON_PATTERNS.iter() {
+        let Some(captures) = pattern.captures(trimmed) else {
+            continue;
+        };
+        let (Some(title), Some(number), Some(tail)) = (
+            captures.name("title"),
+            captures.name("num"),
+            captures.name("tail"),
+        ) else {
+            continue;
+        };
+        let Some(season) = parse_layout_season(number.as_str()) else {
+            continue;
+        };
+        let series = format!("{}{}", title.as_str().trim_end(), tail.as_str())
+            .trim()
+            .to_string();
+        if !series.is_empty() {
+            return (series, Some(season));
+        }
+    }
+
+    (trimmed.to_string(), None)
+}
+
+fn parse_layout_season(value: &str) -> Option<i64> {
+    if let Ok(season) = value.parse::<i64>() {
+        return (season > 0).then_some(season);
+    }
+    let mut total = 0_i64;
+    let mut current = 0_i64;
+    for character in value.chars() {
+        match character {
+            '一' => current += 1,
+            '二' => current += 2,
+            '三' => current += 3,
+            '四' => current += 4,
+            '五' => current += 5,
+            '六' => current += 6,
+            '七' => current += 7,
+            '八' => current += 8,
+            '九' => current += 9,
+            '十' => {
+                total += if current == 0 { 10 } else { current * 10 };
+                current = 0;
+            }
+            _ => return None,
+        }
+    }
+    (total + current > 0).then_some(total + current)
 }
 
 fn identify_duplicates(items: &mut [InventoryItem]) {
