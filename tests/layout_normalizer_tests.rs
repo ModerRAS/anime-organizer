@@ -230,6 +230,31 @@ fn planner_normalizes_observed_season_markers_in_roots() {
 }
 
 #[test]
+fn planner_preserves_ambiguous_roman_title_in_season_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("library");
+    let path = target
+        .join("Ace of Diamond Act II")
+        .join("Season 2")
+        .join("01 [1080p].mkv");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, b"video").unwrap();
+    LibraryIndex::rebuild(&target, &[record(&target, &path)]).unwrap();
+
+    let plan = build_layout_plan(&target, &directory.path().join("plan.json"), &|_| {}).unwrap();
+    let action = plan
+        .actions
+        .iter()
+        .find(|action| action.source == "Ace of Diamond Act II/Season 2/01 [1080p].mkv")
+        .unwrap();
+    assert_eq!(action.kind, LayoutActionKind::Keep);
+    assert_eq!(
+        action.target.as_deref(),
+        Some("Ace of Diamond Act II/Season 2/01 [1080p].mkv")
+    );
+}
+
+#[test]
 fn planner_classifies_four_layouts_and_apply_keeps_original_canonical_copy() {
     let directory = tempfile::tempdir().unwrap();
     let target = directory.path().join("library");

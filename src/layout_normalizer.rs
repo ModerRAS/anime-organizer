@@ -402,7 +402,8 @@ fn classify_path(
     )
     .ok()
     .flatten();
-    let (series_root, root_season) = split_layout_root_and_season(root_name);
+    let (series_root, root_season) =
+        split_layout_root_and_season(root_name, season_directory.is_none());
     let mut logical = match cached {
         Some(cached) => cached.logical.clone(),
         None => {
@@ -437,11 +438,16 @@ fn classify_path(
     Some((layout, logical, target))
 }
 
-fn split_layout_root_and_season(value: &str) -> (String, Option<i64>) {
+fn split_layout_root_and_season(
+    value: &str,
+    include_standard_suffixes: bool,
+) -> (String, Option<i64>) {
     let trimmed = value.trim();
-    let (series, season) = split_series_and_season(trimmed);
-    if let Some(season) = season {
-        return (series, Some(i64::from(season)));
+    if include_standard_suffixes {
+        let (series, season) = split_series_and_season(trimmed);
+        if let Some(season) = season {
+            return (series, Some(i64::from(season)));
+        }
     }
 
     for pattern in LAYOUT_ROOT_SEASON_PATTERNS.iter() {
