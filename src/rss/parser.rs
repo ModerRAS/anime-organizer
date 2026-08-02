@@ -65,9 +65,11 @@ pub fn parse_rss(xml: &str) -> Result<Vec<RssItem>> {
                     current_enclosure_type = None;
                 } else if name == QName(b"enclosure") && in_item {
                     for attr in e.attributes().flatten() {
-                        let key = attr.key.as_ref();
-                        let value = String::from_utf8_lossy(&attr.value).to_string();
-                        match key {
+                        let Ok(value) = attr.decode_and_unescape_value(reader.decoder()) else {
+                            continue;
+                        };
+                        let value = value.into_owned();
+                        match attr.key.as_ref() {
                             b"url" => current_enclosure_url = Some(value),
                             b"type" => current_enclosure_type = Some(value),
                             _ => {}
@@ -161,9 +163,11 @@ pub fn parse_rss(xml: &str) -> Result<Vec<RssItem>> {
                     let mut enclosure_type: Option<String> = None;
 
                     for attr in e.attributes().flatten() {
-                        let key = attr.key.as_ref();
-                        let value = String::from_utf8_lossy(&attr.value).to_string();
-                        match key {
+                        let Ok(value) = attr.decode_and_unescape_value(reader.decoder()) else {
+                            continue;
+                        };
+                        let value = value.into_owned();
+                        match attr.key.as_ref() {
                             b"url" => url = Some(value),
                             b"type" => enclosure_type = Some(value),
                             _ => {}
@@ -351,6 +355,24 @@ mod tests {
         assert_eq!(
             items[1].magnet,
             Some("magnet:?xt=urn:btih:e71f2e5f00b204e9800998ecf8427e5".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_rss_unescapes_enclosure_urls() {
+        let rss = r#"<rss><channel>
+<item><title>Paired</title><enclosure url="magnet:?xt=urn:btih:paired&amp;tr=https%3A%2F%2Ftracker.example" type="application/x-bittorrent"></enclosure></item>
+<item><title>Empty</title><enclosure url="magnet:?xt=urn:btih:empty&amp;tr=https%3A%2F%2Ftracker.example" type="application/x-bittorrent"/></item>
+</channel></rss>"#;
+
+        let items = parse_rss(rss).unwrap();
+        assert_eq!(
+            items[0].magnet.as_deref(),
+            Some("magnet:?xt=urn:btih:paired&tr=https%3A%2F%2Ftracker.example")
+        );
+        assert_eq!(
+            items[1].magnet.as_deref(),
+            Some("magnet:?xt=urn:btih:empty&tr=https%3A%2F%2Ftracker.example")
         );
     }
 
