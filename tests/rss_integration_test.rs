@@ -393,6 +393,37 @@ async fn test_processor_with_mock_rss() {
 }
 
 #[tokio::test]
+async fn test_processor_reports_cloud_submission_failure() {
+    let temp_dir = tempdir().unwrap();
+    let db = RssDatabase::new(&temp_dir.path().join("test.db")).unwrap();
+    let sub_id = db
+        .add_subscription("https://example.com/rss.xml", None, "/missing", 300)
+        .unwrap();
+    let rss_xml = r#"<rss><channel><item><title>Episode 1</title><guid>item-1</guid><enclosure url="magnet:?xt=urn:btih:test" type="application/x-bittorrent"/></item></channel></rss>"#;
+    let mut mock_cd = MockCloudDriveClient::new();
+    mock_cd.should_fail = true;
+    let processor = RssProcessor::new(
+        Arc::new(MockHttpClient::with_response(rss_xml)),
+        Arc::new(mock_cd),
+    );
+
+    let error = processor
+        .process_subscription(
+            &db,
+            sub_id,
+            "https://example.com/rss.xml",
+            &None,
+            "/missing",
+            false,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("1 个 RSS 条目处理失败"));
+    assert!(db.list_processed_items(sub_id).unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn test_processor_deduplicates_across_runs() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test.db");

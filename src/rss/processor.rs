@@ -47,6 +47,8 @@ impl RssProcessor {
         }
 
         let mut submitted = 0;
+        let mut failed = 0;
+        let mut first_error = None;
 
         for item in &items {
             if !matches_filter(&item.title, filter) {
@@ -73,8 +75,16 @@ impl RssProcessor {
                 }
                 Err(e) => {
                     warn!("处理失败 '{}': {e}", item.title);
+                    failed += 1;
+                    first_error.get_or_insert_with(|| format!("'{}': {e}", item.title));
                 }
             }
+        }
+
+        if let Some(error) = first_error {
+            return Err(AppError::MetadataFetchError(format!(
+                "{failed} 个 RSS 条目处理失败；首个错误: {error}"
+            )));
         }
 
         Ok(submitted)

@@ -29,6 +29,7 @@ impl HttpClientTrait for HttpClient {
             .get(url)
             .send()
             .await
+            .and_then(reqwest::Response::error_for_status)
             .map_err(|e| AppError::MetadataFetchError(format!("抓取 RSS 失败: {e}")))?;
         resp.text()
             .await

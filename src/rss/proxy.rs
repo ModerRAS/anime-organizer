@@ -49,7 +49,14 @@ impl ProxyConfig {
 ///
 /// 如果代理 URL 格式无效或客户端构建失败，返回 `AppError::MetadataFetchError`。
 pub fn build_http_client(proxy_config: &Option<ProxyConfig>) -> Result<reqwest::Client, AppError> {
+    // 自定义浏览器 UA：DMHY 等站点由 Cloudflare 等反代，默认/空 UA 容易被判为
+    // 机器人而返回挑战页，导致抓取间歇性失败。gzip/deflate/brotli 已在
+    // Cargo.toml 中开启，会自动协商并解压响应体。
     let mut builder = reqwest::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 anime-organizer",
+        )
         .connect_timeout(std::time::Duration::from_secs(30))
         .timeout(std::time::Duration::from_secs(60));
 
