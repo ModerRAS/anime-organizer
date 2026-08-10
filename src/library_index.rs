@@ -895,10 +895,7 @@ impl LibraryIndex {
                 .map(|packing| packing.write_catalog(&tx))
                 .transpose()?;
             for record in records {
-                let artwork_catalog = packing
-                    .as_ref()
-                    .zip(asset_ids.as_ref())
-                    .map(|(packing, asset_ids)| (packing, asset_ids));
+                let artwork_catalog = packing.as_ref().zip(asset_ids.as_ref());
                 insert_record(&tx, record, artwork_catalog)?;
             }
             tx.execute_batch(
