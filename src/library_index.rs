@@ -1240,6 +1240,14 @@ fn staging_paths(target_root: &Path) -> StagingPaths {
 }
 
 fn install_staged_database(paths: &StagingPaths, db_path: &Path) -> Result<()> {
+    install_staged_database_with_strategy(paths, db_path, cfg!(windows))
+}
+
+fn install_staged_database_with_strategy(
+    paths: &StagingPaths,
+    db_path: &Path,
+    overwrite_by_copy: bool,
+) -> Result<()> {
     std::fs::copy(&paths.local, &paths.upload)
         .map_err(|e| AppError::LibraryIndexError(format!("上传媒体库索引失败: {e}")))?;
     if !files_equal(&paths.local, &paths.upload)
@@ -1260,38 +1268,23 @@ fn install_staged_database(paths: &StagingPaths, db_path: &Path) -> Result<()> {
         })?;
     }
 
-    if let Err(error) = std::fs::rename(&paths.upload, db_path) {
-        if error.kind() == std::io::ErrorKind::Unsupported {
-            if let Err(copy_error) = std::fs::copy(&paths.local, db_path) {
-                let restore_error = had_database
-                    .then(|| std::fs::copy(&paths.backup, db_path).err())
-                    .flatten();
-                let _ = std::fs::remove_file(&paths.upload);
-                let _ = std::fs::remove_file(&paths.backup);
-                return Err(AppError::LibraryIndexError(match restore_error {
-                    Some(restore) => format!(
-                        "CloudDrive 不支持原子替换且覆盖媒体库索引失败: {copy_error}; 恢复旧索引也失败: {restore}"
-                    ),
-                    None => format!(
-                        "CloudDrive 不支持原子替换且覆盖媒体库索引失败: {copy_error}"
-                    ),
-                }));
+    let publish_result = if overwrite_by_copy {
+        std::fs::copy(&paths.local, db_path).map(|_| ())
+    } else {
+        std::fs::rename(&paths.upload, db_path)
+    };
+    if let Err(error) = publish_result {
+        let restore_error = had_database
+            .then(|| std::fs::copy(&paths.backup, db_path).err())
+            .flatten();
+        let _ = std::fs::remove_file(&paths.upload);
+        let _ = std::fs::remove_file(&paths.backup);
+        return Err(AppError::LibraryIndexError(match restore_error {
+            Some(restore) => {
+                format!("替换媒体库索引失败: {error}; 恢复旧索引也失败: {restore}")
             }
-        } else {
-            let restore_error = if had_database && !db_path.exists() {
-                std::fs::copy(&paths.backup, db_path).err()
-            } else {
-                None
-            };
-            let _ = std::fs::remove_file(&paths.upload);
-            let _ = std::fs::remove_file(&paths.backup);
-            return Err(AppError::LibraryIndexError(match restore_error {
-                Some(restore) => {
-                    format!("替换媒体库索引失败: {error}; 恢复旧索引也失败: {restore}")
-                }
-                None => format!("替换媒体库索引失败: {error}"),
-            }));
-        }
+            None => format!("替换媒体库索引失败: {error}"),
+        }));
     }
     let _ = std::fs::remove_file(&paths.upload);
 
@@ -1302,13 +1295,10 @@ fn install_staged_database(paths: &StagingPaths, db_path: &Path) -> Result<()> {
     };
     if let Some(verification_error) = verification_error {
         let restore_error = if had_database {
-            std::fs::copy(&paths.backup, &paths.upload)
-                .and_then(|_| std::fs::rename(&paths.upload, db_path))
-                .err()
+            std::fs::copy(&paths.backup, db_path).err()
         } else {
             std::fs::remove_file(db_path).err()
         };
-        let _ = std::fs::remove_file(&paths.upload);
         let _ = std::fs::remove_file(&paths.backup);
         return Err(AppError::LibraryIndexError(match restore_error {
             Some(restore) => {
@@ -2287,7 +2277,26 @@ mod staged_install_tests {
         std::fs::write(&db_path, b"old database").unwrap();
         std::fs::write(&paths.local, b"new database").unwrap();
 
-        install_staged_database(&paths, &db_path).unwrap();
+        install_staged_database_with_strategy(&paths, &db_path, true).unwrap();
+
+        assert_eq!(std::fs::read(&db_path).unwrap(), b"new database");
+        assert!(!paths.upload.exists());
+        assert!(!paths.backup.exists());
+    }
+
+    #[test]
+    fn replaces_database_by_rename_and_cleans_staging_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join(DATABASE_FILENAME);
+        let paths = StagingPaths {
+            local: directory.path().join("local.tmp"),
+            upload: directory.path().join("upload.tmp"),
+            backup: directory.path().join("backup.bak"),
+        };
+        std::fs::write(&db_path, b"old database").unwrap();
+        std::fs::write(&paths.local, b"new database").unwrap();
+
+        install_staged_database_with_strategy(&paths, &db_path, false).unwrap();
 
         assert_eq!(std::fs::read(&db_path).unwrap(), b"new database");
         assert!(!paths.upload.exists());
