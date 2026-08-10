@@ -348,10 +348,8 @@ async fn run_with_metadata(
     }
 
     let allow_online_title_resolution = args.metadata_source.is_none();
-    let library_bangumi_ids = Arc::new(if args.refresh_library_metadata {
-        HashMap::new()
-    } else {
-        match LibraryIndex::bangumi_ids_by_series_root(&target) {
+    let existing_library_bangumi_ids =
+        Arc::new(match LibraryIndex::bangumi_ids_by_series_root(&target) {
             Ok(ids) => {
                 if args.verbose && !ids.is_empty() {
                     eprintln!("已从 library.db 加载 {} 条 Bangumi 元数据缓存", ids.len());
@@ -364,8 +362,12 @@ async fn run_with_metadata(
                 }
                 HashMap::new()
             }
-        }
-    });
+        });
+    let library_bangumi_ids = if args.refresh_library_metadata {
+        Arc::new(HashMap::new())
+    } else {
+        Arc::clone(&existing_library_bangumi_ids)
+    };
     let tmdb = args.tmdb_api_key.clone().map(TmdbClient::new).map(Arc::new);
     if !args.no_images && tmdb.is_none() && args.verbose {
         eprintln!("未提供 TMDB API Key，将跳过 TMDB 图片下载");
@@ -398,6 +400,8 @@ async fn run_with_metadata(
                 bangumi: bangumi.as_ref(),
                 tmdb: tmdb.as_deref(),
                 library_bangumi_ids: library_bangumi_ids.as_ref(),
+                artwork_bangumi_ids: existing_library_bangumi_ids.as_ref(),
+                refresh_changed_artwork: true,
                 download_images: !args.no_images,
                 scan_artwork: true,
                 force_overwrite: args.force_overwrite,
@@ -622,6 +626,8 @@ async fn run_with_metadata(
             bangumi: bangumi.as_ref(),
             tmdb: tmdb.as_deref(),
             library_bangumi_ids: library_bangumi_ids.as_ref(),
+            artwork_bangumi_ids: library_bangumi_ids.as_ref(),
+            refresh_changed_artwork: false,
             download_images: !args.no_images,
             scan_artwork: true,
             force_overwrite: args.force_overwrite,
@@ -1202,6 +1208,8 @@ struct MetadataIndexContext<'a> {
     bangumi: &'a BangumiClient,
     tmdb: Option<&'a TmdbClient>,
     library_bangumi_ids: &'a HashMap<(String, u32), u32>,
+    artwork_bangumi_ids: &'a HashMap<(String, u32), u32>,
+    refresh_changed_artwork: bool,
     download_images: bool,
     scan_artwork: bool,
     force_overwrite: bool,
@@ -1209,6 +1217,22 @@ struct MetadataIndexContext<'a> {
     allow_online_title_resolution: bool,
     probe_runtime: bool,
     verbose: bool,
+}
+
+#[cfg(feature = "metadata")]
+fn force_artwork_refresh(
+    explicit_force: bool,
+    refresh_changed_artwork: bool,
+    previous_ids: &HashMap<(String, u32), u32>,
+    series_root: &str,
+    season: u32,
+    resolved_bangumi_id: u32,
+) -> bool {
+    explicit_force
+        || (refresh_changed_artwork
+            && previous_ids
+                .get(&(series_root.to_string(), season))
+                .is_some_and(|previous| *previous != resolved_bangumi_id))
 }
 
 #[cfg(feature = "metadata")]
@@ -1290,16 +1314,17 @@ async fn enrich_library_index_records(
         let season = u32::try_from(record.season).unwrap_or(1);
         let season_hint = (season > 1).then_some(season);
         let cache_key = (lookup_title.clone(), season);
+        let series_root = record
+            .relative_path
+            .split('/')
+            .next()
+            .unwrap_or(&lookup_title)
+            .to_string();
         let metadata = if let Some(cached) = context.metadata_cache.get(&cache_key) {
             cached.clone()
         } else {
             let publisher = FilenameParser::parse(target.join(&record.relative_path))
                 .map(|file| file.publisher);
-            let series_root = record
-                .relative_path
-                .split('/')
-                .next()
-                .unwrap_or(&lookup_title);
             let fetched = fetch_anime_metadata(
                 MetadataLookup {
                     anime_name: &lookup_title,
@@ -1308,7 +1333,7 @@ async fn enrich_library_index_records(
                     season_hint,
                     cached_bangumi_id: context
                         .library_bangumi_ids
-                        .get(&(series_root.to_string(), season))
+                        .get(&(series_root.clone(), season))
                         .copied(),
                     allow_online_title_resolution: context.allow_online_title_resolution,
                 },
@@ -1344,7 +1369,14 @@ async fn enrich_library_index_records(
                     season.max(1),
                     context.bangumi,
                     context.tmdb,
-                    context.force_overwrite,
+                    force_artwork_refresh(
+                        context.force_overwrite,
+                        context.refresh_changed_artwork,
+                        context.artwork_bangumi_ids,
+                        &series_root,
+                        season,
+                        meta.bangumi_id,
+                    ),
                     context.verbose,
                 )
                 .await;
@@ -1762,6 +1794,26 @@ mod tests {
         assert!(!animeatlas_cache_is_fresh(&path));
         std::fs::write(&path, b"cache").unwrap();
         assert!(animeatlas_cache_is_fresh(&path));
+    }
+
+    #[test]
+    fn metadata_refresh_forces_artwork_only_when_provider_identity_changes() {
+        let ids = HashMap::from([
+            (("Changed".to_string(), 1), 565411),
+            (("Stable".to_string(), 1), 545008),
+        ]);
+        assert!(force_artwork_refresh(
+            false, true, &ids, "Changed", 1, 545008
+        ));
+        assert!(!force_artwork_refresh(
+            false, true, &ids, "Stable", 1, 545008
+        ));
+        assert!(!force_artwork_refresh(
+            false, true, &ids, "Unknown", 1, 545008
+        ));
+        assert!(force_artwork_refresh(
+            true, false, &ids, "Stable", 1, 545008
+        ));
     }
 
     #[test]
