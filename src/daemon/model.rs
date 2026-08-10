@@ -176,7 +176,7 @@ impl JobSpec {
         #[allow(unreachable_patterns)]
         match self {
             Self::Organize(args) => {
-                if args.source.is_none() {
+                if args.source.is_none() && !args.refresh_library_metadata {
                     return Err("source is required".to_string());
                 }
                 if args.target.is_none() {
@@ -185,13 +185,25 @@ impl JobSpec {
                 if args.rebuild_library_index && !args.writes_library_index() {
                     return Err("rebuild_library_index requires library_index or mlip".to_string());
                 }
+                if args.refresh_library_metadata && !args.mlip {
+                    return Err("refresh_library_metadata requires mlip".to_string());
+                }
+                if args.refresh_library_metadata && args.rebuild_library_index {
+                    return Err(
+                        "refresh_library_metadata conflicts with rebuild_library_index".to_string(),
+                    );
+                }
                 #[cfg(not(feature = "anifilebert"))]
                 if args.filename_parser == crate::cli::FilenameParserMode::Anifilebert {
                     return Err(
                         "filename_parser anifilebert requires the anifilebert feature".to_string(),
                     );
                 }
-                if (args.mode == OperationMode::Move || args.rebuild_library_index) && !confirmed {
+                if (args.mode == OperationMode::Move
+                    || args.rebuild_library_index
+                    || args.refresh_library_metadata)
+                    && !confirmed
+                {
                     return Err("this organize operation requires confirmed=true".to_string());
                 }
                 if origin == JobOrigin::Qbittorrent
@@ -514,6 +526,7 @@ mod tests {
             library_index: false,
             mlip: false,
             rebuild_library_index: false,
+            refresh_library_metadata: false,
             probe_runtime: false,
             filename_parser: FilenameParserMode::Rules,
         }
@@ -701,6 +714,17 @@ mod tests {
         assert!(JobSpec::ApplyMatches(crate::cli::ApplyMatchesArgs::default()).is_registered());
         assert_eq!(scrape.job.kind(), "scrape");
         assert_eq!(match_job.job.kind(), "match_aliases");
+    }
+
+    #[test]
+    fn metadata_refresh_requires_confirmation_but_not_source() {
+        let mut args = organize();
+        args.source = None;
+        args.mlip = true;
+        args.refresh_library_metadata = true;
+        let spec = JobSpec::Organize(args);
+        assert!(spec.validate(false, JobOrigin::Manual, None).is_err());
+        assert!(spec.validate(true, JobOrigin::Manual, None).is_ok());
     }
 
     #[test]

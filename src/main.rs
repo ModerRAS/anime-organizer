@@ -107,6 +107,7 @@ fn reject_daemon_conflicts(cli: &Cli) -> Result<(), AppError> {
         || args.library_index
         || args.mlip
         || args.rebuild_library_index
+        || args.refresh_library_metadata
         || args.probe_runtime
         || args.mode != OperationMode::Link
         || args.filename_parser != FilenameParserMode::Rules
@@ -294,18 +295,33 @@ async fn run_with_metadata(
     ensure_not_canceled(cancel)?;
     validate_library_index_args(&args)?;
     validate_filename_parser_args(&args)?;
-    let (source, target) = resolve_source_and_target(&args)?;
+    let (source, target) = if args.refresh_library_metadata {
+        let target = args.target.clone().ok_or_else(|| {
+            AppError::ParseError("--refresh-library-metadata 必须提供 --target".to_string())
+        })?;
+        if !target.exists() {
+            return Err(AppError::TargetNotFound(target));
+        }
+        (None, target)
+    } else {
+        let (source, target) = resolve_source_and_target(&args)?;
+        (Some(source), target)
+    };
     let fallback_mode = args
         .fallback_on_link_failure
         .map(FallbackMode::to_operation_mode);
     let extensions = build_extensions(&args.include_ext);
-    let subtitle_candidates = FileOrganizer::collect_external_subtitle_candidates(&source);
     let bangumi = Arc::new(BangumiClient::with_source(
         args.bangumi_cache.clone(),
         args.metadata_source.clone(),
     ));
-    let alias_db_path =
-        resolve_alias_db_path(&bangumi, args.metadata_source.as_deref(), args.verbose).await;
+    let alias_db_path = resolve_alias_db_path(
+        &bangumi,
+        args.metadata_source.as_deref(),
+        args.verbose,
+        args.refresh_library_metadata,
+    )
+    .await;
     let alias_lookup = Arc::new(AliasLookup::load_from_sources(
         alias_db_path.as_deref(),
         args.alias_file.as_deref(),
@@ -332,18 +348,22 @@ async fn run_with_metadata(
     }
 
     let allow_online_title_resolution = args.metadata_source.is_none();
-    let library_bangumi_ids = Arc::new(match LibraryIndex::bangumi_ids_by_series_root(&target) {
-        Ok(ids) => {
-            if args.verbose && !ids.is_empty() {
-                eprintln!("已从 library.db 加载 {} 条 Bangumi 元数据缓存", ids.len());
+    let library_bangumi_ids = Arc::new(if args.refresh_library_metadata {
+        HashMap::new()
+    } else {
+        match LibraryIndex::bangumi_ids_by_series_root(&target) {
+            Ok(ids) => {
+                if args.verbose && !ids.is_empty() {
+                    eprintln!("已从 library.db 加载 {} 条 Bangumi 元数据缓存", ids.len());
+                }
+                ids
             }
-            ids
-        }
-        Err(error) => {
-            if args.verbose {
-                eprintln!("读取 library.db 元数据缓存失败，将使用常规匹配: {error}");
+            Err(error) => {
+                if args.verbose {
+                    eprintln!("读取 library.db 元数据缓存失败，将使用常规匹配: {error}");
+                }
+                HashMap::new()
             }
-            HashMap::new()
         }
     });
     let tmdb = args.tmdb_api_key.clone().map(TmdbClient::new).map(Arc::new);
@@ -352,6 +372,58 @@ async fn run_with_metadata(
     }
     let probe_runtime = runtime_probe_enabled(&args);
 
+    if args.refresh_library_metadata {
+        let mut records = LibraryIndex::records_for_metadata_refresh(&target)?;
+        log(&format!(
+            "Loaded {} media records from library.db without scanning the target",
+            records.len()
+        ));
+        if args.dry_run {
+            println!(
+                "[dry-run] MLIP 元数据刷新: {} ({} 条记录，不扫描媒体目录)",
+                LibraryIndex::database_path(&target).display(),
+                records.len()
+            );
+            return Ok(());
+        }
+        let mut metadata_cache = HashMap::new();
+        let mut episode_cache = HashMap::new();
+        enrich_library_index_records(
+            &mut records,
+            &target,
+            &mut MetadataIndexContext {
+                metadata_cache: &mut metadata_cache,
+                episode_cache: &mut episode_cache,
+                alias_lookup: alias_lookup.as_ref(),
+                bangumi: bangumi.as_ref(),
+                tmdb: tmdb.as_deref(),
+                library_bangumi_ids: library_bangumi_ids.as_ref(),
+                download_images: !args.no_images,
+                scan_artwork: true,
+                force_overwrite: args.force_overwrite,
+                fetch_episode_metadata: !args.no_episode_metadata,
+                allow_online_title_resolution,
+                probe_runtime: false,
+                verbose: args.verbose,
+            },
+        )
+        .await;
+        ensure_not_canceled(cancel)?;
+        let stats = LibraryIndex::refresh_metadata(&target, &records)?;
+        println!(
+            "媒体库元数据刷新完成：{} 部作品，{} 集，{} 个文件，{} 个特典 ({})",
+            stats.series,
+            stats.episodes,
+            stats.media_files,
+            stats.extras,
+            LibraryIndex::database_path(&target).display()
+        );
+        log("MLIP metadata refresh finished and library.db was published");
+        return Ok(());
+    }
+
+    let source = source.expect("non-refresh organize requires source");
+    let subtitle_candidates = FileOrganizer::collect_external_subtitle_candidates(&source);
     let anime_groups =
         collect_anime_groups(&source, &extensions, args.filename_parser, args.verbose)?;
     log(&format!("Discovered {} anime groups", anime_groups.len()));
@@ -551,6 +623,7 @@ async fn run_with_metadata(
             tmdb: tmdb.as_deref(),
             library_bangumi_ids: library_bangumi_ids.as_ref(),
             download_images: !args.no_images,
+            scan_artwork: true,
             force_overwrite: args.force_overwrite,
             fetch_episode_metadata: !args.no_episode_metadata,
             allow_online_title_resolution,
@@ -794,6 +867,22 @@ fn validate_library_index_args(args: &OrganizeArgs) -> Result<(), AppError> {
     if args.rebuild_library_index && !args.writes_library_index() {
         return Err(AppError::ParseError(
             "--rebuild-library-index 必须与 --library-index 或 --mlip 一起使用".to_string(),
+        ));
+    }
+    if args.refresh_library_metadata && !args.mlip {
+        return Err(AppError::ParseError(
+            "--refresh-library-metadata 必须与 --mlip 一起使用".to_string(),
+        ));
+    }
+    if args.refresh_library_metadata && args.rebuild_library_index {
+        return Err(AppError::ParseError(
+            "--refresh-library-metadata 不能与 --rebuild-library-index 同时使用".to_string(),
+        ));
+    }
+    if args.refresh_library_metadata && args.probe_runtime {
+        return Err(AppError::ParseError(
+            "--refresh-library-metadata 不读取媒体文件，不能与 --probe-runtime 同时使用"
+                .to_string(),
         ));
     }
     Ok(())
@@ -1114,6 +1203,7 @@ struct MetadataIndexContext<'a> {
     tmdb: Option<&'a TmdbClient>,
     library_bangumi_ids: &'a HashMap<(String, u32), u32>,
     download_images: bool,
+    scan_artwork: bool,
     force_overwrite: bool,
     fetch_episode_metadata: bool,
     allow_online_title_resolution: bool,
@@ -1193,6 +1283,7 @@ async fn enrich_library_index_records(
     context: &mut MetadataIndexContext<'_>,
 ) {
     let min_episodes = min_episode_by_series(records);
+    let mut downloaded_artwork = HashSet::new();
 
     for record in records {
         let lookup_title = record.series_title.clone();
@@ -1244,7 +1335,9 @@ async fn enrich_library_index_records(
                 None
             };
             let anime_root = library_series_root(target, record, &lookup_title);
-            if context.download_images {
+            if context.download_images
+                && downloaded_artwork.insert((anime_root.clone(), season.max(1)))
+            {
                 download_images(
                     meta,
                     &anime_root,
@@ -1264,7 +1357,9 @@ async fn enrich_library_index_records(
                     .get(&(lookup_title.clone(), i64::from(season)))
                     .copied(),
             );
-            add_metadata_artwork(record, target, &anime_root, season.max(1));
+            if context.scan_artwork {
+                add_metadata_artwork(record, target, &anime_root, season.max(1));
+            }
         }
         apply_runtime_probe(record, target, context.probe_runtime, context.verbose);
     }
@@ -1341,7 +1436,15 @@ fn add_series_artwork_if_exists(
                 );
             }
         }
-        record.series_artwork.push(artwork);
+        if let Some(existing) = record
+            .series_artwork
+            .iter_mut()
+            .find(|existing| existing.kind == artwork.kind && existing.path == artwork.path)
+        {
+            *existing = artwork;
+        } else {
+            record.series_artwork.push(artwork);
+        }
     }
 }
 
@@ -1484,6 +1587,7 @@ async fn resolve_alias_db_path(
     bangumi: &BangumiClient,
     metadata_source: Option<&Path>,
     verbose: bool,
+    force_refresh: bool,
 ) -> Option<PathBuf> {
     if let Some(path) = find_metadata_source_alias_db(metadata_source) {
         return Some(path);
@@ -1498,7 +1602,7 @@ async fn resolve_alias_db_path(
             .or_else(|| bangumi_path.is_file().then_some(bangumi_path));
     }
 
-    match download_animeatlas_alias_db(bangumi.cache_dir()).await {
+    match download_animeatlas_alias_db(bangumi.cache_dir(), force_refresh).await {
         Ok(path) => {
             if verbose {
                 eprintln!("AnimeAtlas 别名库已就绪: {}", path.display());
@@ -1532,12 +1636,15 @@ fn find_metadata_source_alias_db(metadata_source: Option<&Path>) -> Option<PathB
 }
 
 #[cfg(feature = "metadata")]
-async fn download_animeatlas_alias_db(cache_dir: &Path) -> Result<PathBuf, AppError> {
+async fn download_animeatlas_alias_db(
+    cache_dir: &Path,
+    force_refresh: bool,
+) -> Result<PathBuf, AppError> {
     std::fs::create_dir_all(cache_dir)
         .map_err(|e| AppError::MetadataFetchError(format!("创建缓存目录失败: {e}")))?;
 
     let db_path = cache_dir.join(ANIMEATLAS_SQLITE_FILENAME);
-    if animeatlas_cache_is_fresh(&db_path) {
+    if !force_refresh && animeatlas_cache_is_fresh(&db_path) {
         return Ok(db_path);
     }
 

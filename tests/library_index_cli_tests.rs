@@ -245,6 +245,108 @@ fn existing_library_bangumi_id_skips_title_matching_on_later_runs() {
 }
 
 #[test]
+fn metadata_refresh_uses_database_paths_without_scanning_media() {
+    let source = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let metadata = tempfile::tempdir().unwrap();
+    let subject_path = metadata.path().join("subject.jsonlines");
+    let alias_path = metadata.path().join("aliases.json");
+    fs::write(
+        &subject_path,
+        concat!(
+            r#"{"id":565411,"type":2,"name":"我是不白吃","name_cn":"我是不白吃","summary":"wrong","date":"2019-01-01"}"#,
+            "\n",
+            r#"{"id":545008,"type":2,"name":"ふつつかな悪女ではございますが ～雛宮蝶鼠とりかえ伝～","name_cn":"恶女不才，请多关照 ～雏宫蝶鼠换身传～","summary":"correct","date":"2026-07-01"}"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &alias_path,
+        r#"{"我是不才惡女":{"bangumi_id":565411,"name":"我是不白吃","tmdb_id":null,"anidb_id":null}}"#,
+    )
+    .unwrap();
+    fs::write(
+        source.path().join("[ANi] 我是不才惡女 - 01 [1080P].mkv"),
+        b"video",
+    )
+    .unwrap();
+
+    let initial = run_aniorg(&[
+        "--source".to_string(),
+        source.path().display().to_string(),
+        "--target".to_string(),
+        target.path().display().to_string(),
+        "--mode".to_string(),
+        "copy".to_string(),
+        "--mlip".to_string(),
+        "--metadata-source".to_string(),
+        subject_path.display().to_string(),
+        "--alias-file".to_string(),
+        alias_path.display().to_string(),
+        "--no-images".to_string(),
+        "--no-episode-metadata".to_string(),
+    ]);
+    assert!(
+        initial.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&initial.stdout),
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let db_path = target.path().join("library.db");
+    assert_eq!(bangumi_id(&db_path), "565411");
+    fs::remove_file(
+        target
+            .path()
+            .join("我是不才惡女")
+            .join("Season 1")
+            .join("[ANi] 我是不才惡女 - 01 [1080P].mkv"),
+    )
+    .unwrap();
+    fs::write(
+        &alias_path,
+        r#"{"我是不才惡女":{"bangumi_id":545008,"name":"ふつつかな悪女ではございますが ～雛宮蝶鼠とりかえ伝～","tmdb_id":null,"anidb_id":null}}"#,
+    )
+    .unwrap();
+
+    let refresh = run_aniorg(&[
+        "--target".to_string(),
+        target.path().display().to_string(),
+        "--mlip".to_string(),
+        "--refresh-library-metadata".to_string(),
+        "--metadata-source".to_string(),
+        subject_path.display().to_string(),
+        "--alias-file".to_string(),
+        alias_path.display().to_string(),
+        "--no-images".to_string(),
+        "--no-episode-metadata".to_string(),
+    ]);
+    assert!(
+        refresh.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&refresh.stdout),
+        String::from_utf8_lossy(&refresh.stderr)
+    );
+    assert_eq!(media_count(&db_path), 1);
+    assert_eq!(external_id_count(&db_path), 1);
+    assert_eq!(bangumi_id(&db_path), "545008");
+    let conn = Connection::open(db_path).unwrap();
+    let (title, path): (String, String) = conn
+        .query_row(
+            "SELECT series.title, media_file.path FROM series \
+             INNER JOIN episode ON episode.series_id = series.id \
+             INNER JOIN media_file ON media_file.episode_id = episode.id",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(title, "恶女不才，请多关照 ～雏宫蝶鼠换身传～");
+    assert_eq!(
+        path,
+        "我是不才惡女/Season 1/[ANi] 我是不才惡女 - 01 [1080P].mkv"
+    );
+}
+
+#[test]
 fn existing_database_is_incremental_until_rebuild_is_requested() {
     let initial_source = tempfile::tempdir().unwrap();
     let empty_source = tempfile::tempdir().unwrap();

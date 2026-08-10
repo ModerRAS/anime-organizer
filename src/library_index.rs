@@ -708,6 +708,241 @@ impl LibraryIndex {
         target_root.join(DATABASE_FILENAME)
     }
 
+    /// Load media records from the existing database without touching media files.
+    ///
+    /// The physical top-level directory is used as the lookup title so a metadata
+    /// refresh can correct a stale provider identity stored on the current series.
+    pub fn records_for_metadata_refresh(target_root: &Path) -> Result<Vec<LibraryIndexRecord>> {
+        let db_path = Self::database_path(target_root);
+        if !db_path.exists() {
+            return Err(AppError::LibraryIndexError(format!(
+                "媒体库索引不存在: {}",
+                db_path.display()
+            )));
+        }
+        let conn = Connection::open(&db_path)
+            .map_err(|e| AppError::LibraryIndexError(format!("打开媒体库索引失败: {e}")))?;
+        validate_user_version(&conn)?;
+        let mut statement = conn
+            .prepare(
+                "SELECT media_file.id, media_file.path, media_file.size, \
+                        media_file.modified_time, media_file.sha256_full, episode.season, \
+                        episode.episode, episode.sort_order, episode.runtime, series.series_type, \
+                        series.id, episode.id \
+                 FROM media_file \
+                 INNER JOIN episode ON episode.id = media_file.episode_id \
+                 INNER JOIN series ON series.id = episode.series_id \
+                 ORDER BY media_file.path",
+            )
+            .map_err(|e| AppError::LibraryIndexError(format!("准备读取媒体库刷新记录失败: {e}")))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, f64>(6)?,
+                    row.get::<_, f64>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
+                ))
+            })
+            .map_err(|e| AppError::LibraryIndexError(format!("查询媒体库刷新记录失败: {e}")))?;
+        let mut subtitles = conn
+            .prepare(
+                "SELECT path FROM media_subtitle WHERE media_file_id = ?1 ORDER BY sort_order, id",
+            )
+            .map_err(|e| AppError::LibraryIndexError(format!("准备读取媒体字幕失败: {e}")))?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (
+                id,
+                relative_path,
+                size,
+                modified_time,
+                sha256_full,
+                season,
+                episode,
+                sort_order,
+                runtime,
+                series_type,
+                series_id,
+                episode_id,
+            ) = row
+                .map_err(|e| AppError::LibraryIndexError(format!("解析媒体库刷新记录失败: {e}")))?;
+            let series_title = relative_path
+                .split_once('/')
+                .map(|(root, _)| root)
+                .filter(|root| !root.is_empty())
+                .ok_or_else(|| {
+                    AppError::LibraryIndexError(format!(
+                        "媒体路径缺少顶层目录，无法刷新元数据: {relative_path}"
+                    ))
+                })?
+                .to_string();
+            let subtitle_paths = subtitles
+                .query_map(params![id], |row| row.get::<_, String>(0))
+                .map_err(|e| AppError::LibraryIndexError(format!("查询媒体字幕失败: {e}")))?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| AppError::LibraryIndexError(format!("解析媒体字幕失败: {e}")))?;
+            let series_artwork =
+                read_refresh_artwork(&conn, "series_artwork", "series_id", series_id)?;
+            let episode_artwork =
+                read_refresh_artwork(&conn, "episode_artwork", "episode_id", episode_id)?;
+            records.push(LibraryIndexRecord {
+                series_title,
+                original_title: None,
+                sort_title: None,
+                summary: None,
+                year: None,
+                air_date: None,
+                series_type,
+                season,
+                episode,
+                sort_order,
+                episode_title: None,
+                episode_summary: None,
+                runtime,
+                relative_path,
+                size,
+                modified_time,
+                sha256_full,
+                subtitle_paths,
+                genres: Vec::new(),
+                external_ids: Vec::new(),
+                series_artwork,
+                episode_artwork,
+            });
+        }
+        Ok(records)
+    }
+
+    /// Replace series metadata using database-derived records without scanning the library root.
+    pub fn refresh_metadata(
+        target_root: &Path,
+        records: &[LibraryIndexRecord],
+    ) -> Result<LibraryIndexStats> {
+        let db_path = Self::database_path(target_root);
+        let version = {
+            let conn = Connection::open(&db_path)
+                .map_err(|e| AppError::LibraryIndexError(format!("打开媒体库索引失败: {e}")))?;
+            validate_user_version(&conn)?
+        };
+        let mut packing = (version == 4)
+            .then(|| build_and_publish(target_root, records))
+            .transpose()?;
+        let mut stats = None;
+        let result = update_staged_database(target_root, |conn| {
+            let tx = conn
+                .transaction()
+                .map_err(|e| AppError::LibraryIndexError(format!("开始元数据刷新事务失败: {e}")))?;
+            let mut refreshed_series = HashSet::new();
+            for record in records
+                .iter()
+                .filter(|record| !record.external_ids.is_empty())
+            {
+                let series_id = tx
+                    .query_row(
+                        "SELECT episode.series_id FROM media_file \
+                         INNER JOIN episode ON episode.id = media_file.episode_id \
+                         WHERE media_file.path = ?1",
+                        params![record.relative_path],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .map_err(|e| {
+                        AppError::LibraryIndexError(format!("读取待刷新 series id 失败: {e}"))
+                    })?;
+                refreshed_series.extend(series_id);
+            }
+            for series_id in refreshed_series {
+                tx.execute(
+                    "DELETE FROM series_external_id WHERE series_id = ?1",
+                    params![series_id],
+                )
+                .and_then(|_| {
+                    tx.execute(
+                        "DELETE FROM series_genre WHERE series_id = ?1",
+                        params![series_id],
+                    )
+                })
+                .and_then(|_| {
+                    tx.execute(
+                        "DELETE FROM series_release_date WHERE series_id = ?1",
+                        params![series_id],
+                    )
+                })
+                .and_then(|_| {
+                    tx.execute(
+                        "UPDATE series SET original_title = NULL, sort_title = NULL, \
+                         summary = NULL, year = NULL WHERE id = ?1",
+                        params![series_id],
+                    )
+                })
+                .map_err(|e| {
+                    AppError::LibraryIndexError(format!("清理旧 series 元数据失败: {e}"))
+                })?;
+            }
+            upsert_meta(&tx, target_root, true, version)?;
+            upsert_capabilities(&tx, version == 4)?;
+            let asset_ids = packing
+                .as_ref()
+                .map(|packing| packing.write_catalog(&tx))
+                .transpose()?;
+            for record in records {
+                let artwork_catalog = packing
+                    .as_ref()
+                    .zip(asset_ids.as_ref())
+                    .map(|(packing, asset_ids)| (packing, asset_ids));
+                insert_record(&tx, record, artwork_catalog)?;
+            }
+            tx.execute_batch(
+                "UPDATE media_extra \
+                 SET series_id = ( \
+                     SELECT episode.series_id FROM media_file \
+                     INNER JOIN episode ON episode.id = media_file.episode_id \
+                     WHERE instr(media_file.path, '/') > 0 \
+                       AND substr(media_file.path, 1, instr(media_file.path, '/') - 1) = \
+                           substr(media_extra.path, 1, instr(media_extra.path, '/') - 1) \
+                     LIMIT 1 \
+                 ) \
+                 WHERE instr(media_extra.path, '/') > 0 \
+                   AND EXISTS ( \
+                     SELECT 1 FROM media_file \
+                     WHERE instr(media_file.path, '/') > 0 \
+                       AND substr(media_file.path, 1, instr(media_file.path, '/') - 1) = \
+                           substr(media_extra.path, 1, instr(media_extra.path, '/') - 1) \
+                 ); \
+                 DELETE FROM episode \
+                 WHERE NOT EXISTS (SELECT 1 FROM media_file WHERE media_file.episode_id = episode.id); \
+                 DELETE FROM series \
+                 WHERE NOT EXISTS (SELECT 1 FROM episode WHERE episode.series_id = series.id) \
+                   AND NOT EXISTS (SELECT 1 FROM media_extra WHERE media_extra.series_id = series.id); \
+                 DELETE FROM genre \
+                 WHERE NOT EXISTS (SELECT 1 FROM series_genre WHERE series_genre.genre_id = genre.id);",
+            )
+            .map_err(|e| {
+                AppError::LibraryIndexError(format!("清理元数据刷新孤儿记录失败: {e}"))
+            })?;
+            stats = Some(read_stats(&tx)?);
+            tx.commit()
+                .map_err(|e| AppError::LibraryIndexError(format!("提交元数据刷新事务失败: {e}")))?;
+            Ok(())
+        });
+        if result.is_ok() {
+            if let Some(packing) = &mut packing {
+                packing.commit();
+            }
+        }
+        result?;
+        stats.ok_or_else(|| AppError::LibraryIndexError("元数据刷新未生成统计".to_string()))
+    }
+
     /// Load unambiguous Bangumi identities already associated with each library root and season.
     pub fn bangumi_ids_by_series_root(target_root: &Path) -> Result<HashMap<(String, u32), u32>> {
         let db_path = Self::database_path(target_root);
@@ -927,6 +1162,60 @@ impl LibraryIndex {
         let _ = std::fs::remove_file(&paths.local);
         result
     }
+}
+
+fn read_refresh_artwork(
+    conn: &Connection,
+    table: &str,
+    owner_column: &str,
+    owner_id: i64,
+) -> Result<Vec<Artwork>> {
+    let has_provenance = column_exists(conn, table, "source_provider")?;
+    let sql = if has_provenance {
+        format!(
+            "SELECT artwork_kind, path, source_url, source_provider, source_subject_id, downloaded_at \
+             FROM {table} WHERE {owner_column} = ?1 ORDER BY id"
+        )
+    } else {
+        format!(
+            "SELECT artwork_kind, path, NULL, NULL, NULL, NULL \
+             FROM {table} WHERE {owner_column} = ?1 ORDER BY id"
+        )
+    };
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|e| AppError::LibraryIndexError(format!("准备读取 artwork 失败: {e}")))?;
+    let rows = statement
+        .query_map(params![owner_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })
+        .map_err(|e| AppError::LibraryIndexError(format!("查询 artwork 失败: {e}")))?;
+    let mut artwork = Vec::new();
+    for row in rows {
+        let (kind, path, source_url, source_provider, source_subject_id, downloaded_at) =
+            row.map_err(|e| AppError::LibraryIndexError(format!("解析 artwork 失败: {e}")))?;
+        let mut item = Artwork::new(artwork_kind(kind)?, path);
+        if let (Some(provider), Some(subject_id)) = (
+            source_provider.and_then(|value| match value {
+                1 => Some(ExternalProvider::Bangumi),
+                2 => Some(ExternalProvider::Tmdb),
+                3 => Some(ExternalProvider::Anidb),
+                _ => None,
+            }),
+            source_subject_id,
+        ) {
+            item = item.with_source(provider, subject_id, source_url, downloaded_at);
+        }
+        artwork.push(item);
+    }
+    Ok(artwork)
 }
 
 struct StagingPaths {
@@ -1754,10 +2043,15 @@ fn insert_artwork(
         }
         if let Some((packing, asset_ids)) = artwork_catalog {
             let sql = format!(
-                "INSERT OR IGNORE INTO {table} \
+                "INSERT INTO {table} \
                  ({owner_column}, artwork_kind, path, asset_id, source_url, source_provider, \
                   source_subject_id, downloaded_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                 ON CONFLICT({owner_column}, artwork_kind, path) DO UPDATE SET \
+                 asset_id = excluded.asset_id, source_url = excluded.source_url, \
+                 source_provider = excluded.source_provider, \
+                 source_subject_id = excluded.source_subject_id, \
+                 downloaded_at = excluded.downloaded_at"
             );
             conn.execute(
                 &sql,

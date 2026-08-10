@@ -1,10 +1,11 @@
 use anime_organizer::library_index::{
-    ArtworkKind, ExternalId, ExternalProvider, ExtraKind, LibraryExtraRecord, LibraryIndex,
-    LibraryIndexRecord, ReleaseDate,
+    Artwork, ArtworkKind, ExternalId, ExternalProvider, ExtraKind, LibraryExtraRecord,
+    LibraryIndex, LibraryIndexRecord, ReleaseDate,
 };
 use anime_organizer::parser::AnimeFileInfo;
 use rusqlite::Connection;
 use std::fs;
+use std::io::Cursor;
 
 fn table_names(conn: &Connection) -> Vec<String> {
     let mut stmt = conn
@@ -625,6 +626,112 @@ fn media_full_hash_cache_is_inherited_invalidated_and_drops_legacy_prefix() {
         .unwrap();
     LibraryIndex::rebuild(target, &[rebuilt]).unwrap();
     assert_eq!(read_hash(), Some("d".repeat(64)));
+}
+
+#[test]
+fn metadata_refresh_merges_roots_that_resolve_to_the_same_provider() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path();
+    let roman_path = target
+        .join("Futsutsuka na Akujo dewa Gozaimasu ga")
+        .join("01.mkv");
+    let chinese_path = target.join("我是不才惡女").join("01.mp4");
+    fs::create_dir_all(roman_path.parent().unwrap()).unwrap();
+    fs::create_dir_all(chinese_path.parent().unwrap()).unwrap();
+    fs::write(&roman_path, b"roman").unwrap();
+    fs::write(&chinese_path, b"chinese").unwrap();
+    let mut roman = LibraryIndexRecord::from_target_path(target, &roman_path)
+        .unwrap()
+        .unwrap();
+    roman.series_title = "恶女不才，请多关照".to_string();
+    roman.external_ids = vec![ExternalId::new(ExternalProvider::Bangumi, 545008)];
+    let mut chinese = LibraryIndexRecord::from_target_path(target, &chinese_path)
+        .unwrap()
+        .unwrap();
+    chinese.series_title = "我是不白吃".to_string();
+    chinese.external_ids = vec![ExternalId::new(ExternalProvider::Bangumi, 565411)];
+    LibraryIndex::rebuild(target, &[roman, chinese]).unwrap();
+
+    fs::remove_file(roman_path).unwrap();
+    fs::remove_file(chinese_path).unwrap();
+    let mut records = LibraryIndex::records_for_metadata_refresh(target).unwrap();
+    for record in &mut records {
+        record.series_title = "恶女不才，请多关照".to_string();
+        record.external_ids = vec![ExternalId::new(ExternalProvider::Bangumi, 545008)];
+    }
+    LibraryIndex::refresh_metadata(target, &records).unwrap();
+
+    let conn = Connection::open(target.join("library.db")).unwrap();
+    let (series, episodes, media, external_ids): (i64, i64, i64, i64) = conn
+        .query_row(
+            "SELECT \
+                (SELECT COUNT(*) FROM series), \
+                (SELECT COUNT(*) FROM episode), \
+                (SELECT COUNT(*) FROM media_file), \
+                (SELECT COUNT(*) FROM series_external_id WHERE provider = 1 AND value = '545008')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!((series, episodes, media, external_ids), (1, 1, 2, 1));
+}
+
+#[test]
+fn metadata_refresh_rebinds_replaced_artwork_without_media_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path();
+    let series = target.join("Refresh Art");
+    fs::create_dir_all(&series).unwrap();
+    let media = series.join("01 [1080P].mkv");
+    let poster = series.join("poster.png");
+    let png = |color| {
+        let image = image::ImageBuffer::from_pixel(2, 2, image::Rgba(color));
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        bytes
+    };
+    let old_png = png([255, 0, 0, 255]);
+    let new_png = png([0, 255, 0, 255]);
+    fs::write(&media, b"video").unwrap();
+    fs::write(&poster, &old_png).unwrap();
+    let mut record = LibraryIndexRecord::from_target_path(target, &media)
+        .unwrap()
+        .unwrap();
+    record.series_artwork = vec![Artwork::new(ArtworkKind::Poster, "Refresh Art/poster.png")];
+    LibraryIndex::rebuild(target, &[record]).unwrap();
+    let old_hash: String = Connection::open(target.join("library.db"))
+        .unwrap()
+        .query_row(
+            "SELECT artwork_asset.sha256 FROM series_artwork \
+             INNER JOIN artwork_asset ON artwork_asset.id = series_artwork.asset_id",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    fs::remove_file(media).unwrap();
+    fs::write(poster, new_png).unwrap();
+    let records = LibraryIndex::records_for_metadata_refresh(target).unwrap();
+    LibraryIndex::refresh_metadata(target, &records).unwrap();
+
+    let conn = Connection::open(target.join("library.db")).unwrap();
+    let (assets, bound, media_files, new_hash): (i64, i64, i64, String) = conn
+        .query_row(
+            "SELECT \
+                (SELECT COUNT(*) FROM artwork_asset), \
+                (SELECT COUNT(*) FROM series_artwork WHERE asset_id IS NOT NULL), \
+                (SELECT COUNT(*) FROM media_file), \
+                artwork_asset.sha256 \
+             FROM series_artwork \
+             INNER JOIN artwork_asset ON artwork_asset.id = series_artwork.asset_id",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!((assets, bound, media_files), (2, 1, 1));
+    assert_ne!(new_hash, old_hash);
 }
 
 #[test]

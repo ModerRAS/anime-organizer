@@ -116,6 +116,10 @@ pub(crate) struct OrganizeArgs {
     #[arg(long)]
     pub(crate) rebuild_library_index: bool,
 
+    /// 仅从现有 library.db 重新匹配并刷新元数据，不扫描媒体目录
+    #[arg(long)]
+    pub(crate) refresh_library_metadata: bool,
+
     /// 使用 ffprobe 探测视频时长并写入 MLIP episode.runtime（秒）
     #[arg(long)]
     pub(crate) probe_runtime: bool,

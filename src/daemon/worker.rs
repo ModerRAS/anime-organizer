@@ -164,7 +164,19 @@ fn execute(
     #[allow(unreachable_patterns)]
     let result = match &spec {
         JobSpec::Organize(args) => {
-            if args.rebuild_library_index {
+            if args.refresh_library_metadata {
+                let target = args.target.as_ref().map_or_else(
+                    || "the target library".to_string(),
+                    |path| path.display().to_string(),
+                );
+                let _ = queue.append_log(
+                    job.id,
+                    "info",
+                    &format!(
+                        "Starting metadata-only MLIP refresh for {target} without scanning media"
+                    ),
+                );
+            } else if args.rebuild_library_index {
                 let target = args.target.as_ref().map_or_else(
                     || "the target library".to_string(),
                     |path| path.display().to_string(),
@@ -189,7 +201,13 @@ fn execute(
                 },
                 cancel,
             );
-            if result.is_ok() && args.rebuild_library_index {
+            if result.is_ok() && args.refresh_library_metadata {
+                let _ = queue.append_log(
+                    job.id,
+                    "info",
+                    "Metadata-only MLIP refresh finished and library.db was published",
+                );
+            } else if result.is_ok() && args.rebuild_library_index {
                 let _ = queue.append_log(
                     job.id,
                     "info",

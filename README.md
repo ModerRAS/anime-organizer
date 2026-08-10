@@ -127,6 +127,9 @@ aniorg --source="/path/to/empty" --target="/path/to/anime" --library-index --reb
 # 重建 MiruPlay 成品库，并补齐 Bangumi 元数据和缺失海报
 aniorg --source="/path/to/empty" --target="/path/to/anime" --mlip --rebuild-library-index
 
+# 只读取现有 library.db 重新刮削元数据；不扫描媒体目录
+aniorg --target="/path/to/anime" --mlip --refresh-library-metadata
+
 # 只读生成目录统一/去重计划；不会移动或删除媒体
 aniorg normalize-layout --target="/path/to/anime" --dry-run --plan="layout-plan.json"
 
@@ -168,6 +171,7 @@ aniorg --source="/path/to/downloads" --dry-run --verbose
 | `--library-index` | | bool | ❌ | false | 生成/更新目标目录根部的 `library.db` |
 | `--mlip` | | bool | ❌ | false | 生成 MiruPlay 成品库：`library.db`、Bangumi 元数据和缺失海报；不生成 Kodi NFO |
 | `--rebuild-library-index` | | bool | ❌ | false | 与 `--library-index` 或 `--mlip` 合用，全量重扫 target；后者还会补元数据和缺失图片 |
+| `--refresh-library-metadata` | | bool | ❌ | false | 与 `--mlip` 合用，只读取现有 `library.db` 重新匹配元数据；不扫描媒体目录，新图片会写入 artwork tar |
 | `--probe-runtime` | | bool | ❌ | false | 使用 `ffprobe` 探测视频时长并写入 `episode.runtime`（秒） |
 | `--help` | `-h` | bool | ❌ | false | 显示帮助 |
 | `--version` | `-V` | bool | ❌ | false | 显示版本 |
@@ -266,6 +270,15 @@ aniorg \
 ```
 
 `--source` 目录必须存在。空源不会移动、复制或硬链接媒体，只会扫描 target。`--rebuild-library-index` 必须和 `--library-index` 或 `--mlip` 一起使用；如果 source 不是空目录，本次成功整理的新文件也会包含在重建结果中。
+
+只需要按新别名或供应商数据重新刮削现有索引时，使用 `--refresh-library-metadata`。它不需要 `--source`，只从 `library.db` 读取媒体路径、集号、大小、mtime、hash 和 artwork 绑定，不递归枚举 target，也不读取视频。该模式会强制刷新 AnimeAtlas 缓存，重新匹配 Bangumi/分集元数据；缺失或被 `--force-overwrite` 覆盖的图片按明确路径下载，并由现有 artwork pack builder 写入 tar/catalog。daemon `organize` job 需要顶层 `confirmed=true`。
+
+```bash
+aniorg \
+  --target="/path/to/anime" \
+  --mlip \
+  --refresh-library-metadata
+```
 
 给 MiruPlay 增量生成成品库时，使用 `--mlip`；它默认下载缺失图片，但不会生成 Kodi NFO：
 
@@ -819,6 +832,9 @@ aniorg --source="/path/to/empty" --target="/path/to/anime" --library-index --reb
 
 # Rebuild a MiruPlay-ready library and download missing artwork
 aniorg --source="/path/to/empty" --target="/path/to/anime" --mlip --rebuild-library-index
+
+# Re-scrape metadata from the existing library.db without scanning media
+aniorg --target="/path/to/anime" --mlip --refresh-library-metadata
 ```
 
 ### 📋 Arguments
@@ -845,6 +861,7 @@ aniorg --source="/path/to/empty" --target="/path/to/anime" --mlip --rebuild-libr
 | `--library-index` | | bool | ❌ | false | Generate/update `library.db` in the target root |
 | `--mlip` | | bool | ❌ | false | Generate `library.db`, Bangumi metadata, and missing artwork without Kodi NFO |
 | `--rebuild-library-index` | | bool | ❌ | false | Full target rescan; with `--mlip`, also refresh metadata and download missing artwork |
+| `--refresh-library-metadata` | | bool | ❌ | false | With `--mlip`, re-match metadata using only the existing `library.db`; do not scan media, and pack new artwork into MLIP tar files |
 | `--probe-runtime` | | bool | ❌ | false | Use `ffprobe` to probe video duration and write `episode.runtime` in seconds |
 | `--help` | `-h` | bool | ❌ | false | Show help |
 | `--version` | `-V` | bool | ❌ | false | Show version |
@@ -920,6 +937,15 @@ aniorg \
 ```
 
 The source directory must exist. An empty source performs no move, copy, or hard-link operations; it only scans the target. `--dry-run --library-index` does not create or modify `library.db`; it only reports whether the command would initialize, incrementally update, or rebuild the index. `media_file.path` values are stored relative to the directory containing `library.db` and always use `/` separators.
+
+Use `--refresh-library-metadata` when only aliases or provider metadata changed. It requires no `--source`: media paths, episode numbers, size, mtime, hashes, and artwork bindings come from the existing `library.db`; the target is not recursively enumerated and video bytes are never read. The mode force-refreshes the AnimeAtlas cache, re-resolves Bangumi and episode metadata, downloads missing or `--force-overwrite` artwork at explicit paths, and publishes those images through the existing artwork tar/catalog builder. A daemon `organize` job requires top-level `confirmed=true`.
+
+```bash
+aniorg \
+  --target="/path/to/anime" \
+  --mlip \
+  --refresh-library-metadata
+```
 
 Matching `.srt`, `.ass`, `.ssa`, and `.vtt` sidecars are organized with their video and exported through the required MLIP v2 `media_subtitle` table. A sidecar must share the video stem or append a language-style suffix; `.sub` is excluded because VobSub requires a paired `.idx`.
 

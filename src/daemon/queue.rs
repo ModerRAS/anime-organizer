@@ -688,6 +688,7 @@ mod tests {
                 library_index: false,
                 mlip: false,
                 rebuild_library_index: false,
+                refresh_library_metadata: false,
                 probe_runtime: false,
                 filename_parser: FilenameParserMode::Rules,
             }),
