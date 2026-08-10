@@ -22,8 +22,8 @@ use crate::mlip::{
 #[cfg(feature = "metadata")]
 use anime_organizer::library_index::{Artwork, ArtworkKind, ExternalProvider};
 use anime_organizer::{
-    error::AppError, sha256_file, AnimeFileInfo, FileOrganizer, FilenameParser, LibraryExtraRecord,
-    LibraryIndex, LibraryIndexRecord, OperationMode,
+    error::AppError, organize_directory_components, sha256_file, AnimeFileInfo, FileOrganizer,
+    FilenameParser, LibraryExtraRecord, LibraryIndex, LibraryIndexRecord, OperationMode,
 };
 #[cfg(feature = "metadata")]
 use anime_organizer::{
@@ -241,13 +241,9 @@ fn run_organize(
         };
 
         processed += 1;
-        let target_dir = if args.season_mode {
-            target
-                .join(anime_file.series_name())
-                .join(anime_file.season_dir_name())
-        } else {
-            target.join(&anime_file.anime_name)
-        };
+        let target_dir = organize_directory_components(&anime_file, args.season_mode)
+            .iter()
+            .fold(target.clone(), |path, component| path.join(component));
         match organize_file_to_dir(
             &anime_file,
             &target_dir,
@@ -541,7 +537,9 @@ async fn run_with_metadata(
                 canceled = true;
                 break 'groups;
             }
-            let season_dir = target.join(file.series_name()).join(file.season_dir_name());
+            let season_dir = organize_directory_components(&file, true)
+                .iter()
+                .fold(target.clone(), |path, component| path.join(component));
             processed += 1;
 
             match organize_file_to_dir(

@@ -268,7 +268,7 @@ fn execute(
             })
         }
         #[cfg(feature = "clouddrive")]
-        JobSpec::RssPoll { .. } | JobSpec::RssPollAll => {
+        JobSpec::RssPoll { .. } | JobSpec::RssPollAll | JobSpec::RemoteRssOrganize { .. } => {
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|error| format!("failed to create RSS runtime: {error}"))?;
             runtime.block_on(super::rss_schedule::execute(spec.clone(), rss_runtime))

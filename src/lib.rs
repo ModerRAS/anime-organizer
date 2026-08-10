@@ -42,6 +42,7 @@ pub mod layout_normalizer;
 pub mod library_index;
 pub mod metadata;
 pub mod nfo;
+pub mod organize_plan;
 pub mod organizer;
 pub mod parser;
 #[cfg(feature = "clouddrive")]
@@ -63,5 +64,6 @@ pub use layout_normalizer::{
 pub use library_index::{ExtraKind, LibraryExtraRecord, LibraryIndex, LibraryIndexRecord};
 pub use metadata::AnimeMetadata;
 pub use nfo::{EpisodeNfo, NfoWriter, TvShowNfo};
+pub use organize_plan::organize_directory_components;
 pub use organizer::{FileOrganizer, OperationMode};
 pub use parser::{AnimeFileInfo, FilenameParser};

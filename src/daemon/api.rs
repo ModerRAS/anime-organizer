@@ -268,7 +268,12 @@ async fn capabilities() -> Json<CapabilitiesResponse> {
         job_types.push("torrent_scrape");
     }
     #[cfg(feature = "clouddrive")]
-    job_types.extend(["rss_poll", "rss_poll_all", "cloud_add_offline"]);
+    job_types.extend([
+        "rss_poll",
+        "rss_poll_all",
+        "remote_rss_organize",
+        "cloud_add_offline",
+    ]);
     Json(CapabilitiesResponse {
         features,
         job_types,
@@ -492,6 +497,50 @@ struct RssSubscriptionRequest {
     interval_secs: i64,
     #[serde(default)]
     connection_id: Option<i64>,
+    #[serde(default)]
+    auto_organize: Option<bool>,
+    #[serde(default)]
+    organize_target_folder: Option<String>,
+    #[serde(default)]
+    organize_season_mode: Option<bool>,
+    #[serde(default)]
+    remove_empty_dirs: Option<bool>,
+    #[serde(default)]
+    organize_interval_secs: Option<i64>,
+}
+
+#[cfg(feature = "clouddrive")]
+#[derive(Debug, Clone)]
+struct RssOrganizationSettings {
+    auto_organize: bool,
+    organize_target_folder: Option<String>,
+    organize_season_mode: bool,
+    remove_empty_dirs: bool,
+    organize_interval_secs: i64,
+}
+
+#[cfg(feature = "clouddrive")]
+fn organization_settings(
+    request: &RssSubscriptionRequest,
+    existing: Option<&anime_organizer::rss::db::Subscription>,
+) -> RssOrganizationSettings {
+    RssOrganizationSettings {
+        auto_organize: request
+            .auto_organize
+            .unwrap_or_else(|| existing.is_some_and(|subscription| subscription.auto_organize)),
+        organize_target_folder: request.organize_target_folder.clone().or_else(|| {
+            existing.and_then(|subscription| subscription.organize_target_folder.clone())
+        }),
+        organize_season_mode: request.organize_season_mode.unwrap_or_else(|| {
+            existing.is_none_or(|subscription| subscription.organize_season_mode)
+        }),
+        remove_empty_dirs: request
+            .remove_empty_dirs
+            .unwrap_or_else(|| existing.is_some_and(|subscription| subscription.remove_empty_dirs)),
+        organize_interval_secs: request.organize_interval_secs.unwrap_or_else(|| {
+            existing.map_or(300, |subscription| subscription.organize_interval_secs)
+        }),
+    }
 }
 
 #[cfg(feature = "clouddrive")]
@@ -536,6 +585,7 @@ fn rss_db(state: &DaemonState) -> Result<RssDatabase, Response> {
 fn validate_rss_request(
     state: &DaemonState,
     request: &RssSubscriptionRequest,
+    organization: &RssOrganizationSettings,
 ) -> Result<(), Response> {
     let parsed_url = url::Url::parse(&request.url).ok();
     if request.url.trim() != request.url
@@ -575,6 +625,37 @@ fn validate_rss_request(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "invalid_request",
                 "filter_regex is invalid",
+            ));
+        }
+    }
+    if !(60..=86_400).contains(&organization.organize_interval_secs) {
+        return Err(error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            "organize_interval_secs must be between 60 and 86400",
+        ));
+    }
+    if organization.auto_organize {
+        let Some(target) = organization.organize_target_folder.as_deref() else {
+            return Err(error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_request",
+                "organize_target_folder is required when auto_organize is enabled",
+            ));
+        };
+        if target.trim() != target
+            || target.is_empty()
+            || target.len() > 4096
+            || super::remote_organize::validate_remote_organize_paths(
+                &request.target_folder,
+                target,
+            )
+            .is_err()
+        {
+            return Err(error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_request",
+                "organize_target_folder must be a nonempty remote path separate from target_folder",
             ));
         }
     }
@@ -636,7 +717,8 @@ async fn create_rss_subscription(
             )
         }
     };
-    if let Err(response) = validate_rss_request(&state, &request) {
+    let organization = organization_settings(&request, None);
+    if let Err(response) = validate_rss_request(&state, &request, &organization) {
         return response;
     }
     let db = match rss_db(&state) {
@@ -650,19 +732,50 @@ async fn create_rss_subscription(
         request.interval_secs,
         request.connection_id,
     ) {
-        Ok(id) => match db.get_subscription(id) {
-            Ok(Some(subscription)) => (StatusCode::CREATED, Json(subscription)).into_response(),
-            Ok(None) => error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                "created subscription disappeared",
-            ),
-            Err(db_error) => error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                db_error.to_string(),
-            ),
-        },
+        Ok(id) => {
+            if let Err(db_error) = db.update_subscription_organization_settings(
+                id,
+                organization.auto_organize,
+                if organization.auto_organize {
+                    organization
+                        .organize_target_folder
+                        .as_deref()
+                        .map(str::trim)
+                } else {
+                    None
+                },
+                organization.organize_season_mode,
+                organization.remove_empty_dirs,
+            ) {
+                return error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    db_error.to_string(),
+                );
+            }
+            if let Err(db_error) =
+                db.set_subscription_organize_interval(id, organization.organize_interval_secs)
+            {
+                return error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    db_error.to_string(),
+                );
+            }
+            match db.get_subscription(id) {
+                Ok(Some(subscription)) => (StatusCode::CREATED, Json(subscription)).into_response(),
+                Ok(None) => error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "created subscription disappeared",
+                ),
+                Err(db_error) => error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    db_error.to_string(),
+                ),
+            }
+        }
         Err(db_error) => error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_request",
@@ -687,14 +800,32 @@ async fn update_rss_subscription(
             )
         }
     };
-    if let Err(response) = validate_rss_request(&state, &request) {
-        return response;
-    }
     let db = match rss_db(&state) {
         Ok(db) => db,
         Err(response) => return response,
     };
-    match db.update_subscription(
+    let existing = match db.get_subscription(id) {
+        Ok(Some(subscription)) => subscription,
+        Ok(None) => {
+            return error(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                format!("RSS subscription {id} was not found"),
+            )
+        }
+        Err(db_error) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                db_error.to_string(),
+            )
+        }
+    };
+    let organization = organization_settings(&request, Some(&existing));
+    if let Err(response) = validate_rss_request(&state, &request, &organization) {
+        return response;
+    }
+    if let Err(db_error) = db.update_subscription(
         id,
         request.url.trim(),
         request.filter_regex.as_deref(),
@@ -702,20 +833,41 @@ async fn update_rss_subscription(
         request.interval_secs,
         request.connection_id,
     ) {
-        Ok(()) => match db.get_subscription(id) {
-            Ok(Some(subscription)) => Json(subscription).into_response(),
-            Ok(None) => error(
-                StatusCode::NOT_FOUND,
-                "not_found",
-                format!("RSS subscription {id} was not found"),
-            ),
-            Err(db_error) => error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                db_error.to_string(),
-            ),
+        return error(StatusCode::NOT_FOUND, "not_found", db_error.to_string());
+    }
+    if let Err(db_error) = db.update_subscription_organization_settings(
+        id,
+        organization.auto_organize,
+        if organization.auto_organize {
+            organization
+                .organize_target_folder
+                .as_deref()
+                .map(str::trim)
+        } else {
+            None
         },
-        Err(db_error) => error(StatusCode::NOT_FOUND, "not_found", db_error.to_string()),
+        organization.organize_season_mode,
+        organization.remove_empty_dirs,
+    ) {
+        return error(StatusCode::NOT_FOUND, "not_found", db_error.to_string());
+    }
+    if let Err(db_error) =
+        db.set_subscription_organize_interval(id, organization.organize_interval_secs)
+    {
+        return error(StatusCode::NOT_FOUND, "not_found", db_error.to_string());
+    }
+    match db.get_subscription(id) {
+        Ok(Some(subscription)) => Json(subscription).into_response(),
+        Ok(None) => error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("RSS subscription {id} was not found"),
+        ),
+        Err(db_error) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            db_error.to_string(),
+        ),
     }
 }
 
@@ -1428,6 +1580,11 @@ mod tests {
                     target_folder: "/anime".to_string(),
                     interval_secs: 300,
                     connection_id: None,
+                    auto_organize: Some(false),
+                    organize_target_folder: None,
+                    organize_season_mode: Some(true),
+                    remove_empty_dirs: Some(false),
+                    organize_interval_secs: Some(300),
                 })),
             )
             .await;
@@ -1441,6 +1598,11 @@ mod tests {
                     target_folder: "/anime".to_string(),
                     interval_secs: 29,
                     connection_id: None,
+                    auto_organize: Some(false),
+                    organize_target_folder: None,
+                    organize_season_mode: Some(true),
+                    remove_empty_dirs: Some(false),
+                    organize_interval_secs: Some(300),
                 })),
             )
             .await;
@@ -1455,10 +1617,91 @@ mod tests {
                     target_folder: "/anime".to_string(),
                     interval_secs: 30,
                     connection_id: Some(connection_id),
+                    auto_organize: Some(false),
+                    organize_target_folder: None,
+                    organize_season_mode: Some(true),
+                    remove_empty_dirs: Some(false),
+                    organize_interval_secs: Some(300),
                 })),
             )
             .await;
             assert_eq!(accepted.status(), StatusCode::CREATED);
+        }
+
+        #[tokio::test]
+        async fn rejects_auto_organize_target_matching_source() {
+            let directory = tempdir().unwrap();
+            let (state, _) = test_state(directory.path());
+            let connection_id = create_test_connection(&state);
+            let response = create_rss_subscription(
+                State(state),
+                Ok(Json(RssSubscriptionRequest {
+                    url: "https://example.test/invalid-organize.xml".to_string(),
+                    filter_regex: None,
+                    target_folder: "/anime".to_string(),
+                    interval_secs: 30,
+                    connection_id: Some(connection_id),
+                    auto_organize: Some(true),
+                    organize_target_folder: Some("/anime/".to_string()),
+                    organize_season_mode: Some(true),
+                    remove_empty_dirs: Some(false),
+                    organize_interval_secs: Some(300),
+                })),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+
+        #[tokio::test]
+        async fn old_client_update_preserves_omitted_organization_settings() {
+            let directory = tempdir().unwrap();
+            let (state, _) = test_state(directory.path());
+            let connection_id = create_test_connection(&state);
+            let db = RssDatabase::new(&state.rss_db_path).unwrap();
+            let id = db
+                .add_subscription_with_connection(
+                    "https://example.test/feed.xml",
+                    None,
+                    "/anime",
+                    300,
+                    Some(connection_id),
+                )
+                .unwrap();
+            db.update_subscription_organization_settings(id, true, Some("/library"), false, true)
+                .unwrap();
+            db.set_subscription_organize_interval(id, 600).unwrap();
+
+            let response = update_rss_subscription(
+                State(state.clone()),
+                Path(id),
+                Ok(Json(RssSubscriptionRequest {
+                    url: "https://example.test/feed.xml".to_string(),
+                    filter_regex: None,
+                    target_folder: "/anime".to_string(),
+                    interval_secs: 300,
+                    connection_id: Some(connection_id),
+                    auto_organize: None,
+                    organize_target_folder: None,
+                    organize_season_mode: None,
+                    remove_empty_dirs: None,
+                    organize_interval_secs: None,
+                })),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let subscription = RssDatabase::new(&state.rss_db_path)
+                .unwrap()
+                .get_subscription(id)
+                .unwrap()
+                .unwrap();
+            assert!(subscription.auto_organize);
+            assert_eq!(
+                subscription.organize_target_folder.as_deref(),
+                Some("/library")
+            );
+            assert!(!subscription.organize_season_mode);
+            assert!(subscription.remove_empty_dirs);
+            assert_eq!(subscription.organize_interval_secs, 600);
         }
 
         #[tokio::test]
@@ -1535,6 +1778,11 @@ mod tests {
                     target_folder: "/anime".to_string(),
                     interval_secs: 300,
                     connection_id: Some(connection_id),
+                    auto_organize: Some(false),
+                    organize_target_folder: None,
+                    organize_season_mode: Some(true),
+                    remove_empty_dirs: Some(false),
+                    organize_interval_secs: Some(300),
                 })),
             )
             .await;

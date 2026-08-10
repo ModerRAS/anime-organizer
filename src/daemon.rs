@@ -10,6 +10,8 @@ pub(crate) mod cloud;
 pub(crate) mod model;
 pub(crate) mod queue;
 #[cfg(feature = "clouddrive")]
+pub(crate) mod remote_organize;
+#[cfg(feature = "clouddrive")]
 pub(crate) mod rss_schedule;
 pub(crate) mod web;
 pub(crate) mod worker;

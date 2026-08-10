@@ -46,6 +46,43 @@ pub(crate) async fn execute(
             }
             total
         }
+        JobSpec::RemoteRssOrganize { subscription_id } => {
+            let subscription = db
+                .get_subscription(subscription_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("RSS subscription {subscription_id} was not found"))?;
+            if !subscription.enabled || !subscription.auto_organize {
+                return Err(format!(
+                    "RSS subscription {subscription_id} is not auto-organize enabled"
+                ));
+            }
+            let connection_id = subscription.connection_id.ok_or_else(|| {
+                format!("RSS subscription {subscription_id} has no CloudDrive connection")
+            })?;
+            let connection = runtime
+                .cloud
+                .repository
+                .get(connection_id)
+                .map_err(|error| error.to_string())?;
+            let client = runtime
+                .cloud
+                .authenticated_client(&connection)
+                .await
+                .map_err(|error| error.to_string())?;
+            let summary =
+                super::remote_organize::organize_subscription(&db, &subscription, &*client).await?;
+            return Ok(JobResult {
+                summary: format!(
+                    "Remote RSS organize moved {} media file(s), removed {} empty source folder(s), skipped {} conflict(s), left {} uncorrelated legacy task(s)",
+                    summary.moved_media,
+                    summary.removed_empty_directories,
+                    summary.skipped_conflicts,
+                    summary.uncorrelated_legacy_tasks
+                ),
+                data: serde_json::to_value(summary).map_err(|error| error.to_string())?,
+                artifacts: Vec::new(),
+            });
+        }
         _ => return Err("not an RSS job".to_string()),
     };
     Ok(JobResult {
@@ -152,8 +189,37 @@ pub(crate) fn start_scheduler(
                     let _ = wake.send(());
                 }
             }
+            let Ok(subscriptions) = db.list_due_organization_subscriptions() else {
+                continue;
+            };
+            for subscription in subscriptions {
+                let request = EnqueueRequest {
+                    idempotency_key: Some(format!(
+                        "rss-organize:{}:{}",
+                        subscription.id,
+                        organize_due_window(&subscription)
+                    )),
+                    origin: JobOrigin::Scheduled,
+                    confirmed: false,
+                    job: JobSpec::RemoteRssOrganize {
+                        subscription_id: subscription.id,
+                    },
+                };
+                if queue.enqueue(&request).is_ok() {
+                    let _ = wake.send(());
+                }
+            }
         }
     }));
+}
+
+fn organize_due_window(subscription: &anime_organizer::rss::db::Subscription) -> u64 {
+    let interval = u64::try_from(subscription.organize_interval_secs.max(1)).unwrap_or(1);
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        / interval
 }
 
 fn due_window(subscription: &anime_organizer::rss::db::Subscription) -> u64 {
@@ -292,6 +358,12 @@ mod tests {
             enabled: true,
             last_checked_at: None,
             connection_id: Some(1),
+            auto_organize: false,
+            organize_target_folder: None,
+            organize_season_mode: true,
+            remove_empty_dirs: false,
+            organize_interval_secs: 300,
+            last_organize_checked_at: None,
         };
         assert_eq!(due_window(&subscription), due_window(&subscription));
     }

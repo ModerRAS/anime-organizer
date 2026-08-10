@@ -30,12 +30,27 @@ pub fn torrent_bytes_to_magnet(data: &[u8]) -> Result<String> {
         .get(&info_key)
         .ok_or_else(|| AppError::MetadataFetchError(".torrent 文件缺少 info 字典".to_string()))?;
 
-    // 重新编码 info 字典以计算 hash
-    let info_bytes = bt_bencode::to_vec(info_value)
-        .map_err(|e| AppError::MetadataFetchError(format!("编码 info 字典失败: {e}")))?;
+    // BTIH is SHA-1 over the exact bencoded byte span of `info`, not a
+    // re-encoding of the parsed value. Re-encoding changes accepted
+    // noncanonical torrents and therefore produces a different identifier.
+    let info_bytes = raw_info_bytes(data)?;
+    let info_dict = match info_value {
+        Value::Dict(dict) => dict,
+        _ => {
+            return Err(AppError::MetadataFetchError(
+                ".torrent 文件的 info 不是字典".to_string(),
+            ))
+        }
+    };
+    let pieces_key: bt_bencode::ByteString = b"pieces"[..].into();
+    if !info_dict.contains_key(&pieces_key) {
+        return Err(AppError::MetadataFetchError(
+            "纯 BitTorrent v2 种子没有可用于 RSS 自动整理的 v1 BTIH".to_string(),
+        ));
+    }
 
     let mut hasher = Sha1::new();
-    hasher.update(&info_bytes);
+    hasher.update(info_bytes);
     let info_hash = hasher.finalize();
     let info_hash_hex = hex_encode(&info_hash);
 
@@ -63,7 +78,7 @@ pub async fn download_torrent_to_magnet(
     client: &reqwest::Client,
     torrent_url: &str,
 ) -> Result<String> {
-    let response = client
+    let mut response = client
         .get(torrent_url)
         .send()
         .await
@@ -76,17 +91,129 @@ pub async fn download_torrent_to_magnet(
         )));
     }
 
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| AppError::MetadataFetchError(format!("读取 .torrent 内容失败: {e}")))?;
+    const MAX_TORRENT_BYTES: usize = 32 * 1024 * 1024;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_TORRENT_BYTES as u64)
+    {
+        return Err(AppError::MetadataFetchError(
+            ".torrent 文件超过允许的最大大小".to_string(),
+        ));
+    }
 
-    torrent_bytes_to_magnet(&bytes)
+    let mut data = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| AppError::MetadataFetchError(format!("读取 .torrent 内容失败: {e}")))?
+    {
+        let size = data.len().checked_add(chunk.len()).ok_or_else(|| {
+            AppError::MetadataFetchError(".torrent 文件超过允许的最大大小".to_string())
+        })?;
+        if size > MAX_TORRENT_BYTES {
+            return Err(AppError::MetadataFetchError(
+                ".torrent 文件超过允许的最大大小".to_string(),
+            ));
+        }
+        data.extend_from_slice(&chunk);
+    }
+
+    torrent_bytes_to_magnet(&data)
 }
 
-type BtDict = std::collections::BTreeMap<bt_bencode::ByteString, Value>;
+fn raw_info_bytes(data: &[u8]) -> Result<&[u8]> {
+    if data.first() != Some(&b'd') {
+        return Err(AppError::MetadataFetchError(
+            ".torrent 文件格式无效：顶层不是字典".to_string(),
+        ));
+    }
+    let mut index = 1;
+    while data.get(index) != Some(&b'e') {
+        let key = read_bencode_string(data, &mut index)?;
+        let value_start = index;
+        skip_bencode_value(data, &mut index)?;
+        if key == b"info" {
+            return Ok(&data[value_start..index]);
+        }
+    }
+    Err(AppError::MetadataFetchError(
+        ".torrent 文件缺少 info 字典".to_string(),
+    ))
+}
+
+fn read_bencode_string<'a>(data: &'a [u8], index: &mut usize) -> Result<&'a [u8]> {
+    let length_start = *index;
+    while matches!(data.get(*index), Some(byte) if byte.is_ascii_digit()) {
+        *index += 1;
+    }
+    if length_start == *index || data.get(*index) != Some(&b':') {
+        return Err(AppError::MetadataFetchError(
+            "无效 bencode 字符串".to_string(),
+        ));
+    }
+    let length = std::str::from_utf8(&data[length_start..*index])
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| AppError::MetadataFetchError("无效 bencode 字符串长度".to_string()))?;
+    *index += 1;
+    let end = index
+        .checked_add(length)
+        .filter(|end| *end <= data.len())
+        .ok_or_else(|| AppError::MetadataFetchError("截断的 bencode 字符串".to_string()))?;
+    let value = &data[*index..end];
+    *index = end;
+    Ok(value)
+}
+
+fn skip_bencode_value(data: &[u8], index: &mut usize) -> Result<()> {
+    match data.get(*index) {
+        Some(b'i') => {
+            *index += 1;
+            let start = *index;
+            while data.get(*index) != Some(&b'e') {
+                if data.get(*index).is_none() {
+                    return Err(AppError::MetadataFetchError(
+                        "截断的 bencode 整数".to_string(),
+                    ));
+                }
+                *index += 1;
+            }
+            if start == *index {
+                return Err(AppError::MetadataFetchError(
+                    "无效 bencode 整数".to_string(),
+                ));
+            }
+            *index += 1;
+            Ok(())
+        }
+        Some(b'l') => {
+            *index += 1;
+            while data.get(*index) != Some(&b'e') {
+                skip_bencode_value(data, index)?;
+            }
+            *index += 1;
+            Ok(())
+        }
+        Some(b'd') => {
+            *index += 1;
+            while data.get(*index) != Some(&b'e') {
+                read_bencode_string(data, index)?;
+                skip_bencode_value(data, index)?;
+            }
+            *index += 1;
+            Ok(())
+        }
+        Some(byte) if byte.is_ascii_digit() => {
+            read_bencode_string(data, index)?;
+            Ok(())
+        }
+        _ => Err(AppError::MetadataFetchError("无效 bencode 值".to_string())),
+    }
+}
 
 /// 从 torrent 字典中提取 tracker 列表
+type BtDict = std::collections::BTreeMap<bt_bencode::ByteString, Value>;
+
 fn extract_trackers(dict: &BtDict) -> Vec<String> {
     let mut trackers = Vec::new();
 
@@ -167,6 +294,31 @@ fn url_encode(input: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn hashes_the_raw_info_span_without_reencoding() {
+        let info = b"d6:pieces20:000000000000000000004:name4:teste";
+        let data = [b"d4:info".as_slice(), info, b"8:announce1:ae"].concat();
+        let mut hasher = Sha1::new();
+        hasher.update(info);
+        let expected = hex_encode(&hasher.finalize());
+
+        assert_eq!(raw_info_bytes(&data).unwrap(), info);
+        assert!(torrent_bytes_to_magnet(&data)
+            .unwrap()
+            .starts_with(&format!("magnet:?xt=urn:btih:{expected}")));
+    }
+
+    #[test]
+    fn accepts_hybrid_torrents_with_a_v1_piece_list() {
+        let data = b"d4:infod12:meta versioni2e4:name4:test6:pieces20:00000000000000000000ee";
+        assert!(torrent_bytes_to_magnet(data).is_ok());
+    }
+
+    #[test]
+    fn rejects_pure_v2_torrents_for_v1_btih_correlation() {
+        let data = b"d4:infod12:meta versioni2e4:name4:teste";
+        assert!(torrent_bytes_to_magnet(data).is_err());
+    }
     #[test]
     fn test_hex_encode() {
         let bytes = [0xde, 0xad, 0xbe, 0xef];

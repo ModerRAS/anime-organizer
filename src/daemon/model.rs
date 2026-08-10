@@ -77,6 +77,10 @@ pub(crate) enum JobSpec {
     #[cfg(feature = "clouddrive")]
     RssPollAll,
     #[cfg(feature = "clouddrive")]
+    RemoteRssOrganize {
+        subscription_id: i64,
+    },
+    #[cfg(feature = "clouddrive")]
     CloudAddOffline(CloudAddOfflineJobArgs),
     #[cfg(feature = "scraper")]
     Scrape(crate::cli::ScrapeArgs),
@@ -115,6 +119,8 @@ impl JobSpec {
             #[cfg(feature = "clouddrive")]
             Self::RssPollAll => "rss_poll_all",
             #[cfg(feature = "clouddrive")]
+            Self::RemoteRssOrganize { .. } => "remote_rss_organize",
+            #[cfg(feature = "clouddrive")]
             Self::CloudAddOffline(_) => "cloud_add_offline",
             #[cfg(feature = "scraper")]
             Self::Scrape(_) => "scrape",
@@ -138,7 +144,9 @@ impl JobSpec {
     pub(crate) fn resource_key(&self) -> Option<String> {
         #[cfg(feature = "clouddrive")]
         match self {
-            Self::RssPoll { subscription_id } => Some(format!("rss:{subscription_id}")),
+            Self::RssPoll { subscription_id } | Self::RemoteRssOrganize { subscription_id } => {
+                Some(format!("rss:{subscription_id}"))
+            }
             Self::RssPollAll => Some("rss:all".to_string()),
             _ => None,
         }
@@ -152,7 +160,10 @@ impl JobSpec {
         match self {
             Self::Organize(_) | Self::NormalizeLayout(_) | Self::CompactArtworkPacks(_) => true,
             #[cfg(feature = "clouddrive")]
-            Self::RssPoll { .. } | Self::RssPollAll | Self::CloudAddOffline(_) => true,
+            Self::RssPoll { .. }
+            | Self::RssPollAll
+            | Self::RemoteRssOrganize { .. }
+            | Self::CloudAddOffline(_) => true,
             #[cfg(feature = "scraper")]
             Self::Scrape(_) | Self::MatchAliases(_) => true,
             #[cfg(feature = "scraper")]

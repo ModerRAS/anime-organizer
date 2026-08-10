@@ -179,7 +179,7 @@ impl QueueRepository {
             }
 
             let rss_overlap = match kind {
-                "rss_poll" => transaction
+                "rss_poll" | "remote_rss_organize" => transaction
                     .query_row(
                         "SELECT EXISTS(SELECT 1 FROM jobs WHERE resource_key = 'rss:all' AND state IN ('queued', 'running'))",
                         [],
@@ -188,7 +188,7 @@ impl QueueRepository {
                     .map(|value| value != 0),
                 "rss_poll_all" => transaction
                     .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM jobs WHERE kind IN ('rss_poll', 'rss_poll_all') AND state IN ('queued', 'running'))",
+                        "SELECT EXISTS(SELECT 1 FROM jobs WHERE kind IN ('rss_poll', 'rss_poll_all', 'remote_rss_organize') AND state IN ('queued', 'running'))",
                         [],
                         |row| row.get::<_, i64>(0),
                     )
@@ -731,12 +731,19 @@ mod tests {
         assert_eq!(duplicate.job.id, first.job.id);
         let next_window = EnqueueRequest {
             idempotency_key: Some("rss:1:101".to_string()),
-            ..request
+            ..request.clone()
         };
         assert!(matches!(
             queue.enqueue(&next_window),
             Err(QueueError::Conflict)
         ));
+        let remote = EnqueueRequest {
+            idempotency_key: Some("rss-organize:1:100".to_string()),
+            origin: JobOrigin::Scheduled,
+            confirmed: false,
+            job: JobSpec::RemoteRssOrganize { subscription_id: 1 },
+        };
+        assert!(matches!(queue.enqueue(&remote), Err(QueueError::Conflict)));
     }
 
     #[test]
