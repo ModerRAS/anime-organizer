@@ -46,9 +46,11 @@ const DEFAULT_EXTENSIONS: &[&str] = &[".mp4", ".mkv", ".avi", ".mov", ".wmv", ".
 const ANIMEATLAS_SQLITE_FILENAME: &str = "animeatlas.sqlite";
 #[cfg(feature = "metadata")]
 const ANIMEATLAS_SQLITE_URL: &str =
-    "https://github.com/ModerRAS/AnimeAtlas/releases/latest/download/animeatlas.sqlite";
+    "https://github.com/ModerRAS/AnimeAtlas/releases/download/download/animeatlas.sqlite";
 #[cfg(feature = "metadata")]
 const ANIMEATLAS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+#[cfg(feature = "metadata")]
+static ANIMEATLAS_REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 #[cfg(feature = "metadata")]
 const HTTP_USER_AGENT: &str = concat!(
     "ModerRAS/anime-organizer/",
@@ -1666,10 +1668,11 @@ fn find_metadata_source_alias_db(metadata_source: Option<&Path>) -> Option<PathB
 }
 
 #[cfg(feature = "metadata")]
-async fn download_animeatlas_alias_db(
+pub(crate) async fn download_animeatlas_alias_db(
     cache_dir: &Path,
     force_refresh: bool,
 ) -> Result<PathBuf, AppError> {
+    let _refresh_guard = ANIMEATLAS_REFRESH_LOCK.lock().await;
     std::fs::create_dir_all(cache_dir)
         .map_err(|e| AppError::MetadataFetchError(format!("创建缓存目录失败: {e}")))?;
 
@@ -1704,6 +1707,21 @@ async fn download_animeatlas_alias_db(
     let tmp_path = db_path.with_extension("sqlite.tmp");
     std::fs::write(&tmp_path, &bytes)
         .map_err(|e| AppError::MetadataFetchError(format!("写入 AnimeAtlas 临时文件失败: {e}")))?;
+    let validation = AliasLookup::load(&tmp_path).and_then(|lookup| {
+        if lookup.is_empty() {
+            Err(AppError::AliasLoadError(
+                "AnimeAtlas 别名库不包含可用别名".to_string(),
+            ))
+        } else {
+            Ok(())
+        }
+    });
+    if let Err(error) = validation {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(AppError::MetadataFetchError(format!(
+            "校验 AnimeAtlas 别名库失败: {error}"
+        )));
+    }
     if db_path.is_file() {
         std::fs::remove_file(&db_path).map_err(|e| {
             AppError::MetadataFetchError(format!("替换旧 AnimeAtlas 别名库失败: {e}"))
@@ -1767,6 +1785,14 @@ fn is_supplemental_video_path(path: &Path) -> bool {
 #[cfg(all(test, feature = "metadata"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn animeatlas_download_uses_fixed_release_url() {
+        assert_eq!(
+            ANIMEATLAS_SQLITE_URL,
+            "https://github.com/ModerRAS/AnimeAtlas/releases/download/download/animeatlas.sqlite"
+        );
+    }
 
     #[test]
     fn animeatlas_cache_refreshes_daily() {

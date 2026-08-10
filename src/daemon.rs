@@ -2,6 +2,8 @@ use anime_organizer::error::AppError;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
+#[cfg(feature = "metadata")]
+use std::time::Duration;
 use std::time::Instant;
 
 pub(crate) mod api;
@@ -15,6 +17,9 @@ pub(crate) mod remote_organize;
 pub(crate) mod rss_schedule;
 pub(crate) mod web;
 pub(crate) mod worker;
+
+#[cfg(feature = "metadata")]
+const ANIMEATLAS_REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 use queue::QueueRepository;
 use worker::WorkerSnapshot;
@@ -85,6 +90,9 @@ async fn run_http(state: Arc<DaemonState>) -> Result<(), AppError> {
         .map_err(|error| AppError::MetadataFetchError(format!("绑定 daemon 地址失败: {error}")))?;
     println!("anime-organizer daemon listening at http://127.0.0.1:32145/");
 
+    #[cfg(feature = "metadata")]
+    start_animeatlas_refresh_scheduler();
+
     #[cfg(feature = "clouddrive")]
     rss_schedule::start_scheduler(
         state.queue.clone(),
@@ -97,6 +105,22 @@ async fn run_http(state: Arc<DaemonState>) -> Result<(), AppError> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|error| AppError::MetadataFetchError(format!("daemon HTTP 服务失败: {error}")))
+}
+
+#[cfg(feature = "metadata")]
+fn start_animeatlas_refresh_scheduler() {
+    drop(tokio::spawn(async move {
+        let mut interval = tokio::time::interval(ANIMEATLAS_REFRESH_CHECK_INTERVAL);
+        loop {
+            interval.tick().await;
+            let bangumi = anime_organizer::metadata::BangumiClient::new(None);
+            if let Err(error) =
+                crate::download_animeatlas_alias_db(bangumi.cache_dir(), false).await
+            {
+                eprintln!("AnimeAtlas 别名库定期刷新失败，将继续使用现有缓存: {error}");
+            }
+        }
+    }));
 }
 
 async fn shutdown_signal() {

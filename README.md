@@ -180,14 +180,14 @@ aniorg --source="/path/to/downloads" --dry-run --verbose
 
 启用 `--scrape-metadata` 后，程序会：
 
-- 优先使用 `--alias-file` JSON 和本地别名库匹配 Bangumi 条目；若未提供本地 `animeatlas.sqlite`/`bangumi.db`，会自动下载 AnimeAtlas latest release 的 `animeatlas.sqlite` 到缓存目录，失败时回退到 Bangumi 名称/搜索匹配
+- 优先使用 `--alias-file` JSON 和本地别名库匹配 Bangumi 条目；若未提供本地 `animeatlas.sqlite`/`bangumi.db`，会从 AnimeAtlas 固定发布地址下载 `animeatlas.sqlite` 到缓存目录，失败时回退到现有缓存或 Bangumi 名称/搜索匹配
 - 在动画根目录生成 `tvshow.nfo`
 - 在 `Season N/` 目录下生成与视频同名的 `*.nfo`
 - 优先从 Bangumi 下载 `poster.jpg` 和 `seasonXX-poster.jpg`；如果提供了 TMDB API Key，则 TMDB 作为海报备选并补充 `fanart.jpg`
 
 默认缓存位于系统缓存目录：Windows 为 `%LOCALAPPDATA%\anime-organizer\bangumi-cache`（缺失时回退 `%APPDATA%`），Linux/macOS 优先 `$XDG_CACHE_HOME/anime-organizer/bangumi-cache`，否则使用 `~/.cache/anime-organizer/bangumi-cache`。`--bangumi-cache` 可显式覆盖。缓存不会默认放进媒体 target。
 
-未指定 `--metadata-source` 时，元数据模式会按需刷新 AnimeAtlas 最新发布的 `animeatlas.sqlite`。显式指定 `--metadata-source` 表示使用本地数据并保持离线，不会触发 AnimeAtlas 自动下载；`--alias-file` JSON 仍具有最高优先级。
+未指定 `--metadata-source` 时，元数据模式会按 24 小时 TTL 刷新固定发布地址的 AnimeAtlas `animeatlas.sqlite`；daemon 还会每小时检查一次缓存，过期后自动刷新。刷新失败会继续使用现有缓存。显式指定 `--metadata-source` 表示使用本地数据并保持离线，不会触发 AnimeAtlas 自动下载；`--alias-file` JSON 仍具有最高优先级。
 
 `--alias-file` 可直接复用 `extract-aliases` 导出的 JSON 对象格式，例如：
 
@@ -870,14 +870,14 @@ aniorg --target="/path/to/anime" --mlip --refresh-library-metadata
 
 When `--scrape-metadata` is enabled, the tool will:
 
-- Prefer aliases from `--alias-file` JSON and a local alias database; when no local `animeatlas.sqlite`/`bangumi.db` is available, it downloads AnimeAtlas latest-release `animeatlas.sqlite` into the cache directory and falls back to Bangumi title/search matching if that download fails
+- Prefer aliases from `--alias-file` JSON and a local alias database; when no local `animeatlas.sqlite`/`bangumi.db` is available, it downloads `animeatlas.sqlite` from the fixed AnimeAtlas release URL into the cache directory and falls back to the existing cache or Bangumi title/search matching if that download fails
 - Generate `tvshow.nfo` in the series root
 - Generate per-episode `*.nfo` files beside organized videos in `Season N/`
 - Download `poster.jpg` and `seasonXX-poster.jpg` from Bangumi first; when a TMDB API key is provided, TMDB is used as a poster backup and for `fanart.jpg`
 
 The default cache is `%LOCALAPPDATA%\anime-organizer\bangumi-cache` on Windows (falling back to `%APPDATA%`) and `$XDG_CACHE_HOME/anime-organizer/bangumi-cache` or `~/.cache/anime-organizer/bangumi-cache` on Linux/macOS. Override it with `--bangumi-cache`; the cache is not placed inside the media target by default.
 
-Without `--metadata-source`, metadata modes refresh the latest released AnimeAtlas `animeatlas.sqlite` as needed. An explicit `--metadata-source` selects local offline data and does not trigger AnimeAtlas downloads. A JSON `--alias-file` remains the highest-priority override.
+Without `--metadata-source`, metadata modes refresh AnimeAtlas `animeatlas.sqlite` from its fixed release URL with a 24-hour TTL. The daemon also checks the cache hourly and refreshes it after expiry; failures keep the existing cache. An explicit `--metadata-source` selects local offline data and does not trigger AnimeAtlas downloads. A JSON `--alias-file` remains the highest-priority override.
 
 The `--alias-file` JSON can reuse the object output format from `extract-aliases`, for example:
 

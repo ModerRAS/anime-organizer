@@ -572,10 +572,12 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
+    type MoveCall = (Vec<String>, String);
+
     #[derive(Clone, Default)]
     struct MockCloud {
         folders: Arc<Mutex<BTreeMap<String, Vec<proto::CloudDriveFile>>>>,
-        moves: Arc<Mutex<Vec<(Vec<String>, String)>>>,
+        moves: Arc<Mutex<Vec<MoveCall>>>,
         deletes: Arc<Mutex<Vec<String>>>,
         listed_paths: Arc<Mutex<Vec<String>>>,
         offline_calls: Arc<AtomicUsize>,
