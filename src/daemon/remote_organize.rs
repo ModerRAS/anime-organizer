@@ -1,9 +1,17 @@
 use anime_organizer::rss::client::{proto, CloudDriveClientTrait};
 use anime_organizer::rss::db::{RssDatabase, Subscription};
-use anime_organizer::{organize_directory_components, FileOrganizer, FilenameParser};
+use anime_organizer::{
+    organize_directory_components, FileOrganizer, FilenameParser, LibraryIndex, LibraryIndexRecord,
+};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::UNIX_EPOCH;
+
+static REMOTE_MLIP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Default, Serialize)]
 pub(crate) struct RemoteOrganizeSummary {
@@ -136,6 +144,15 @@ pub(crate) async fn organize_subscription(
                 invalid_root = true;
                 break;
             };
+            let episode = match anime.episode.parse::<f64>() {
+                Ok(episode) if episode.is_finite() => episode,
+                _ => {
+                    invalid_root = true;
+                    break;
+                }
+            };
+            let series_title = anime.series_name();
+            let season = i64::from(anime.season_number().unwrap_or(1));
             let components =
                 organize_directory_components(&anime, subscription.organize_season_mode);
             if components
@@ -166,7 +183,13 @@ pub(crate) async fn organize_subscription(
                 })
                 .collect::<Vec<_>>();
             files.push(media.clone());
-            groups.push((destination_path(&target_root, &components), files));
+            groups.push((
+                destination_path(&target_root, &components),
+                files,
+                series_title,
+                season,
+                episode,
+            ));
         }
         if claimed_subtitles.len() != subtitle_candidates.len() {
             invalid_root = true;
@@ -179,7 +202,7 @@ pub(crate) async fn organize_subscription(
         // failure therefore leaves this root untouched.
         let mut planned = Vec::new();
         let mut conflicted = false;
-        for (destination, files) in groups {
+        for (destination, files, series_title, season, episode) in groups {
             let existing = inspect_destination(client, &destination).await?;
             let names = files
                 .iter()
@@ -236,6 +259,9 @@ pub(crate) async fn organize_subscription(
                 files,
                 names,
                 action,
+                series_title,
+                season,
+                episode,
             });
         }
         if conflicted || planned.is_empty() {
@@ -262,6 +288,10 @@ pub(crate) async fn organize_subscription(
             if group.names.iter().any(|name| existing.contains_key(name)) {
                 return Err("remote destination changed during organization".to_string());
             }
+        }
+
+        if subscription.remote_mlip {
+            publish_remote_mlip(client, &target_root, &planned).await?;
         }
 
         for group in planned
@@ -329,12 +359,283 @@ struct PlannedGroup {
     files: Vec<RemoteEntry>,
     names: Vec<String>,
     action: GroupAction,
+    series_title: String,
+    season: i64,
+    episode: f64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GroupAction {
     Move,
     DeleteDuplicates,
+}
+
+struct LocalTempDatabase(PathBuf);
+
+impl LocalTempDatabase {
+    fn new() -> Self {
+        Self(std::env::temp_dir().join(format!("aniorg-rss-mlip-{}.db", unique_suffix())))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for LocalTempDatabase {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+async fn publish_remote_mlip(
+    client: &dyn CloudDriveClientTrait,
+    target_root: &str,
+    groups: &[PlannedGroup],
+) -> Result<(), String> {
+    let contents = inspect_destination(client, target_root).await?;
+    let had_database = contents.contains_key(anime_organizer::library_index::DATABASE_FILENAME);
+    let database_path = join_remote_path(
+        target_root,
+        anime_organizer::library_index::DATABASE_FILENAME,
+    );
+    let local = LocalTempDatabase::new();
+    if had_database {
+        client
+            .download_file(&database_path, local.path())
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+
+    let cached_hashes = if had_database {
+        let cache_path = local.path().to_path_buf();
+        tokio::task::spawn_blocking(move || LibraryIndex::cached_remote_media_hashes(&cache_path))
+            .await
+            .map_err(|error| format!("remote MLIP hash cache task failed: {error}"))?
+            .map_err(|error| error.to_string())?
+    } else {
+        HashMap::new()
+    };
+    let records = build_remote_index_records(client, target_root, groups, &cached_hashes).await?;
+    let local_path = local.path().to_path_buf();
+    let remote_root = target_root.to_string();
+    tokio::task::spawn_blocking(move || {
+        LibraryIndex::update_remote_database(&local_path, &remote_root, &records)
+    })
+    .await
+    .map_err(|error| format!("remote MLIP update task failed: {error}"))?
+    .map_err(|error| error.to_string())?;
+    let expected_hash = sha256_local_file(local.path())?;
+
+    let suffix = unique_suffix();
+    let temporary_name = format!(".library.db.{suffix}.tmp");
+    let backup_name = format!(".library.db.{suffix}.bak");
+    let temporary_path = join_remote_path(target_root, &temporary_name);
+    let backup_path = join_remote_path(target_root, &backup_name);
+    client
+        .upload_file(target_root, &temporary_name, local.path())
+        .await
+        .map_err(|error| error.to_string())?;
+    let uploaded_hash = match client.sha256_file(&temporary_path).await {
+        Ok(hash) => hash,
+        Err(error) => {
+            let cleanup = client.delete_file(&temporary_path).await.err();
+            return Err(match cleanup {
+                Some(cleanup) => format!(
+                    "verify uploaded remote MLIP failed: {error}; temporary cleanup failed: {cleanup}"
+                ),
+                None => format!("verify uploaded remote MLIP failed: {error}"),
+            });
+        }
+    };
+    if uploaded_hash != expected_hash {
+        let cleanup = client.delete_file(&temporary_path).await.err();
+        return Err(match cleanup {
+            Some(error) => {
+                format!("uploaded remote MLIP hash mismatch; temporary cleanup failed: {error}")
+            }
+            None => "uploaded remote MLIP hash mismatch".to_string(),
+        });
+    }
+
+    if had_database {
+        if let Err(error) = client
+            .rename_file(
+                &database_path,
+                backup_path
+                    .rsplit_once('/')
+                    .map_or(backup_name.as_str(), |(_, name)| name),
+            )
+            .await
+        {
+            let cleanup = client.delete_file(&temporary_path).await.err();
+            return Err(match cleanup {
+                Some(cleanup) => {
+                    format!("{error}; temporary MLIP cleanup failed: {cleanup}")
+                }
+                None => error.to_string(),
+            });
+        }
+    }
+    if let Err(error) = client
+        .rename_file(
+            &temporary_path,
+            database_path
+                .rsplit_once('/')
+                .map_or("library.db", |(_, name)| name),
+        )
+        .await
+    {
+        let restore = if had_database {
+            client.rename_file(&backup_path, "library.db").await.err()
+        } else {
+            None
+        };
+        let cleanup = client.delete_file(&temporary_path).await.err();
+        let mut message = error.to_string();
+        if let Some(restore) = restore {
+            message.push_str(&format!("; restore previous remote MLIP failed: {restore}"));
+        }
+        if let Some(cleanup) = cleanup {
+            message.push_str(&format!("; temporary MLIP cleanup failed: {cleanup}"));
+        }
+        return Err(message);
+    }
+
+    let installed_hash = client
+        .sha256_file(&database_path)
+        .await
+        .map_err(|error| error.to_string());
+    if installed_hash.as_deref() != Ok(expected_hash.as_str()) {
+        let mut message = match installed_hash {
+            Ok(_) => "installed remote MLIP hash mismatch".to_string(),
+            Err(error) => format!("verify installed remote MLIP failed: {error}"),
+        };
+        if let Err(error) = client.delete_file(&database_path).await {
+            message.push_str(&format!("; invalid remote MLIP cleanup failed: {error}"));
+        }
+        if had_database {
+            if let Err(error) = client.rename_file(&backup_path, "library.db").await {
+                message.push_str(&format!("; restore previous remote MLIP failed: {error}"));
+            }
+        }
+        return Err(message);
+    }
+    if had_database {
+        client
+            .delete_file(&backup_path)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+async fn build_remote_index_records(
+    client: &dyn CloudDriveClientTrait,
+    target_root: &str,
+    groups: &[PlannedGroup],
+    cached_hashes: &HashMap<(String, Option<i64>), String>,
+) -> Result<Vec<LibraryIndexRecord>, String> {
+    let mut records = Vec::with_capacity(groups.len());
+    for group in groups {
+        let media_index = group
+            .files
+            .iter()
+            .position(|file| !is_external_subtitle(&file.path))
+            .ok_or_else(|| "remote media bundle has no video".to_string())?;
+        let media = &group.files[media_index];
+        let media_target = join_remote_path(&group.destination, &group.names[media_index]);
+        let hash_path = if group.action == GroupAction::Move {
+            media.path.as_str()
+        } else {
+            media_target.as_str()
+        };
+        let relative_path = remote_relative_path(target_root, &media_target)?;
+        let media_size = (media.size >= 0).then_some(media.size);
+        let sha256_full =
+            if let Some(hash) = cached_hashes.get(&(relative_path.clone(), media_size)) {
+                hash.clone()
+            } else {
+                client
+                    .sha256_file(hash_path)
+                    .await
+                    .map_err(|error| error.to_string())?
+            };
+        if sha256_full.len() != 64 || !sha256_full.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("CloudDrive returned an invalid media SHA-256".to_string());
+        }
+        let subtitle_paths = group
+            .files
+            .iter()
+            .zip(&group.names)
+            .filter(|(file, _)| is_external_subtitle(&file.path))
+            .map(|(_, name)| {
+                remote_relative_path(target_root, &join_remote_path(&group.destination, name))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        records.push(LibraryIndexRecord {
+            series_title: group.series_title.clone(),
+            original_title: None,
+            sort_title: None,
+            summary: None,
+            year: None,
+            air_date: None,
+            series_type: 1,
+            season: group.season,
+            episode: group.episode,
+            sort_order: group.episode,
+            episode_title: None,
+            episode_summary: None,
+            runtime: None,
+            relative_path,
+            size: media_size,
+            modified_time: None,
+            sha256_full: Some(sha256_full.to_ascii_lowercase()),
+            subtitle_paths,
+            genres: Vec::new(),
+            external_ids: Vec::new(),
+            series_artwork: Vec::new(),
+            episode_artwork: Vec::new(),
+        });
+    }
+    Ok(records)
+}
+
+fn remote_relative_path(root: &str, path: &str) -> Result<String, String> {
+    let prefix = format!("{}/", root.trim_end_matches('/'));
+    path.strip_prefix(&prefix)
+        .filter(|relative| !relative.is_empty() && !relative.starts_with('/'))
+        .map(str::to_string)
+        .ok_or_else(|| format!("remote MLIP path is outside target root: {path}"))
+}
+
+fn sha256_local_file(path: &Path) -> Result<String, String> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("open local MLIP for hashing failed: {error}"))?;
+    let mut sha = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let length = file
+            .read(&mut buffer)
+            .map_err(|error| format!("read local MLIP for hashing failed: {error}"))?;
+        if length == 0 {
+            break;
+        }
+        sha.update(&buffer[..length]);
+    }
+    Ok(format!("{:x}", sha.finalize()))
+}
+
+fn unique_suffix() -> String {
+    format!(
+        "{}-{}-{}",
+        std::process::id(),
+        REMOTE_MLIP_COUNTER.fetch_add(1, Ordering::Relaxed),
+        std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    )
 }
 
 async fn list_tree(client: &dyn CloudDriveClientTrait, root: &str) -> Result<RemoteTree, String> {
@@ -582,9 +883,11 @@ mod tests {
         listed_paths: Arc<Mutex<Vec<String>>>,
         offline_calls: Arc<AtomicUsize>,
         hashes: Arc<Mutex<HashMap<String, String>>>,
+        remote_bytes: Arc<Mutex<HashMap<String, Vec<u8>>>>,
         hash_calls: Arc<Mutex<Vec<String>>>,
         fail_hashes: Arc<AtomicUsize>,
         fail_moves: Arc<AtomicUsize>,
+        fail_uploads: Arc<AtomicUsize>,
     }
 
     #[async_trait]
@@ -706,7 +1009,76 @@ mod tests {
                 entries.retain(|entry| entry.name != name);
             }
             folders.remove(path);
+            self.remote_bytes.lock().unwrap().remove(path);
             self.deletes.lock().unwrap().push(path.to_string());
+            Ok(())
+        }
+        async fn download_file(&self, path: &str, destination: &Path) -> Result<()> {
+            let bytes = self
+                .remote_bytes
+                .lock()
+                .unwrap()
+                .get(path)
+                .cloned()
+                .ok_or_else(|| {
+                    anime_organizer::error::AppError::MetadataFetchError(
+                        "mock remote bytes were not found".to_string(),
+                    )
+                })?;
+            std::fs::write(destination, bytes).unwrap();
+            Ok(())
+        }
+        async fn upload_file(&self, parent: &str, name: &str, source: &Path) -> Result<()> {
+            if self
+                .fail_uploads
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    (remaining > 0).then_some(remaining.saturating_sub(1))
+                })
+                .is_ok()
+            {
+                return Err(anime_organizer::error::AppError::MetadataFetchError(
+                    "transient upload failure".to_string(),
+                ));
+            }
+            let bytes = std::fs::read(source).unwrap();
+            let path = join_remote_path(parent, name);
+            self.remote_bytes
+                .lock()
+                .unwrap()
+                .insert(path.clone(), bytes.clone());
+            self.folders
+                .lock()
+                .unwrap()
+                .entry(parent.to_string())
+                .or_default()
+                .push(file_with_size(&path, false, bytes.len() as i64));
+            Ok(())
+        }
+        async fn rename_file(&self, path: &str, new_name: &str) -> Result<()> {
+            let parent = remote_parent(path).expect("mock rename source has a parent");
+            let new_path = join_remote_path(parent, new_name);
+            let bytes = { self.remote_bytes.lock().unwrap().remove(path) };
+            if let Some(bytes) = bytes {
+                self.remote_bytes
+                    .lock()
+                    .unwrap()
+                    .insert(new_path.clone(), bytes);
+            }
+            let mut folders = self.folders.lock().unwrap();
+            let entry = folders
+                .get_mut(parent)
+                .and_then(|entries| {
+                    entries
+                        .iter_mut()
+                        .find(|entry| entry.full_path_name == path)
+                })
+                .ok_or_else(|| {
+                    anime_organizer::error::AppError::MetadataFetchError(
+                        "mock rename source was not found".to_string(),
+                    )
+                })?;
+            entry.name = new_name.to_string();
+            entry.full_path_name = new_path;
             Ok(())
         }
         async fn sha256_file(&self, path: &str) -> Result<String> {
@@ -726,6 +1098,9 @@ mod tests {
                 ));
             }
             self.hash_calls.lock().unwrap().push(path.to_string());
+            if let Some(bytes) = self.remote_bytes.lock().unwrap().get(path) {
+                return Ok(format!("{:x}", Sha256::digest(bytes)));
+            }
             Ok(self
                 .hashes
                 .lock()
@@ -765,6 +1140,248 @@ mod tests {
         )
         .unwrap();
         id
+    }
+
+    fn configured_mlip_subscription(db: &RssDatabase, remove_empty_dirs: bool) -> i64 {
+        let id = db
+            .add_subscription("https://example.test/rss", None, "/source", 300)
+            .unwrap();
+        db.update_subscription_organization_settings_with_mlip(
+            id,
+            true,
+            Some("/library"),
+            false,
+            remove_empty_dirs,
+            true,
+        )
+        .unwrap();
+        db.save_download_task(id, "rss-item").unwrap();
+        db.save_download_correlation(
+            id,
+            "rss-item",
+            "abcdef1234567890abcdef1234567890abcdef12",
+            None,
+        )
+        .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn publishes_remote_mlip_with_video_hash_and_subtitle_before_cleanup() {
+        let client = MockCloud::default();
+        let video = "/source/torrent/[ANi] Test Show - 01 [1080P].mkv";
+        let subtitle = "/source/torrent/[ANi] Test Show - 01 [1080P].zh-CN.ass";
+        client.folders.lock().unwrap().extend([
+            ("/source".to_string(), vec![file("/source/torrent", true)]),
+            (
+                "/source/torrent".to_string(),
+                vec![
+                    file_with_size(video, false, 42),
+                    file_with_size(subtitle, false, 12),
+                ],
+            ),
+            ("/library".to_string(), Vec::new()),
+        ]);
+        client
+            .hashes
+            .lock()
+            .unwrap()
+            .insert(video.to_string(), "a".repeat(64));
+        let directory = tempfile::tempdir().unwrap();
+        let db = RssDatabase::new(&directory.path().join("rss.db")).unwrap();
+        let id = configured_mlip_subscription(&db, true);
+
+        organize_subscription(&db, &db.get_subscription(id).unwrap().unwrap(), &client)
+            .await
+            .unwrap();
+
+        let bytes = client
+            .remote_bytes
+            .lock()
+            .unwrap()
+            .get("/library/library.db")
+            .cloned()
+            .expect("published library.db");
+        let local_db = directory.path().join("published.db");
+        std::fs::write(&local_db, bytes).unwrap();
+        let conn = rusqlite::Connection::open(local_db).unwrap();
+        let media: (String, String) = conn
+            .query_row("SELECT path, sha256_full FROM media_file", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(
+            media,
+            (
+                "Test Show/[ANi] Test Show - 01 [1080P].mkv".to_string(),
+                "a".repeat(64)
+            )
+        );
+        let subtitle_path: String = conn
+            .query_row("SELECT path FROM media_subtitle", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            subtitle_path,
+            "Test Show/[ANi] Test Show - 01 [1080P].zh-CN.ass"
+        );
+        assert_eq!(
+            db.list_download_tasks(id, None).unwrap()[0]
+                .status
+                .as_deref(),
+            Some("completed")
+        );
+        assert!(client
+            .deletes
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|path| path == "/source/torrent"));
+    }
+
+    #[tokio::test]
+    async fn existing_remote_mlip_is_downloaded_updated_and_replaced() {
+        let client = MockCloud::default();
+        let video = "/source/torrent/[ANi] Test Show - 02 [1080P].mkv";
+        client.folders.lock().unwrap().extend([
+            ("/source".to_string(), vec![file("/source/torrent", true)]),
+            (
+                "/source/torrent".to_string(),
+                vec![file_with_size(video, false, 84)],
+            ),
+        ]);
+        client
+            .hashes
+            .lock()
+            .unwrap()
+            .insert(video.to_string(), "c".repeat(64));
+        let directory = tempfile::tempdir().unwrap();
+        let initial_path = directory.path().join("initial.db");
+        let mut initial = LibraryIndexRecord::new(
+            "Existing Show".to_string(),
+            1,
+            1.0,
+            "Existing Show/01.mkv".to_string(),
+            &directory.path().join("not-mounted.mkv"),
+        );
+        initial.sha256_full = Some("d".repeat(64));
+        let mut cached = LibraryIndexRecord::new(
+            "Test Show".to_string(),
+            1,
+            2.0,
+            "Test Show/[ANi] Test Show - 02 [1080P].mkv".to_string(),
+            &directory.path().join("not-mounted-cached.mkv"),
+        );
+        cached.size = Some(84);
+        cached.sha256_full = Some("c".repeat(64));
+        LibraryIndex::update_remote_database(&initial_path, "/library", &[initial, cached])
+            .unwrap();
+        let conn = rusqlite::Connection::open(&initial_path).unwrap();
+        conn.execute(
+            "UPDATE series SET summary = 'keep me' WHERE title = 'Existing Show'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let initial_bytes = std::fs::read(&initial_path).unwrap();
+        client
+            .remote_bytes
+            .lock()
+            .unwrap()
+            .insert("/library/library.db".to_string(), initial_bytes.clone());
+        client.folders.lock().unwrap().insert(
+            "/library".to_string(),
+            vec![file_with_size(
+                "/library/library.db",
+                false,
+                initial_bytes.len() as i64,
+            )],
+        );
+        let db = RssDatabase::new(&directory.path().join("rss.db")).unwrap();
+        let id = configured_mlip_subscription(&db, false);
+
+        organize_subscription(&db, &db.get_subscription(id).unwrap().unwrap(), &client)
+            .await
+            .unwrap();
+
+        let published = client
+            .remote_bytes
+            .lock()
+            .unwrap()
+            .get("/library/library.db")
+            .cloned()
+            .unwrap();
+        let published_path = directory.path().join("published-existing.db");
+        std::fs::write(&published_path, published).unwrap();
+        let conn = rusqlite::Connection::open(published_path).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT summary FROM series WHERE title = 'Existing Show'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "keep me"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM media_file", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert!(!client
+            .hash_calls
+            .lock()
+            .unwrap()
+            .contains(&video.to_string()));
+        assert!(!client
+            .remote_bytes
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|path| path.ends_with(".bak") || path.ends_with(".tmp")));
+    }
+
+    #[tokio::test]
+    async fn remote_mlip_upload_failure_preserves_source_and_retryable_task() {
+        let client = MockCloud::default();
+        let video = "/source/torrent/[ANi] Test Show - 01 [1080P].mkv";
+        client.folders.lock().unwrap().extend([
+            ("/source".to_string(), vec![file("/source/torrent", true)]),
+            (
+                "/source/torrent".to_string(),
+                vec![file_with_size(video, false, 42)],
+            ),
+            ("/library".to_string(), Vec::new()),
+        ]);
+        client
+            .hashes
+            .lock()
+            .unwrap()
+            .insert(video.to_string(), "b".repeat(64));
+        client.fail_uploads.store(1, Ordering::SeqCst);
+        let directory = tempfile::tempdir().unwrap();
+        let db = RssDatabase::new(&directory.path().join("rss.db")).unwrap();
+        let id = configured_mlip_subscription(&db, true);
+
+        let error = organize_subscription(&db, &db.get_subscription(id).unwrap().unwrap(), &client)
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("transient upload failure"));
+        assert!(client.moves.lock().unwrap().is_empty());
+        assert!(client.deletes.lock().unwrap().is_empty());
+        assert!(client
+            .folders
+            .lock()
+            .unwrap()
+            .get("/source/torrent")
+            .is_some_and(|files| files.iter().any(|file| file.full_path_name == video)));
+        assert_ne!(
+            db.list_download_tasks(id, None).unwrap()[0]
+                .status
+                .as_deref(),
+            Some("completed")
+        );
     }
 
     #[tokio::test]

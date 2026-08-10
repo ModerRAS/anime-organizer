@@ -506,6 +506,8 @@ struct RssSubscriptionRequest {
     #[serde(default)]
     remove_empty_dirs: Option<bool>,
     #[serde(default)]
+    remote_mlip: Option<bool>,
+    #[serde(default)]
     organize_interval_secs: Option<i64>,
 }
 
@@ -516,6 +518,7 @@ struct RssOrganizationSettings {
     organize_target_folder: Option<String>,
     organize_season_mode: bool,
     remove_empty_dirs: bool,
+    remote_mlip: bool,
     organize_interval_secs: i64,
 }
 
@@ -537,6 +540,9 @@ fn organization_settings(
         remove_empty_dirs: request
             .remove_empty_dirs
             .unwrap_or_else(|| existing.is_some_and(|subscription| subscription.remove_empty_dirs)),
+        remote_mlip: request
+            .remote_mlip
+            .unwrap_or_else(|| existing.is_some_and(|subscription| subscription.remote_mlip)),
         organize_interval_secs: request.organize_interval_secs.unwrap_or_else(|| {
             existing.map_or(300, |subscription| subscription.organize_interval_secs)
         }),
@@ -733,7 +739,7 @@ async fn create_rss_subscription(
         request.connection_id,
     ) {
         Ok(id) => {
-            if let Err(db_error) = db.update_subscription_organization_settings(
+            if let Err(db_error) = db.update_subscription_organization_settings_with_mlip(
                 id,
                 organization.auto_organize,
                 if organization.auto_organize {
@@ -746,6 +752,7 @@ async fn create_rss_subscription(
                 },
                 organization.organize_season_mode,
                 organization.remove_empty_dirs,
+                organization.auto_organize && organization.remote_mlip,
             ) {
                 return error(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -835,7 +842,7 @@ async fn update_rss_subscription(
     ) {
         return error(StatusCode::NOT_FOUND, "not_found", db_error.to_string());
     }
-    if let Err(db_error) = db.update_subscription_organization_settings(
+    if let Err(db_error) = db.update_subscription_organization_settings_with_mlip(
         id,
         organization.auto_organize,
         if organization.auto_organize {
@@ -848,6 +855,7 @@ async fn update_rss_subscription(
         },
         organization.organize_season_mode,
         organization.remove_empty_dirs,
+        organization.auto_organize && organization.remote_mlip,
     ) {
         return error(StatusCode::NOT_FOUND, "not_found", db_error.to_string());
     }
@@ -1584,6 +1592,7 @@ mod tests {
                     organize_target_folder: None,
                     organize_season_mode: Some(true),
                     remove_empty_dirs: Some(false),
+                    remote_mlip: Some(false),
                     organize_interval_secs: Some(300),
                 })),
             )
@@ -1602,6 +1611,7 @@ mod tests {
                     organize_target_folder: None,
                     organize_season_mode: Some(true),
                     remove_empty_dirs: Some(false),
+                    remote_mlip: Some(false),
                     organize_interval_secs: Some(300),
                 })),
             )
@@ -1621,6 +1631,7 @@ mod tests {
                     organize_target_folder: None,
                     organize_season_mode: Some(true),
                     remove_empty_dirs: Some(false),
+                    remote_mlip: Some(false),
                     organize_interval_secs: Some(300),
                 })),
             )
@@ -1645,6 +1656,7 @@ mod tests {
                     organize_target_folder: Some("/anime/".to_string()),
                     organize_season_mode: Some(true),
                     remove_empty_dirs: Some(false),
+                    remote_mlip: Some(false),
                     organize_interval_secs: Some(300),
                 })),
             )
@@ -1667,8 +1679,15 @@ mod tests {
                     Some(connection_id),
                 )
                 .unwrap();
-            db.update_subscription_organization_settings(id, true, Some("/library"), false, true)
-                .unwrap();
+            db.update_subscription_organization_settings_with_mlip(
+                id,
+                true,
+                Some("/library"),
+                false,
+                true,
+                true,
+            )
+            .unwrap();
             db.set_subscription_organize_interval(id, 600).unwrap();
 
             let response = update_rss_subscription(
@@ -1684,6 +1703,7 @@ mod tests {
                     organize_target_folder: None,
                     organize_season_mode: None,
                     remove_empty_dirs: None,
+                    remote_mlip: None,
                     organize_interval_secs: None,
                 })),
             )
@@ -1701,6 +1721,7 @@ mod tests {
             );
             assert!(!subscription.organize_season_mode);
             assert!(subscription.remove_empty_dirs);
+            assert!(subscription.remote_mlip);
             assert_eq!(subscription.organize_interval_secs, 600);
         }
 
@@ -1782,6 +1803,7 @@ mod tests {
                     organize_target_folder: None,
                     organize_season_mode: Some(true),
                     remove_empty_dirs: Some(false),
+                    remote_mlip: Some(false),
                     organize_interval_secs: Some(300),
                 })),
             )

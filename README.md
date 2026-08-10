@@ -95,6 +95,8 @@ aniorg.exe --daemon
 
 WebUI 和 typed WebAPI 仅监听 `http://127.0.0.1:32145/`。有限任务由一个持久化 worker 串行执行；daemon 数据位于 `%LOCALAPPDATA%\anime-organizer\daemon.db`。CloudDrive token、用户名和密码依赖当前 Windows 用户对该目录的 ACL 保护，以明文存储在本地数据库中，但不会由 API 返回，也不会写入浏览器存储。v1 仅适用于受信任的本机单用户环境。
 
+RSS 自动整理可选启用“远端 MLIP”。启用后，daemon 将完整视频 hash 通过 CloudDrive 下载流计算，把远端整理目标根目录的 `library.db` 下载到系统临时目录执行 SQLite 增量事务，再以远端临时文件、备份重命名和 SHA-256 校验发布回同一根目录。该流程不需要也不会请求本地挂载的媒体库路径；MLIP 发布失败时不会移动源 bundle、完成 RSS 任务或删除源目录。
+
 ### 🎯 快速开始
 
 #### 基本用法
@@ -802,6 +804,8 @@ aniorg.exe --daemon
 ```
 
 The WebUI and typed WebAPI listen only on `http://127.0.0.1:32145/`. One durable worker executes finite jobs serially, with daemon state stored in `%LOCALAPPDATA%\anime-organizer\daemon.db`. CloudDrive tokens, usernames, and passwords rely on the current Windows user's ACL and are stored as plaintext in that local database; they are never returned by the API or stored in the browser. v1 is intended only for a trusted, single-user local machine.
+
+RSS automatic organization can optionally publish a remote MLIP index. The daemon hashes videos through CloudDrive download streams, downloads `library.db` from the remote organization root into a system temporary file, applies an incremental SQLite transaction, then publishes it back using a remote temporary file, backup rename, and SHA-256 verification. No locally mounted media root is requested or required. An MLIP publication failure leaves the source bundle unmoved, the RSS task unfinished, and source cleanup disabled for that attempt.
 
 ### 🎯 Quick Start
 

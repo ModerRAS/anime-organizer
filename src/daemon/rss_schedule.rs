@@ -362,6 +362,7 @@ mod tests {
             organize_target_folder: None,
             organize_season_mode: true,
             remove_empty_dirs: false,
+            remote_mlip: false,
             organize_interval_secs: 300,
             last_organize_checked_at: None,
         };

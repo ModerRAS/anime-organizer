@@ -8,7 +8,7 @@ import { formatDateTime, t, type MessageParams } from '../i18n'
 const subscriptions = ref<Subscription[]>([])
 const connections = ref<Connection[]>([])
 const editing = ref<number | null>(null)
-const form = ref({ url: '', filter_regex: '', target_folder: '/', interval_secs: 300, connection_id: null as number | null, auto_organize: false, organize_target_folder: '', organize_interval_secs: 300, organize_season_mode: true, remove_empty_dirs: false })
+const form = ref({ url: '', filter_regex: '', target_folder: '/', interval_secs: 300, connection_id: null as number | null, auto_organize: false, organize_target_folder: '', organize_interval_secs: 300, organize_season_mode: true, remove_empty_dirs: false, remote_mlip: false })
 const error = ref('')
 const notice = ref<{ key: string; params?: MessageParams } | null>(null)
 const loading = ref(false)
@@ -31,7 +31,7 @@ async function load() {
 
 function reset() {
   editing.value = null
-  form.value = { url: '', filter_regex: '', target_folder: '/', interval_secs: 300, connection_id: null, auto_organize: false, organize_target_folder: '', organize_interval_secs: 300, organize_season_mode: true, remove_empty_dirs: false }
+  form.value = { url: '', filter_regex: '', target_folder: '/', interval_secs: 300, connection_id: null, auto_organize: false, organize_target_folder: '', organize_interval_secs: 300, organize_season_mode: true, remove_empty_dirs: false, remote_mlip: false }
 }
 
 function edit(item: Subscription) {
@@ -47,6 +47,7 @@ function edit(item: Subscription) {
     organize_interval_secs: item.organize_interval_secs,
     organize_season_mode: item.organize_season_mode,
     remove_empty_dirs: item.remove_empty_dirs,
+    remote_mlip: item.remote_mlip,
   }
 }
 
@@ -212,6 +213,7 @@ onMounted(load)
         <label class="checkbox-field"><input v-model="form.auto_organize" type="checkbox" /><span>{{ t('Automatically organize completed downloads') }}</span></label>
         <label class="checkbox-field"><input v-model="form.organize_season_mode" type="checkbox" :disabled="!form.auto_organize" /><span>{{ t('Season mode') }}</span></label>
         <label class="checkbox-field"><input v-model="form.remove_empty_dirs" type="checkbox" :disabled="!form.auto_organize" /><span>{{ t('Remove empty source folders') }}</span></label>
+        <label class="checkbox-field"><input v-model="form.remote_mlip" type="checkbox" :disabled="!form.auto_organize" /><span>{{ t('Publish remote MLIP library index') }}</span></label>
       </div>
       <div class="form-actions"><button class="button secondary" type="button" :disabled="busy || loading" @click="reset">{{ t('Clear') }}</button><button class="button primary" type="submit" :disabled="busy || loading || !connections.length">{{ t(saving ? 'Saving...' : 'Save subscription') }}</button></div>
     </form>

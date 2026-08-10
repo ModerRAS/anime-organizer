@@ -4,7 +4,9 @@
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
+use std::path::Path;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_stream::StreamExt;
 use tonic::transport::{Channel, Endpoint};
 
@@ -69,6 +71,21 @@ pub trait CloudDriveClientTrait: Send + Sync {
     /// 删除远程文件或文件夹，不永久删除
     async fn delete_file(&self, _path: &str) -> Result<()> {
         Err(unsupported_operation("delete file"))
+    }
+
+    /// Download a remote file into a daemon-local temporary file.
+    async fn download_file(&self, _path: &str, _destination: &Path) -> Result<()> {
+        Err(unsupported_operation("download file"))
+    }
+
+    /// Upload a daemon-local file with a new name under a remote directory.
+    async fn upload_file(&self, _parent: &str, _name: &str, _source: &Path) -> Result<()> {
+        Err(unsupported_operation("upload file"))
+    }
+
+    /// Rename a remote file in place.
+    async fn rename_file(&self, _path: &str, _new_name: &str) -> Result<()> {
+        Err(unsupported_operation("rename file"))
     }
 
     /// 计算远程文件的完整 SHA-256
@@ -439,6 +456,118 @@ impl CloudDriveClientTrait for CloudDriveClient {
             .await
             .map_err(|error| rpc_error("DeleteFile", error))?;
         operation_result("DeleteFile", &response.into_inner())
+    }
+
+    async fn download_file(&self, path: &str, destination: &Path) -> Result<()> {
+        let channel = self.build_channel().await?;
+        let mut grpc = proto::cloud_drive_file_srv_client::CloudDriveFileSrvClient::new(channel);
+        let request = self.authenticated_request(proto::GetDownloadUrlPathRequest {
+            path: path.to_string(),
+            preview: false,
+            lazy_read: false,
+            get_direct_url: true,
+        })?;
+        let info = grpc
+            .get_download_url_path(request)
+            .await
+            .map_err(|error| rpc_error("GetDownloadUrlPath", error))?
+            .into_inner();
+        let (http, request) = self.download_request(&info)?;
+        let mut response = http
+            .execute(request)
+            .await
+            .map_err(|_| AppError::MetadataFetchError("Remote file download failed".to_string()))?;
+        if !response.status().is_success() {
+            return Err(AppError::MetadataFetchError(format!(
+                "Remote file download failed with HTTP {}",
+                response.status()
+            )));
+        }
+        let mut output = tokio::fs::File::create(destination)
+            .await
+            .map_err(|error| {
+                AppError::MetadataFetchError(format!("Create local download file failed: {error}"))
+            })?;
+        while let Some(chunk) = response.chunk().await.map_err(|_| {
+            AppError::MetadataFetchError("Remote file download stream failed".to_string())
+        })? {
+            output.write_all(&chunk).await.map_err(|error| {
+                AppError::MetadataFetchError(format!("Write local download file failed: {error}"))
+            })?;
+        }
+        output.flush().await.map_err(|error| {
+            AppError::MetadataFetchError(format!("Flush local download file failed: {error}"))
+        })
+    }
+
+    async fn upload_file(&self, parent: &str, name: &str, source: &Path) -> Result<()> {
+        let channel = self.build_channel().await?;
+        let mut client = proto::cloud_drive_file_srv_client::CloudDriveFileSrvClient::new(channel);
+        let handle = client
+            .create_file(self.authenticated_request(proto::CreateFileRequest {
+                parent_path: parent.to_string(),
+                file_name: name.to_string(),
+            })?)
+            .await
+            .map_err(|error| rpc_error("CreateFile", error))?
+            .into_inner()
+            .file_handle;
+        let upload_result = async {
+            let mut input = tokio::fs::File::open(source).await.map_err(|error| {
+                AppError::MetadataFetchError(format!("Open local upload file failed: {error}"))
+            })?;
+            let mut buffer = vec![0_u8; 1024 * 1024];
+            let mut offset = 0_u64;
+            loop {
+                let length = input.read(&mut buffer).await.map_err(|error| {
+                    AppError::MetadataFetchError(format!("Read local upload file failed: {error}"))
+                })?;
+                if length == 0 {
+                    break;
+                }
+                let written = client
+                    .write_to_file(self.authenticated_request(proto::WriteFileRequest {
+                        file_handle: handle,
+                        start_pos: offset,
+                        length: length as u64,
+                        buffer: buffer[..length].to_vec(),
+                        close_file: false,
+                    })?)
+                    .await
+                    .map_err(|error| rpc_error("WriteToFile", error))?
+                    .into_inner()
+                    .bytes_written;
+                if written != length as u64 {
+                    return Err(AppError::MetadataFetchError(format!(
+                        "WriteToFile wrote {written} of {length} bytes"
+                    )));
+                }
+                offset += written;
+            }
+            Ok(())
+        }
+        .await;
+        let close_result = client
+            .close_file(self.authenticated_request(proto::CloseFileRequest {
+                file_handle: handle,
+            })?)
+            .await
+            .map_err(|error| rpc_error("CloseFile", error))
+            .and_then(|response| operation_result("CloseFile", &response.into_inner()));
+        upload_result.and(close_result)
+    }
+
+    async fn rename_file(&self, path: &str, new_name: &str) -> Result<()> {
+        let channel = self.build_channel().await?;
+        let mut client = proto::cloud_drive_file_srv_client::CloudDriveFileSrvClient::new(channel);
+        let response = client
+            .rename_file(self.authenticated_request(proto::RenameFileRequest {
+                the_file_path: path.to_string(),
+                new_name: new_name.to_string(),
+            })?)
+            .await
+            .map_err(|error| rpc_error("RenameFile", error))?;
+        operation_result("RenameFile", &response.into_inner())
     }
 
     async fn sha256_file(&self, path: &str) -> Result<String> {

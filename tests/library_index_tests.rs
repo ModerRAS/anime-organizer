@@ -22,6 +22,73 @@ fn table_names(conn: &Connection) -> Vec<String> {
 }
 
 #[test]
+fn remote_database_update_initializes_v4_and_preserves_existing_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("downloaded-library.db");
+    let mut first = LibraryIndexRecord::new(
+        "Remote Show".to_string(),
+        1,
+        1.0,
+        "Remote Show/01.mkv".to_string(),
+        &dir.path().join("not-mounted.mkv"),
+    );
+    first.size = Some(42);
+    first.sha256_full = Some("a".repeat(64));
+    first.subtitle_paths = vec!["Remote Show/01.zh-CN.ass".to_string()];
+
+    LibraryIndex::update_remote_database(&database, "/remote/library", &[first]).unwrap();
+    let conn = Connection::open(&database).unwrap();
+    assert_eq!(
+        conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        4
+    );
+    conn.execute(
+        "UPDATE series SET summary = 'preserved metadata' WHERE title = 'Remote Show'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut second = LibraryIndexRecord::new(
+        "Remote Show".to_string(),
+        1,
+        2.0,
+        "Remote Show/02.mkv".to_string(),
+        &dir.path().join("still-not-mounted.mkv"),
+    );
+    second.size = Some(84);
+    second.sha256_full = Some("b".repeat(64));
+    LibraryIndex::update_remote_database(&database, "/remote/library", &[second]).unwrap();
+
+    let conn = Connection::open(database).unwrap();
+    let summary: String = conn
+        .query_row(
+            "SELECT summary FROM series WHERE title = 'Remote Show'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(summary, "preserved metadata");
+    let media_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM media_file", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(media_count, 2);
+    let subtitle: String = conn
+        .query_row("SELECT path FROM media_subtitle", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(subtitle, "Remote Show/01.zh-CN.ass");
+    let root: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'library_root'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(root.replace('\\', "/"), "/remote/library");
+}
+
+#[test]
 fn rebuild_creates_mlip_v4_schema_with_real_foreign_keys() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path();

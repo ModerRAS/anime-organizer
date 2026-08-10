@@ -1159,6 +1159,116 @@ impl LibraryIndex {
         let _ = std::fs::remove_file(&paths.local);
         result
     }
+
+    /// Read reusable full hashes from a downloaded remote MLIP database.
+    pub fn cached_remote_media_hashes(
+        database_path: &Path,
+    ) -> Result<HashMap<(String, Option<i64>), String>> {
+        let conn = Connection::open(database_path).map_err(|error| {
+            AppError::LibraryIndexError(format!("打开远端 MLIP hash 缓存失败: {error}"))
+        })?;
+        validate_user_version(&conn)?;
+        if !column_exists(&conn, "media_file", "sha256_full")? {
+            return Ok(HashMap::new());
+        }
+        let mut statement = conn
+            .prepare("SELECT path, size, sha256_full FROM media_file WHERE sha256_full IS NOT NULL")
+            .map_err(|error| {
+                AppError::LibraryIndexError(format!("读取远端 MLIP hash 缓存失败: {error}"))
+            })?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    (row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?),
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|error| {
+                AppError::LibraryIndexError(format!("查询远端 MLIP hash 缓存失败: {error}"))
+            })?;
+        let mut hashes = HashMap::new();
+        for row in rows {
+            let (key, hash) = row.map_err(|error| {
+                AppError::LibraryIndexError(format!("解析远端 MLIP hash 缓存失败: {error}"))
+            })?;
+            if hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                hashes.insert(key, hash.to_ascii_lowercase());
+            }
+        }
+        Ok(hashes)
+    }
+
+    /// Incrementally update a downloaded remote MLIP database without scanning media.
+    ///
+    /// `database_path` is a daemon-local temporary file. `remote_root` is stored
+    /// only as the logical MLIP library root and is never accessed locally.
+    pub fn update_remote_database(
+        database_path: &Path,
+        remote_root: &str,
+        records: &[LibraryIndexRecord],
+    ) -> Result<LibraryIndexStats> {
+        let creating = !database_path.exists();
+        if let Some(parent) = database_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                AppError::LibraryIndexError(format!("创建远端 MLIP 临时目录失败: {error}"))
+            })?;
+        }
+        let mut conn = Connection::open(database_path).map_err(|error| {
+            AppError::LibraryIndexError(format!("打开远端 MLIP 临时数据库失败: {error}"))
+        })?;
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(|error| AppError::LibraryIndexError(format!("设置 PRAGMA 失败: {error}")))?;
+        if creating {
+            conn.execute_batch(MLIP_SCHEMA_SQL)
+                .and_then(|_| conn.execute_batch(MLIP_V4_SCHEMA_SQL))
+                .map_err(|error| {
+                    AppError::LibraryIndexError(format!("初始化远端 MLIP v4 失败: {error}"))
+                })?;
+        }
+        let version = validate_user_version(&conn)?;
+        if version != 4 {
+            return Err(AppError::LibraryIndexError(format!(
+                "远端 RSS MLIP 仅支持 schema v4，当前版本为 {version}"
+            )));
+        }
+        ensure_media_hash_column(&conn)?;
+
+        let tx = conn.transaction().map_err(|error| {
+            AppError::LibraryIndexError(format!("开始远端 MLIP 事务失败: {error}"))
+        })?;
+        upsert_meta(&tx, Path::new(remote_root), true, 4)?;
+        upsert_capabilities(&tx, true)?;
+        for record in records {
+            insert_record(&tx, record, None)?;
+        }
+        tx.commit().map_err(|error| {
+            AppError::LibraryIndexError(format!("提交远端 MLIP 事务失败: {error}"))
+        })?;
+        validate_database(&conn)?;
+        read_stats(&conn)
+    }
+}
+
+fn validate_database(conn: &Connection) -> Result<()> {
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|error| AppError::LibraryIndexError(format!("校验媒体库索引失败: {error}")))?;
+    if integrity != "ok" {
+        return Err(AppError::LibraryIndexError(format!(
+            "媒体库索引完整性校验失败: {integrity}"
+        )));
+    }
+    let foreign_key_errors: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .map_err(|error| AppError::LibraryIndexError(format!("校验媒体库外键失败: {error}")))?;
+    if foreign_key_errors != 0 {
+        return Err(AppError::LibraryIndexError(format!(
+            "媒体库索引存在 {foreign_key_errors} 个外键错误"
+        )));
+    }
+    Ok(())
 }
 
 fn read_refresh_artwork(
