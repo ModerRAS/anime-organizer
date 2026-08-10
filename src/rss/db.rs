@@ -741,7 +741,25 @@ impl RssDatabase {
             .map_err(|error| AppError::MetadataFetchError(format!("提交下载任务失败: {error}")))
     }
 
-    /// Save the CloudDrive OfflineFile correlation for an RSS download task.
+    /// Return whether a previously submitted item still lacks the v1 BTIH
+    /// needed to correlate it with one CloudDrive offline task.
+    pub fn download_task_needs_correlation(
+        &self,
+        subscription_id: i64,
+        item_hash: &str,
+    ) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM download_tasks WHERE subscription_id = ?1 AND item_hash = ?2 AND trim(COALESCE(info_hash, '')) = '')",
+                params![subscription_id, item_hash],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                AppError::MetadataFetchError(format!("查询下载关联状态失败: {error}"))
+            })
+    }
+
+    /// Save a missing CloudDrive OfflineFile correlation for an RSS task.
     pub fn save_download_correlation(
         &self,
         subscription_id: i64,
@@ -752,12 +770,14 @@ impl RssDatabase {
         let changed = self
             .conn
             .execute(
-                "UPDATE download_tasks SET info_hash = ?1, remote_name = ?2 WHERE subscription_id = ?3 AND item_hash = ?4",
+                "UPDATE download_tasks SET info_hash = ?1, remote_name = ?2 WHERE subscription_id = ?3 AND item_hash = ?4 AND trim(COALESCE(info_hash, '')) = ''",
                 params![info_hash, remote_name, subscription_id, item_hash],
             )
             .map_err(|e| AppError::MetadataFetchError(format!("保存下载关联失败: {e}")))?;
         if changed == 0 {
-            return Err(AppError::MetadataFetchError("下载任务不存在".to_string()));
+            return Err(AppError::MetadataFetchError(
+                "下载任务不存在或已有下载关联".to_string(),
+            ));
         }
         Ok(())
     }

@@ -60,6 +60,8 @@ impl RssProcessor {
 
             let item_hash = compute_item_hash(item.guid.as_deref(), &item.title);
             if db.is_item_processed(subscription_id, &item_hash)? {
+                self.backfill_download_correlation(db, subscription_id, &item_hash, item, verbose)
+                    .await?;
                 if verbose {
                     info!("跳过（已处理）: {}", item.title);
                 }
@@ -94,28 +96,59 @@ impl RssProcessor {
         Ok(submitted)
     }
 
-    async fn resolve_and_submit(
+    async fn backfill_download_correlation(
         &self,
+        db: &RssDatabase,
+        subscription_id: i64,
+        item_hash: &str,
         item: &RssItem,
-        target_folder: &str,
         verbose: bool,
-    ) -> Result<Option<String>> {
-        let magnet = if let Some(ref magnet) = item.magnet {
-            magnet.clone()
-        } else if let Some(ref torrent_url) = item.torrent_url {
+    ) -> Result<()> {
+        if !db.download_task_needs_correlation(subscription_id, item_hash)? {
+            return Ok(());
+        }
+        let magnet = match self.resolve_magnet(item, verbose).await {
+            Ok(magnet) => magnet,
+            Err(error) => {
+                warn!("回填下载关联失败 '{}': {error}", item.title);
+                return Ok(());
+            }
+        };
+        let Some(info_hash) = normalize_magnet_info_hash(&magnet) else {
+            warn!("回填下载关联失败 '{}': 无有效的 v1 BTIH", item.title);
+            return Ok(());
+        };
+        db.save_download_correlation(subscription_id, item_hash, &info_hash, None)?;
+        info!("已回填下载关联: {}", item.title);
+        Ok(())
+    }
+
+    async fn resolve_magnet(&self, item: &RssItem, verbose: bool) -> Result<String> {
+        if let Some(ref magnet) = item.magnet {
+            return Ok(magnet.clone());
+        }
+        if let Some(ref torrent_url) = item.torrent_url {
             if verbose {
                 info!("下载 .torrent: {}", torrent_url);
             }
             let proxy_config = ProxyConfig::from_env();
             let client =
                 build_http_client(&proxy_config).unwrap_or_else(|_| reqwest::Client::new());
-            download_torrent_to_magnet(&client, torrent_url).await?
-        } else {
-            return Err(AppError::MetadataFetchError(format!(
-                "RSS 条目 '{}' 没有 magnet 或 torrent URL",
-                item.title
-            )));
-        };
+            return download_torrent_to_magnet(&client, torrent_url).await;
+        }
+        Err(AppError::MetadataFetchError(format!(
+            "RSS 条目 '{}' 没有 magnet 或 torrent URL",
+            item.title
+        )))
+    }
+
+    async fn resolve_and_submit(
+        &self,
+        item: &RssItem,
+        target_folder: &str,
+        verbose: bool,
+    ) -> Result<Option<String>> {
+        let magnet = self.resolve_magnet(item, verbose).await?;
 
         if verbose {
             info!("提交 magnet 到 CloudDrive2");
@@ -174,7 +207,41 @@ fn normalize_btih(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_magnet_info_hash;
+    use super::{normalize_magnet_info_hash, RssProcessor};
+    use crate::error::Result;
+    use crate::rss::client::{proto, CloudDriveClientTrait};
+    use crate::rss::db::RssDatabase;
+    use crate::rss::http_client::HttpClientTrait;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct StaticHttp;
+
+    #[async_trait]
+    impl HttpClientTrait for StaticHttp {
+        async fn get(&self, _: &str) -> Result<String> {
+            Ok("<rss><channel><item><title>Legacy Episode</title><guid>legacy-item</guid><enclosure url=\"magnet:?xt=urn:btih:ABCDEF1234567890ABCDEF1234567890ABCDEF12\" /></item></channel></rss>".to_string())
+        }
+    }
+
+    struct CountingCloud(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl CloudDriveClientTrait for CountingCloud {
+        async fn login(&mut self, _: &str, _: &str) -> Result<String> {
+            Ok(String::new())
+        }
+
+        async fn add_offline_files(&self, _: Vec<String>, _: &str) -> Result<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn list_folder(&self, _: &str) -> Result<Vec<proto::CloudDriveFile>> {
+            Ok(Vec::new())
+        }
+    }
 
     #[test]
     fn normalizes_hex_magnet_btih_without_retaining_trackers() {
@@ -191,5 +258,62 @@ mod tests {
                 .as_deref(),
             Some("0000000000000000000000000000000000000000")
         );
+    }
+
+    #[tokio::test]
+    async fn backfills_legacy_info_hash_without_resubmitting_download() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = RssDatabase::new(&directory.path().join("rss.db")).unwrap();
+        let subscription_id = db
+            .add_subscription("https://example.test/rss", None, "/source", 300)
+            .unwrap();
+        db.record_submitted_item(subscription_id, "legacy-item", "Legacy Episode", None)
+            .unwrap();
+        let submissions = Arc::new(AtomicUsize::new(0));
+        let processor = RssProcessor::new(
+            Arc::new(StaticHttp),
+            Arc::new(CountingCloud(submissions.clone())),
+        );
+
+        assert_eq!(
+            processor
+                .process_subscription(
+                    &db,
+                    subscription_id,
+                    "https://example.test/rss",
+                    &None,
+                    "/source",
+                    false,
+                )
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(submissions.load(Ordering::SeqCst), 0);
+        let task = db
+            .list_download_tasks(subscription_id, None)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            task.info_hash.as_deref(),
+            Some("abcdef1234567890abcdef1234567890abcdef12")
+        );
+
+        assert_eq!(
+            processor
+                .process_subscription(
+                    &db,
+                    subscription_id,
+                    "https://example.test/rss",
+                    &None,
+                    "/source",
+                    false,
+                )
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(submissions.load(Ordering::SeqCst), 0);
     }
 }
