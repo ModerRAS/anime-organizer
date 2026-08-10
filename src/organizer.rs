@@ -187,8 +187,16 @@ impl FileOrganizer {
     }
 
     /// 扫描一次批处理根目录中的所有外部字幕候选。
+    ///
+    /// 单文件任务（例如 qBittorrent 完成钩子）从文件的父目录扫描，
+    /// 以便发现同级或字幕子目录中的外挂字幕。
     pub fn collect_external_subtitle_candidates(root: &Path) -> Vec<PathBuf> {
-        WalkDir::new(root)
+        let search_root = if root.is_dir() {
+            root
+        } else {
+            root.parent().unwrap_or(root)
+        };
+        WalkDir::new(search_root)
             .min_depth(1)
             .into_iter()
             .filter_map(|entry| entry.ok())

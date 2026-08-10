@@ -1872,7 +1872,7 @@ mod tests {
     }
 
     #[test]
-    fn organize_entry_copies_nested_subtitles_and_indexes_them() {
+    fn organize_entry_file_source_copies_nested_subtitles_and_indexes_them() {
         let source = tempfile::tempdir().unwrap();
         let target = tempfile::tempdir().unwrap();
         let source_video = source.path().join("[ANi] Test Anime - 01 [1080P].mkv");
@@ -1886,7 +1886,7 @@ mod tests {
         .unwrap();
 
         run_organize_entry(OrganizeArgs {
-            source: Some(source.path().to_path_buf()),
+            source: Some(source_video),
             target: Some(target.path().to_path_buf()),
             mode: OperationMode::Copy,
             library_index: true,
@@ -1903,10 +1903,13 @@ mod tests {
             .with_file_name("[ANi] Test Anime - 01 [1080P].zh.srt")
             .exists());
         let conn = rusqlite::Connection::open(LibraryIndex::database_path(target.path())).unwrap();
-        let subtitle_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM media_subtitle", [], |row| row.get(0))
+        let subtitle_path: String = conn
+            .query_row("SELECT path FROM media_subtitle", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(subtitle_count, 1);
+        assert_eq!(
+            subtitle_path,
+            "Test Anime/[ANi] Test Anime - 01 [1080P].zh.srt"
+        );
     }
 
     #[test]
