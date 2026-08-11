@@ -14,6 +14,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) const SCHEDULER_INTERVAL: Duration = Duration::from_secs(30);
 
+type ProgressReporter<'a> = dyn Fn(&str, Option<usize>, Option<usize>, &str) + 'a;
+
 #[derive(Clone)]
 pub(crate) struct RssRuntime {
     pub(crate) cloud: CloudDriveState,
@@ -23,6 +25,14 @@ pub(crate) struct RssRuntime {
 pub(crate) async fn execute(
     spec: JobSpec,
     runtime: &RssRuntime,
+) -> std::result::Result<JobResult, String> {
+    execute_with_progress(spec, runtime, &|_, _, _, _| {}).await
+}
+
+pub(crate) async fn execute_with_progress(
+    spec: JobSpec,
+    runtime: &RssRuntime,
+    progress: &ProgressReporter<'_>,
 ) -> std::result::Result<JobResult, String> {
     let db = RssDatabase::new(&runtime.rss_db_path).map_err(|error| error.to_string())?;
     let submitted = match spec {
@@ -47,6 +57,12 @@ pub(crate) async fn execute(
             total
         }
         JobSpec::RemoteRssOrganize { subscription_id } => {
+            progress(
+                "info",
+                None,
+                None,
+                &format!("Loading RSS subscription {subscription_id} and CloudDrive connection"),
+            );
             let subscription = db
                 .get_subscription(subscription_id)
                 .map_err(|error| error.to_string())?
@@ -69,8 +85,25 @@ pub(crate) async fn execute(
                 .authenticated_client(&connection)
                 .await
                 .map_err(|error| error.to_string())?;
-            let summary =
-                super::remote_organize::organize_subscription(&db, &subscription, &*client).await?;
+            progress(
+                "info",
+                None,
+                None,
+                &format!(
+                    "Authenticated CloudDrive connection {connection_id}; source='{}', target='{}', remote_mlip={}, remove_empty_dirs={}",
+                    subscription.target_folder,
+                    subscription.organize_target_folder.as_deref().unwrap_or("<missing>"),
+                    subscription.remote_mlip,
+                    subscription.remove_empty_dirs
+                ),
+            );
+            let summary = super::remote_organize::organize_subscription_with_progress(
+                &db,
+                &subscription,
+                &*client,
+                progress,
+            )
+            .await?;
             return Ok(JobResult {
                 summary: format!(
                     "Remote RSS organize moved {} media file(s), removed {} empty source folder(s), skipped {} conflict(s), left {} uncorrelated legacy task(s)",

@@ -268,10 +268,25 @@ fn execute(
             })
         }
         #[cfg(feature = "clouddrive")]
-        JobSpec::RssPoll { .. } | JobSpec::RssPollAll | JobSpec::RemoteRssOrganize { .. } => {
+        JobSpec::RssPoll { .. } | JobSpec::RssPollAll => {
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|error| format!("failed to create RSS runtime: {error}"))?;
             runtime.block_on(super::rss_schedule::execute(spec.clone(), rss_runtime))
+        }
+        #[cfg(feature = "clouddrive")]
+        JobSpec::RemoteRssOrganize { .. } => {
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|error| format!("failed to create RSS runtime: {error}"))?;
+            runtime.block_on(super::rss_schedule::execute_with_progress(
+                spec.clone(),
+                rss_runtime,
+                &|level, current, total, message| {
+                    let current = current.and_then(|value| i64::try_from(value).ok());
+                    let total = total.and_then(|value| i64::try_from(value).ok());
+                    let _ = queue.set_detailed_progress(job.id, current, total, message);
+                    let _ = queue.append_log(job.id, level, message);
+                },
+            ))
         }
         #[cfg(feature = "clouddrive")]
         JobSpec::CloudAddOffline(args) => execute_cloud_add_offline(args, rss_runtime),

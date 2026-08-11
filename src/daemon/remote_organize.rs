@@ -13,6 +13,8 @@ use std::time::UNIX_EPOCH;
 
 static REMOTE_MLIP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+type ProgressReporter<'a> = dyn Fn(&str, Option<usize>, Option<usize>, &str) + 'a;
+
 #[derive(Debug, Default, Serialize)]
 pub(crate) struct RemoteOrganizeSummary {
     pub(crate) finished_directories: usize,
@@ -23,10 +25,20 @@ pub(crate) struct RemoteOrganizeSummary {
     pub(crate) uncorrelated_legacy_tasks: i64,
 }
 
+#[cfg(test)]
 pub(crate) async fn organize_subscription(
     db: &RssDatabase,
     subscription: &Subscription,
     client: &dyn CloudDriveClientTrait,
+) -> Result<RemoteOrganizeSummary, String> {
+    organize_subscription_with_progress(db, subscription, client, &|_, _, _, _| {}).await
+}
+
+pub(crate) async fn organize_subscription_with_progress(
+    db: &RssDatabase,
+    subscription: &Subscription,
+    client: &dyn CloudDriveClientTrait,
+    progress: &ProgressReporter<'_>,
 ) -> Result<RemoteOrganizeSummary, String> {
     let target = subscription
         .organize_target_folder
@@ -38,6 +50,18 @@ pub(crate) async fn organize_subscription(
     let target_root = canonical_remote_path(target)
         .ok_or_else(|| "remote organize target must be an absolute remote path".to_string())?;
     validate_remote_organize_paths(&source_root, &target_root)?;
+    progress(
+        "info",
+        None,
+        None,
+        &format!(
+            "Starting remote organization: subscription={}, source='{source_root}', target='{target_root}', season_mode={}, remote_mlip={}, remove_empty_dirs={}",
+            subscription.id,
+            subscription.organize_season_mode,
+            subscription.remote_mlip,
+            subscription.remove_empty_dirs
+        ),
+    );
 
     let tasks = db
         .list_download_tasks(subscription.id, None)
@@ -56,6 +80,7 @@ pub(crate) async fn organize_subscription(
         .list_folder_fresh(&source_root)
         .await
         .map_err(|error| error.to_string())?;
+    let source_entry_count = source_entries.len();
     let mut source_entries_by_name = HashMap::new();
     for entry in source_entries {
         source_entries_by_name
@@ -70,6 +95,16 @@ pub(crate) async fn organize_subscription(
         .list_offline_files_by_path(&source_root)
         .await
         .map_err(|error| error.to_string())?;
+    let offline_file_count = offline_files.len();
+    progress(
+        "info",
+        None,
+        None,
+        &format!(
+            "Loaded {} RSS task(s), {source_entry_count} source root entry/entries, {offline_file_count} CloudDrive offline task(s), {uncorrelated_legacy_tasks} uncorrelated legacy task(s)",
+            tasks.len()
+        ),
+    );
     let mut offline_hash_counts = HashMap::new();
     for offline in &offline_files {
         if let Some(hash) = normalize_info_hash(&offline.info_hash) {
@@ -108,6 +143,15 @@ pub(crate) async fn organize_subscription(
     // A successful reconciliation advances only the organization schedule.
     db.mark_subscription_organize_checked(subscription.id)
         .map_err(|error| error.to_string())?;
+    progress(
+        "info",
+        Some(0),
+        Some(finished_roots.len()),
+        &format!(
+            "Reconciled CloudDrive status: {} completed root(s) are eligible for planning",
+            finished_roots.len()
+        ),
+    );
 
     let mut summary = RemoteOrganizeSummary {
         finished_directories: finished_roots.len(),
@@ -117,11 +161,32 @@ pub(crate) async fn organize_subscription(
     let mut planned_roots = Vec::new();
     let mut planned_destination_names = HashSet::new();
     let mut ensured_destinations = HashSet::new();
-    for (offline_name, task_id, info_hash) in finished_roots {
+    let finished_root_count = finished_roots.len();
+    for (root_index, (offline_name, task_id, info_hash)) in finished_roots.into_iter().enumerate() {
+        progress(
+            "info",
+            Some(root_index + 1),
+            Some(finished_root_count),
+            &format!(
+                "Planning root {}/{}: '{}' (task_id={task_id}, info_hash={info_hash})",
+                root_index + 1,
+                finished_root_count,
+                offline_name
+            ),
+        );
         let Some(root_entry) = source_entries_by_name
             .get(&offline_name)
             .and_then(Option::as_ref)
         else {
+            progress(
+                "warning",
+                Some(root_index + 1),
+                Some(finished_root_count),
+                &format!(
+                    "Skipped root '{}': no unique matching entry exists under '{}'",
+                    offline_name, source_root
+                ),
+            );
             continue;
         };
         let root = join_remote_path(&source_root, &offline_name);
@@ -141,6 +206,18 @@ pub(crate) async fn organize_subscription(
             .filter(|file| is_external_subtitle(&file.path))
             .map(|file| PathBuf::from(&file.path))
             .collect::<Vec<_>>();
+        progress(
+            "info",
+            Some(root_index + 1),
+            Some(finished_root_count),
+            &format!(
+                "Scanned root '{}': {} file(s), {} media candidate(s), {} subtitle candidate(s)",
+                root,
+                tree.files.len(),
+                tree.files.len().saturating_sub(subtitle_candidates.len()),
+                subtitle_candidates.len()
+            ),
+        );
         let sizes_by_path = tree
             .files
             .iter()
@@ -158,12 +235,30 @@ pub(crate) async fn organize_subscription(
             .filter(|file| !is_external_subtitle(&file.path))
         {
             let Some(anime) = FilenameParser::parse(Path::new(&media.path)) else {
+                progress(
+                    "warning",
+                    Some(root_index + 1),
+                    Some(finished_root_count),
+                    &format!(
+                        "Skipped root '{offline_name}': filename parser rejected '{}'",
+                        media.path
+                    ),
+                );
                 invalid_root = true;
                 break;
             };
             let episode = match anime.episode.parse::<f64>() {
                 Ok(episode) if episode.is_finite() => episode,
                 _ => {
+                    progress(
+                        "warning",
+                        Some(root_index + 1),
+                        Some(finished_root_count),
+                        &format!(
+                            "Skipped root '{offline_name}': invalid episode '{}' parsed from '{}'",
+                            anime.episode, media.path
+                        ),
+                    );
                     invalid_root = true;
                     break;
                 }
@@ -176,6 +271,15 @@ pub(crate) async fn organize_subscription(
                 .iter()
                 .any(|component| !safe_component(component))
             {
+                progress(
+                    "warning",
+                    Some(root_index + 1),
+                    Some(finished_root_count),
+                    &format!(
+                        "Skipped root '{offline_name}': parsed destination contains an unsafe component: {:?}",
+                        components
+                    ),
+                );
                 invalid_root = true;
                 break;
             }
@@ -187,6 +291,14 @@ pub(crate) async fn organize_subscription(
                 .iter()
                 .any(|path| !claimed_subtitles.insert(path.clone()))
             {
+                progress(
+                    "warning",
+                    Some(root_index + 1),
+                    Some(finished_root_count),
+                    &format!(
+                        "Skipped root '{offline_name}': a subtitle matched more than one media file"
+                    ),
+                );
                 invalid_root = true;
                 break;
             }
@@ -200,18 +312,64 @@ pub(crate) async fn organize_subscription(
                 })
                 .collect::<Vec<_>>();
             files.push(media.clone());
-            groups.push((
-                destination_path(&target_root, &components),
-                files,
-                series_title,
-                season,
-                episode,
-            ));
+            let destination = destination_path(&target_root, &components);
+            progress(
+                "info",
+                Some(root_index + 1),
+                Some(finished_root_count),
+                &format!(
+                    "Parsed '{}': series='{}', season={}, episode={}, destination='{}', matched_subtitles={}",
+                    media.path,
+                    series_title,
+                    season,
+                    episode,
+                    destination,
+                    subtitles.len()
+                ),
+            );
+            for subtitle in &subtitles {
+                progress(
+                    "info",
+                    Some(root_index + 1),
+                    Some(finished_root_count),
+                    &format!(
+                        "Subtitle mapping: '{}' -> '{}'",
+                        subtitle.display(),
+                        join_remote_path(
+                            &destination,
+                            subtitle
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("<invalid-name>")
+                        )
+                    ),
+                );
+            }
+            groups.push((destination, files, series_title, season, episode));
         }
         if claimed_subtitles.len() != subtitle_candidates.len() {
+            progress(
+                "warning",
+                Some(root_index + 1),
+                Some(finished_root_count),
+                &format!(
+                    "Skipped root '{offline_name}': {} subtitle file(s) were not uniquely matched",
+                    subtitle_candidates
+                        .len()
+                        .saturating_sub(claimed_subtitles.len())
+                ),
+            );
             invalid_root = true;
         }
         if invalid_root || groups.is_empty() {
+            if groups.is_empty() && !invalid_root {
+                progress(
+                    "warning",
+                    Some(root_index + 1),
+                    Some(finished_root_count),
+                    &format!("Skipped root '{offline_name}': no media bundle was parsed"),
+                );
+            }
             continue;
         }
 
@@ -242,6 +400,16 @@ pub(crate) async fn organize_subscription(
             {
                 let mut hashes_match = true;
                 for (file, name) in files.iter().zip(&names) {
+                    let target_path = join_remote_path(&destination, name);
+                    progress(
+                        "info",
+                        Some(root_index + 1),
+                        Some(finished_root_count),
+                        &format!(
+                            "Verifying same-size conflict by SHA-256: source='{}', destination='{}'",
+                            file.path, target_path
+                        ),
+                    );
                     // The only remote reads: one streaming SHA-256 for each
                     // side of a same-name, same-size conflict.
                     let source_hash = client
@@ -249,7 +417,7 @@ pub(crate) async fn organize_subscription(
                         .await
                         .map_err(|error| error.to_string())?;
                     let target_hash = client
-                        .sha256_file(&join_remote_path(&destination, name))
+                        .sha256_file(&target_path)
                         .await
                         .map_err(|error| error.to_string())?;
                     if source_hash != target_hash {
@@ -258,9 +426,28 @@ pub(crate) async fn organize_subscription(
                     }
                 }
                 if hashes_match {
+                    progress(
+                        "info",
+                        Some(root_index + 1),
+                        Some(finished_root_count),
+                        &format!(
+                            "Duplicate bundle verified by SHA-256: source file(s) {:?}; existing destination='{}'",
+                            files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(),
+                            destination
+                        ),
+                    );
                     GroupAction::DeleteDuplicates
                 } else {
                     summary.skipped_conflicts += 1;
+                    progress(
+                        "warning",
+                        Some(root_index + 1),
+                        Some(finished_root_count),
+                        &format!(
+                            "Skipped root '{offline_name}': same-size destination conflict failed SHA-256 verification at '{}'",
+                            destination
+                        ),
+                    );
                     conflicted = true;
                     continue;
                 }
@@ -268,6 +455,17 @@ pub(crate) async fn organize_subscription(
                 // Mixed bundles and unequal-size collisions preserve both
                 // sides without opening a remote download stream.
                 summary.skipped_conflicts += 1;
+                progress(
+                    "warning",
+                    Some(root_index + 1),
+                    Some(finished_root_count),
+                    &format!(
+                        "Skipped root '{offline_name}': destination conflict at '{}' ({} of {} names already exist or sizes differ)",
+                        destination,
+                        conflict_count,
+                        files.len()
+                    ),
+                );
                 conflicted = true;
                 continue;
             };
@@ -300,6 +498,14 @@ pub(crate) async fn organize_subscription(
                 .any(|name| planned_destination_names.contains(name))
         {
             summary.skipped_conflicts += 1;
+            progress(
+                "warning",
+                Some(root_index + 1),
+                Some(finished_root_count),
+                &format!(
+                    "Skipped root '{offline_name}': two planned bundles target the same remote filename"
+                ),
+            );
             continue;
         }
         planned_destination_names.extend(root_destination_names);
@@ -315,6 +521,16 @@ pub(crate) async fn organize_subscription(
             }
         }
 
+        progress(
+            "info",
+            Some(root_index + 1),
+            Some(finished_root_count),
+            &format!(
+                "Planned root '{offline_name}': {} bundle(s), {} file(s)",
+                planned.len(),
+                planned.iter().map(|group| group.files.len()).sum::<usize>()
+            ),
+        );
         planned_roots.push(PlannedRoot {
             root,
             root_is_directory: root_entry.is_directory,
@@ -324,23 +540,72 @@ pub(crate) async fn organize_subscription(
         });
     }
 
+    let planned_group_count = planned_roots
+        .iter()
+        .map(|root| root.groups.len())
+        .sum::<usize>();
+    progress(
+        "info",
+        Some(planned_roots.len()),
+        Some(finished_root_count),
+        &format!(
+            "Planning finished: {} root(s), {planned_group_count} media bundle(s), {} conflict(s) skipped",
+            planned_roots.len(),
+            summary.skipped_conflicts
+        ),
+    );
+
     if subscription.remote_mlip && !planned_roots.is_empty() {
         let groups = planned_roots
             .iter()
             .flat_map(|root| root.groups.iter().cloned())
             .collect::<Vec<_>>();
-        publish_remote_mlip(client, &target_root, &groups).await?;
+        publish_remote_mlip(client, &target_root, &groups, progress).await?;
+    } else if !subscription.remote_mlip {
+        progress(
+            "info",
+            None,
+            None,
+            "Remote MLIP publication is disabled for this subscription",
+        );
     }
 
+    let mut completed_actions = 0usize;
     for planned_root in planned_roots {
         for group in planned_root
             .groups
             .iter()
             .filter(|group| group.action == GroupAction::Move)
         {
+            completed_actions += 1;
+            let mappings = group
+                .files
+                .iter()
+                .zip(&group.names)
+                .map(|(file, name)| {
+                    format!(
+                        "'{}' -> '{}'",
+                        file.path,
+                        join_remote_path(&group.destination, name)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            progress(
+                "info",
+                Some(completed_actions),
+                Some(planned_group_count),
+                &format!(
+                    "Moving bundle {completed_actions}/{planned_group_count}: series='{}', season={}, episode={}; {mappings}",
+                    group.series_title, group.season, group.episode
+                ),
+            );
             let existing = inspect_destination(client, &group.destination).await?;
             if group.names.iter().any(|name| existing.contains_key(name)) {
-                return Err("remote destination changed during organization".to_string());
+                return Err(format!(
+                    "remote destination changed before move: destination='{}', planned_names={:?}",
+                    group.destination, group.names
+                ));
             }
             client
                 .move_files(
@@ -350,16 +615,39 @@ pub(crate) async fn organize_subscription(
                 .await
                 .map_err(|error| error.to_string())?;
             if !group_was_moved(client, group).await? {
-                return Err("CloudDrive did not move every planned bundle member".to_string());
+                return Err(format!(
+                    "CloudDrive did not move every planned bundle member to '{}': {:?}",
+                    group.destination, group.names
+                ));
             }
             summary.moved_media += 1;
             summary.moved_files += group.files.len();
+            progress(
+                "info",
+                Some(completed_actions),
+                Some(planned_group_count),
+                &format!(
+                    "Move verified for series='{}', season={}, episode={} in '{}'",
+                    group.series_title, group.season, group.episode, group.destination
+                ),
+            );
         }
         for group in planned_root
             .groups
             .iter()
             .filter(|group| group.action == GroupAction::DeleteDuplicates)
         {
+            completed_actions += 1;
+            progress(
+                "info",
+                Some(completed_actions),
+                Some(planned_group_count),
+                &format!(
+                    "Removing verified duplicate source bundle {completed_actions}/{planned_group_count}: {:?}; keeping destination='{}'",
+                    group.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(),
+                    group.destination
+                ),
+            );
             for file in &group.files {
                 // DeleteFile is CloudDrive's non-permanent delete. It is only
                 // used after both full hashes proved the target is identical.
@@ -370,6 +658,15 @@ pub(crate) async fn organize_subscription(
             }
             summary.moved_media += 1;
             summary.moved_files += group.files.len();
+            progress(
+                "info",
+                Some(completed_actions),
+                Some(planned_group_count),
+                &format!(
+                    "Verified duplicate source bundle removed; destination retained at '{}'",
+                    group.destination
+                ),
+            );
         }
 
         if subscription.remove_empty_dirs && planned_root.root_is_directory {
@@ -385,6 +682,15 @@ pub(crate) async fn organize_subscription(
                     .await
                     .map_err(|error| error.to_string())?;
                 summary.removed_empty_directories += 1;
+                progress(
+                    "info",
+                    Some(completed_actions),
+                    Some(planned_group_count),
+                    &format!(
+                        "Removed freshly confirmed empty source root '{}'",
+                        planned_root.root
+                    ),
+                );
             }
         }
         db.complete_download_task(
@@ -393,7 +699,29 @@ pub(crate) async fn organize_subscription(
             &planned_root.info_hash,
         )
         .map_err(|error| error.to_string())?;
+        progress(
+            "info",
+            Some(completed_actions),
+            Some(planned_group_count),
+            &format!(
+                "Completed RSS task {} for source root '{}' (info_hash={})",
+                planned_root.task_id, planned_root.root, planned_root.info_hash
+            ),
+        );
     }
+    progress(
+        "info",
+        Some(completed_actions),
+        Some(planned_group_count),
+        &format!(
+            "Remote organization finished: moved_media={}, moved_files={}, skipped_conflicts={}, removed_empty_directories={}, uncorrelated_legacy_tasks={}",
+            summary.moved_media,
+            summary.moved_files,
+            summary.skipped_conflicts,
+            summary.removed_empty_directories,
+            summary.uncorrelated_legacy_tasks
+        ),
+    );
     Ok(summary)
 }
 
@@ -454,7 +782,17 @@ async fn publish_remote_mlip(
     client: &dyn CloudDriveClientTrait,
     target_root: &str,
     groups: &[PlannedGroup],
+    progress: &ProgressReporter<'_>,
 ) -> Result<(), String> {
+    progress(
+        "info",
+        Some(0),
+        Some(groups.len()),
+        &format!(
+            "Preparing remote MLIP for {} media bundle(s) under '{target_root}'",
+            groups.len()
+        ),
+    );
     let contents = inspect_destination(client, target_root).await?;
     let had_database = contents.contains_key(anime_organizer::library_index::DATABASE_FILENAME);
     let database_path = join_remote_path(
@@ -463,10 +801,34 @@ async fn publish_remote_mlip(
     );
     let local = LocalTempDatabase::new();
     if had_database {
+        progress(
+            "info",
+            None,
+            None,
+            &format!("Downloading existing remote MLIP '{database_path}'"),
+        );
         client
             .download_file(&database_path, local.path())
             .await
             .map_err(|error| error.to_string())?;
+        progress(
+            "info",
+            None,
+            None,
+            &format!(
+                "Downloaded existing remote MLIP to temporary workspace ({} bytes)",
+                std::fs::metadata(local.path())
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0)
+            ),
+        );
+    } else {
+        progress(
+            "info",
+            None,
+            None,
+            "No remote library.db exists; a new MLIP database will be created",
+        );
     }
 
     let cached_hashes = if had_database {
@@ -478,7 +840,27 @@ async fn publish_remote_mlip(
     } else {
         HashMap::new()
     };
-    let records = build_remote_index_records(client, target_root, groups, &cached_hashes).await?;
+    progress(
+        "info",
+        None,
+        None,
+        &format!(
+            "Loaded {} reusable media hash record(s) from the existing MLIP",
+            cached_hashes.len()
+        ),
+    );
+    let records =
+        build_remote_index_records(client, target_root, groups, &cached_hashes, progress).await?;
+    progress(
+        "info",
+        Some(records.len()),
+        Some(groups.len()),
+        &format!(
+            "Writing {} media record(s) to temporary MLIP",
+            records.len()
+        ),
+    );
+    let record_count = records.len();
     let local_path = local.path().to_path_buf();
     let remote_root = target_root.to_string();
     tokio::task::spawn_blocking(move || {
@@ -488,6 +870,17 @@ async fn publish_remote_mlip(
     .map_err(|error| format!("remote MLIP update task failed: {error}"))?
     .map_err(|error| error.to_string())?;
     let expected_hash = sha256_local_file(local.path())?;
+    let local_size = std::fs::metadata(local.path())
+        .map_err(|error| format!("read temporary MLIP metadata failed: {error}"))?
+        .len();
+    progress(
+        "info",
+        Some(record_count),
+        Some(groups.len()),
+        &format!(
+            "Temporary MLIP validated: {local_size} bytes, sha256={expected_hash}; uploading staged database"
+        ),
+    );
 
     let suffix = unique_suffix();
     let temporary_name = format!(".library.db.{suffix}.tmp");
@@ -498,6 +891,12 @@ async fn publish_remote_mlip(
         .upload_file(target_root, &temporary_name, local.path())
         .await
         .map_err(|error| error.to_string())?;
+    progress(
+        "info",
+        None,
+        None,
+        &format!("Uploaded staged MLIP '{temporary_path}'; verifying remote SHA-256"),
+    );
     let uploaded_hash = match client.sha256_file(&temporary_path).await {
         Ok(hash) => hash,
         Err(error) => {
@@ -519,6 +918,12 @@ async fn publish_remote_mlip(
             None => "uploaded remote MLIP hash mismatch".to_string(),
         });
     }
+    progress(
+        "info",
+        None,
+        None,
+        &format!("Staged MLIP SHA-256 verified: {uploaded_hash}"),
+    );
 
     if had_database {
         if let Err(error) = client
@@ -538,6 +943,12 @@ async fn publish_remote_mlip(
                 None => error.to_string(),
             });
         }
+        progress(
+            "info",
+            None,
+            None,
+            &format!("Renamed existing MLIP to rollback backup '{backup_path}'"),
+        );
     }
     if let Err(error) = client
         .rename_file(
@@ -563,6 +974,12 @@ async fn publish_remote_mlip(
         }
         return Err(message);
     }
+    progress(
+        "info",
+        None,
+        None,
+        &format!("Promoted staged MLIP to '{database_path}'; verifying installed SHA-256"),
+    );
 
     let installed_hash = client
         .sha256_file(&database_path)
@@ -588,6 +1005,14 @@ async fn publish_remote_mlip(
             .delete_file(&backup_path)
             .await
             .map_err(|error| error.to_string())?;
+        progress(
+            "info",
+            None,
+            None,
+            &format!("Installed MLIP verified; removed rollback backup '{backup_path}'"),
+        );
+    } else {
+        progress("info", None, None, "Installed MLIP verified");
     }
     Ok(())
 }
@@ -597,9 +1022,10 @@ async fn build_remote_index_records(
     target_root: &str,
     groups: &[PlannedGroup],
     cached_hashes: &HashMap<(String, Option<i64>), String>,
+    progress: &ProgressReporter<'_>,
 ) -> Result<Vec<LibraryIndexRecord>, String> {
     let mut records = Vec::with_capacity(groups.len());
-    for group in groups {
+    for (group_index, group) in groups.iter().enumerate() {
         let media_index = group
             .files
             .iter()
@@ -614,14 +1040,42 @@ async fn build_remote_index_records(
         };
         let relative_path = remote_relative_path(target_root, &media_target)?;
         let media_size = (media.size >= 0).then_some(media.size);
-        let sha256_full =
+        progress(
+            "info",
+            Some(group_index + 1),
+            Some(groups.len()),
+            &format!(
+                "Indexing media {}/{}: source='{}', target='{}', relative_path='{}', size={:?}",
+                group_index + 1,
+                groups.len(),
+                hash_path,
+                media_target,
+                relative_path,
+                media_size
+            ),
+        );
+        let (sha256_full, hash_source) =
             if let Some(hash) = cached_hashes.get(&(relative_path.clone(), media_size)) {
-                hash.clone()
+                (hash.clone(), "reused from existing MLIP")
             } else {
-                client
-                    .sha256_file(hash_path)
-                    .await
-                    .map_err(|error| error.to_string())?
+                progress(
+                    "info",
+                    Some(group_index + 1),
+                    Some(groups.len()),
+                    &format!(
+                        "Computing remote SHA-256 {}/{} by streaming '{}'",
+                        group_index + 1,
+                        groups.len(),
+                        hash_path
+                    ),
+                );
+                (
+                    client
+                        .sha256_file(hash_path)
+                        .await
+                        .map_err(|error| error.to_string())?,
+                    "computed from remote media",
+                )
             };
         if sha256_full.len() != 64 || !sha256_full.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("CloudDrive returned an invalid media SHA-256".to_string());
@@ -635,6 +1089,22 @@ async fn build_remote_index_records(
                 remote_relative_path(target_root, &join_remote_path(&group.destination, name))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        progress(
+            "info",
+            Some(group_index + 1),
+            Some(groups.len()),
+            &format!(
+                "MLIP record {}/{}: series='{}', season={}, episode={}, path='{}', subtitles={:?}, sha256={} ({hash_source})",
+                group_index + 1,
+                groups.len(),
+                group.series_title,
+                group.season,
+                group.episode,
+                relative_path,
+                subtitle_paths,
+                sha256_full.to_ascii_lowercase()
+            ),
+        );
         records.push(LibraryIndexRecord {
             series_title: group.series_title.clone(),
             original_title: None,
@@ -1296,9 +1766,43 @@ mod tests {
             db.save_download_correlation(id, item, hash, None).unwrap();
         }
 
-        organize_subscription(&db, &db.get_subscription(id).unwrap().unwrap(), &client)
-            .await
-            .unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured_events = Arc::clone(&events);
+        organize_subscription_with_progress(
+            &db,
+            &db.get_subscription(id).unwrap().unwrap(),
+            &client,
+            &move |level, current, total, message| {
+                captured_events.lock().unwrap().push((
+                    level.to_string(),
+                    current,
+                    total,
+                    message.to_string(),
+                ));
+            },
+        )
+        .await
+        .unwrap();
+
+        let events = events.lock().unwrap();
+        let log = events
+            .iter()
+            .map(|(_, _, _, message)| message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(log.contains(&format!("Parsed '{first_video}'")));
+        assert!(log.contains("series='First Show', season=1, episode=1"));
+        assert!(log.contains(&format!("source='{first_video}'")));
+        assert!(log.contains("target='/library/First Show/[ANi] First Show - 01 [1080P].mkv'"));
+        assert!(log.contains("Computing remote SHA-256 1/2"));
+        assert!(log.contains("MLIP record 1/2"));
+        assert!(log.contains("Moving bundle 1/2"));
+        assert!(log.contains("Move verified for series='First Show'"));
+        assert!(log.contains("Remote organization finished"));
+        assert!(events
+            .iter()
+            .any(|(_, current, total, _)| *current == Some(1) && *total == Some(2)));
+        drop(events);
 
         let temporary_hashes = client
             .hash_calls

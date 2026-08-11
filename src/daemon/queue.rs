@@ -425,11 +425,21 @@ impl QueueRepository {
     }
 
     pub(crate) fn set_progress(&self, id: i64, message: &str) -> QueueResult<()> {
+        self.set_detailed_progress(id, None, None, message)
+    }
+
+    pub(crate) fn set_detailed_progress(
+        &self,
+        id: i64,
+        current: Option<i64>,
+        total: Option<i64>,
+        message: &str,
+    ) -> QueueResult<()> {
         self.with_connection(|conn| {
             let changed = conn
                 .execute(
-                    "UPDATE jobs SET progress_message = ?1 WHERE id = ?2 AND state = 'running'",
-                    params![message, id],
+                    "UPDATE jobs SET progress_current = ?1, progress_total = ?2, progress_message = ?3 WHERE id = ?4 AND state = 'running'",
+                    params![current, total, message, id],
                 )
                 .map_err(|error| QueueError::Database(error.to_string()))?;
             if changed == 1 {
@@ -787,6 +797,29 @@ mod tests {
         let next = reopened.logs(job.id, Some(first[0].id), 100).unwrap();
         assert_eq!(next.len(), 1);
         assert_eq!(next[0].message, "started");
+    }
+
+    #[test]
+    fn detailed_progress_persists_counts_and_message() {
+        let directory = tempdir().unwrap();
+        let queue = QueueRepository::new(&directory.path().join("daemon.db")).unwrap();
+        let job = queue
+            .enqueue(&request(None, JobOrigin::Manual))
+            .unwrap()
+            .job;
+        queue.claim_next().unwrap().unwrap();
+
+        queue
+            .set_detailed_progress(job.id, Some(7), Some(19), "Hashing media 7/19")
+            .unwrap();
+
+        let stored = queue.get(job.id).unwrap();
+        assert_eq!(stored.progress_current, Some(7));
+        assert_eq!(stored.progress_total, Some(19));
+        assert_eq!(
+            stored.progress_message.as_deref(),
+            Some("Hashing media 7/19")
+        );
     }
 
     #[test]
