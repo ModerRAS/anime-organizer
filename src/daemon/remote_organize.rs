@@ -75,12 +75,9 @@ pub(crate) async fn organize_subscription_with_progress(
     );
 
     let original_mode = subscription.organize_mode == "original";
-    let mut tasks = if original_mode {
-        Vec::new()
-    } else {
-        db.list_download_tasks(subscription.id, None)
-            .map_err(|error| error.to_string())?
-    };
+    let mut tasks = db
+        .list_download_tasks(subscription.id, None)
+        .map_err(|error| error.to_string())?;
     let initial_uncorrelated_legacy_tasks = if original_mode {
         0
     } else {
@@ -104,10 +101,17 @@ pub(crate) async fn organize_subscription_with_progress(
     let mut finished_roots: Vec<(String, Option<(i64, String)>)> = Vec::new();
     let uncorrelated_legacy_tasks;
     if original_mode {
+        let completed_remote_names = tasks
+            .iter()
+            .filter(|task| task.status.as_deref() == Some("completed"))
+            .filter_map(|task| task.remote_name.as_deref())
+            .collect::<HashSet<_>>();
+        let historical_root_count = completed_remote_names.len();
         finished_roots.extend(source_entries_by_name.iter().filter_map(|(name, entry)| {
             entry
                 .as_ref()
                 .filter(|_| safe_component(name))
+                .filter(|_| !completed_remote_names.contains(name.as_str()))
                 .map(|_| (name.clone(), None))
         }));
         uncorrelated_legacy_tasks = 0;
@@ -116,7 +120,7 @@ pub(crate) async fn organize_subscription_with_progress(
             Some(0),
             Some(finished_roots.len()),
             &format!(
-                "Original mode selected {} unique source root(s) directly; CloudDrive offline tasks were not queried",
+                "Original mode selected {} unique source root(s) directly and skipped {historical_root_count} root(s) already completed in local RSS history; CloudDrive offline tasks were not queried",
                 finished_roots.len()
             ),
         );
@@ -2268,6 +2272,35 @@ mod tests {
             .is_some_and(|files| files
                 .iter()
                 .any(|file| file.name == remote_file_name(video).unwrap())));
+    }
+
+    #[tokio::test]
+    async fn original_mode_skips_roots_completed_in_local_history() {
+        let client = MockCloud::default();
+        let root_name = "completed-root";
+        client.folders.lock().unwrap().insert(
+            "/source".to_string(),
+            vec![file("/source/completed-root", true)],
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let db = RssDatabase::new(&directory.path().join("rss.db")).unwrap();
+        let id = configured_original_subscription(&db, true);
+        let item_hash = "completed-item";
+        let info_hash = "abcdef1234567890abcdef1234567890abcdef12";
+        db.save_download_task(id, item_hash).unwrap();
+        db.save_download_correlation(id, item_hash, info_hash, Some(root_name))
+            .unwrap();
+        db.complete_download_task(1, id, info_hash).unwrap();
+
+        let summary =
+            organize_subscription(&db, &db.get_subscription(id).unwrap().unwrap(), &client)
+                .await
+                .unwrap();
+
+        assert_eq!(summary.finished_directories, 0);
+        assert_eq!(client.offline_calls.load(Ordering::SeqCst), 0);
+        assert!(client.downloads.lock().unwrap().is_empty());
+        assert!(client.moves.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
