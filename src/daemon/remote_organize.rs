@@ -52,6 +52,18 @@ pub(crate) async fn organize_subscription(
         .count_uncorrelated_download_tasks(subscription.id)
         .map_err(|error| error.to_string())?;
 
+    let source_entries = client
+        .list_folder_fresh(&source_root)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut source_entries_by_name = HashMap::new();
+    for entry in source_entries {
+        source_entries_by_name
+            .entry(entry.name.clone())
+            .and_modify(|existing| *existing = None)
+            .or_insert(Some(entry));
+    }
+
     // This is the only offline-task query for a job. It is a status lookup,
     // not a filesystem listing of the RSS source root.
     let offline_files = client
@@ -106,11 +118,13 @@ pub(crate) async fn organize_subscription(
     let mut planned_destination_names = HashSet::new();
     let mut ensured_destinations = HashSet::new();
     for (offline_name, task_id, info_hash) in finished_roots {
+        let Some(root_entry) = source_entries_by_name
+            .get(&offline_name)
+            .and_then(Option::as_ref)
+        else {
+            continue;
+        };
         let root = join_remote_path(&source_root, &offline_name);
-        let root_entry = client
-            .find_file_by_path(&source_root, &offline_name)
-            .await
-            .map_err(|error| error.to_string())?;
         let tree = if root_entry.is_directory {
             list_tree(client, &root).await?
         } else {
@@ -930,6 +944,7 @@ mod tests {
         deletes: Arc<Mutex<Vec<String>>>,
         listed_paths: Arc<Mutex<Vec<String>>>,
         offline_calls: Arc<AtomicUsize>,
+        find_calls: Arc<AtomicUsize>,
         offline_files: Arc<Mutex<Vec<proto::OfflineFile>>>,
         hashes: Arc<Mutex<HashMap<String, String>>>,
         remote_bytes: Arc<Mutex<HashMap<String, Vec<u8>>>>,
@@ -979,6 +994,7 @@ mod tests {
             parent_path: &str,
             path: &str,
         ) -> Result<proto::CloudDriveFile> {
+            self.find_calls.fetch_add(1, Ordering::SeqCst);
             let full_path = join_remote_path(parent_path, path);
             if self.folders.lock().unwrap().contains_key(&full_path) {
                 return Ok(file(&full_path, true));
@@ -1292,6 +1308,16 @@ mod tests {
             .filter(|path| path.starts_with("/library/.library.db.") && path.ends_with(".tmp"))
             .count();
         assert_eq!(temporary_hashes, 1);
+        assert_eq!(client.offline_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(client.find_calls.load(Ordering::SeqCst), 0);
+        let source_root_lists = client
+            .listed_paths
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| path.as_str() == "/source")
+            .count();
+        assert_eq!(source_root_lists, 1);
         let bytes = client
             .remote_bytes
             .lock()
