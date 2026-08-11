@@ -1,17 +1,25 @@
 use anime_organizer::rss::client::{proto, CloudDriveClientTrait};
-use anime_organizer::rss::db::{RssDatabase, Subscription};
+use anime_organizer::rss::db::{DownloadTask, RssDatabase, Subscription};
+use anime_organizer::rss::proxy::{build_http_client, ProxyConfig};
+use anime_organizer::rss::torrent::download_torrent_to_magnet;
 use anime_organizer::{
     organize_directory_components, FileOrganizer, FilenameParser, LibraryIndex, LibraryIndexRecord,
 };
+use regex::Regex;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 use std::time::UNIX_EPOCH;
 
 static REMOTE_MLIP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static TORRENT_HREF_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)href\s*=\s*[\"']([^\"']+\.torrent(?:\?[^\"']*)?)[\"']"#)
+        .expect("valid DMHY torrent href regex")
+});
 
 type ProgressReporter<'a> = dyn Fn(&str, Option<usize>, Option<usize>, &str) + 'a;
 
@@ -63,16 +71,10 @@ pub(crate) async fn organize_subscription_with_progress(
         ),
     );
 
-    let tasks = db
+    let mut tasks = db
         .list_download_tasks(subscription.id, None)
         .map_err(|error| error.to_string())?;
-    let mut tasks_by_hash: HashMap<String, Vec<_>> = HashMap::new();
-    for task in &tasks {
-        if let Some(hash) = task.info_hash.as_deref().and_then(normalize_info_hash) {
-            tasks_by_hash.entry(hash).or_default().push(task);
-        }
-    }
-    let uncorrelated_legacy_tasks = db
+    let initial_uncorrelated_legacy_tasks = db
         .count_uncorrelated_download_tasks(subscription.id)
         .map_err(|error| error.to_string())?;
 
@@ -101,7 +103,7 @@ pub(crate) async fn organize_subscription_with_progress(
         None,
         None,
         &format!(
-            "Loaded {} RSS task(s), {source_entry_count} source root entry/entries, {offline_file_count} CloudDrive offline task(s), {uncorrelated_legacy_tasks} uncorrelated legacy task(s)",
+            "Loaded {} RSS task(s), {source_entry_count} source root entry/entries, {offline_file_count} CloudDrive offline task(s), {initial_uncorrelated_legacy_tasks} uncorrelated legacy task(s)",
             tasks.len()
         ),
     );
@@ -111,6 +113,36 @@ pub(crate) async fn organize_subscription_with_progress(
             *offline_hash_counts.entry(hash).or_insert(0usize) += 1;
         }
     }
+    let recovered_legacy_tasks = backfill_legacy_download_correlations(
+        db,
+        subscription.id,
+        &mut tasks,
+        &offline_files,
+        &offline_hash_counts,
+        progress,
+    )
+    .await;
+    let uncorrelated_legacy_tasks = db
+        .count_uncorrelated_download_tasks(subscription.id)
+        .map_err(|error| error.to_string())?;
+    if initial_uncorrelated_legacy_tasks > 0 {
+        progress(
+            "info",
+            Some(recovered_legacy_tasks),
+            usize::try_from(initial_uncorrelated_legacy_tasks).ok(),
+            &format!(
+                "Legacy correlation fallback recovered {recovered_legacy_tasks} task(s); {uncorrelated_legacy_tasks} remain uncorrelated"
+            ),
+        );
+    }
+
+    let mut tasks_by_hash: HashMap<String, Vec<_>> = HashMap::new();
+    for task in &tasks {
+        if let Some(hash) = task.info_hash.as_deref().and_then(normalize_info_hash) {
+            tasks_by_hash.entry(hash).or_default().push(task);
+        }
+    }
+
     let mut finished_roots = Vec::new();
     for offline in offline_files {
         let Some(info_hash) = normalize_info_hash(&offline.info_hash) else {
@@ -1307,6 +1339,221 @@ async fn group_was_moved(
 fn destination_path(root: &str, components: &[String]) -> String {
     components.iter().fold(root.to_string(), |path, component| {
         join_remote_path(&path, component)
+    })
+}
+
+async fn backfill_legacy_download_correlations(
+    db: &RssDatabase,
+    subscription_id: i64,
+    tasks: &mut [DownloadTask],
+    offline_files: &[proto::OfflineFile],
+    offline_hash_counts: &HashMap<String, usize>,
+    progress: &ProgressReporter<'_>,
+) -> usize {
+    let candidate_indices = tasks
+        .iter()
+        .enumerate()
+        .filter(|(_, task)| {
+            task.info_hash.as_deref().is_none_or(str::is_empty)
+                && task.status.as_deref() != Some("completed")
+                && dmhy_topic_url(&task.item_hash).is_some()
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if candidate_indices.is_empty() {
+        return 0;
+    }
+    let http = match build_http_client(&ProxyConfig::from_env()) {
+        Ok(client) => client,
+        Err(error) => {
+            progress(
+                "warning",
+                Some(0),
+                Some(candidate_indices.len()),
+                &format!("Legacy correlation fallback could not create HTTP client: {error}"),
+            );
+            return 0;
+        }
+    };
+
+    let mut recovered = 0usize;
+    for (position, task_index) in candidate_indices.iter().copied().enumerate() {
+        let item_hash = tasks[task_index].item_hash.clone();
+        progress(
+            "info",
+            Some(position + 1),
+            Some(candidate_indices.len()),
+            &format!(
+                "Legacy correlation fallback {}/{}: downloading DMHY torrent for task {} from '{}'",
+                position + 1,
+                candidate_indices.len(),
+                tasks[task_index].id,
+                item_hash
+            ),
+        );
+        let info_hash = match recover_dmhy_topic_info_hash(&http, &item_hash).await {
+            Ok(info_hash) => info_hash,
+            Err(error) => {
+                progress(
+                    "warning",
+                    Some(position + 1),
+                    Some(candidate_indices.len()),
+                    &format!(
+                        "Legacy correlation fallback skipped task {}: {error}",
+                        tasks[task_index].id
+                    ),
+                );
+                continue;
+            }
+        };
+        if offline_hash_counts.get(&info_hash) != Some(&1) {
+            progress(
+                "warning",
+                Some(position + 1),
+                Some(candidate_indices.len()),
+                &format!(
+                    "Legacy correlation fallback skipped task {}: computed BTIH {info_hash} does not identify exactly one CloudDrive offline task",
+                    tasks[task_index].id
+                ),
+            );
+            continue;
+        }
+        if tasks.iter().any(|task| {
+            task.info_hash
+                .as_deref()
+                .and_then(normalize_info_hash)
+                .as_deref()
+                == Some(info_hash.as_str())
+        }) {
+            progress(
+                "warning",
+                Some(position + 1),
+                Some(candidate_indices.len()),
+                &format!(
+                    "Legacy correlation fallback skipped task {}: computed BTIH {info_hash} is already assigned to another RSS task",
+                    tasks[task_index].id
+                ),
+            );
+            continue;
+        }
+        let matching_offline = offline_files.iter().find(|offline| {
+            normalize_info_hash(&offline.info_hash).as_deref() == Some(info_hash.as_str())
+        });
+        let Some(matching_offline) = matching_offline else {
+            continue;
+        };
+        if !safe_component(&matching_offline.name) {
+            progress(
+                "warning",
+                Some(position + 1),
+                Some(candidate_indices.len()),
+                &format!(
+                    "Legacy correlation fallback skipped task {}: CloudDrive returned an unsafe remote name",
+                    tasks[task_index].id
+                ),
+            );
+            continue;
+        }
+        if let Err(error) = db.save_download_correlation(
+            subscription_id,
+            &item_hash,
+            &info_hash,
+            Some(&matching_offline.name),
+        ) {
+            progress(
+                "warning",
+                Some(position + 1),
+                Some(candidate_indices.len()),
+                &format!(
+                    "Legacy correlation fallback could not persist task {}: {error}",
+                    tasks[task_index].id
+                ),
+            );
+            continue;
+        }
+        tasks[task_index].info_hash = Some(info_hash.clone());
+        tasks[task_index].remote_name = Some(matching_offline.name.clone());
+        recovered += 1;
+        progress(
+            "info",
+            Some(position + 1),
+            Some(candidate_indices.len()),
+            &format!(
+                "Legacy correlation recovered task {}: BTIH={info_hash}, remote_name='{}'",
+                tasks[task_index].id, matching_offline.name
+            ),
+        );
+    }
+    recovered
+}
+
+async fn recover_dmhy_topic_info_hash(
+    client: &reqwest::Client,
+    topic: &str,
+) -> Result<String, String> {
+    let topic_url = dmhy_topic_url(topic)
+        .ok_or_else(|| "stored item is not an allowed DMHY topic URL".to_string())?;
+    let response = client
+        .get(topic_url.clone())
+        .header(
+            reqwest::header::USER_AGENT,
+            "Mozilla/5.0 (compatible; anime-organizer/1.0)",
+        )
+        .send()
+        .await
+        .map_err(|error| format!("download DMHY topic failed: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("download DMHY topic failed: {error}"))?;
+    let html = response
+        .text()
+        .await
+        .map_err(|error| format!("read DMHY topic failed: {error}"))?;
+    let torrent_url = extract_dmhy_torrent_url(&topic_url, &html)
+        .ok_or_else(|| "DMHY topic contains no allowed .torrent link".to_string())?;
+    let magnet = download_torrent_to_magnet(client, torrent_url.as_str())
+        .await
+        .map_err(|error| format!("download or parse DMHY torrent failed: {error}"))?;
+    magnet_info_hash(&magnet)
+        .ok_or_else(|| "downloaded DMHY torrent produced no valid v1 BTIH".to_string())
+}
+
+fn dmhy_topic_url(value: &str) -> Option<url::Url> {
+    let url = url::Url::parse(value).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    ((url.scheme() == "http" || url.scheme() == "https")
+        && allowed_dmhy_host(&host)
+        && url.path().starts_with("/topics/view/")
+        && url.username().is_empty()
+        && url.password().is_none())
+    .then_some(url)
+}
+
+fn extract_dmhy_torrent_url(topic_url: &url::Url, html: &str) -> Option<url::Url> {
+    TORRENT_HREF_REGEX.captures_iter(html).find_map(|captures| {
+        let href = captures.get(1)?.as_str().replace("&amp;", "&");
+        let url = topic_url.join(&href).ok()?;
+        let host = url.host_str()?.to_ascii_lowercase();
+        ((url.scheme() == "http" || url.scheme() == "https")
+            && allowed_dmhy_host(&host)
+            && url.username().is_empty()
+            && url.password().is_none())
+        .then_some(url)
+    })
+}
+
+fn allowed_dmhy_host(host: &str) -> bool {
+    host == "dmhy.org"
+        || host.ends_with(".dmhy.org")
+        || (cfg!(test) && matches!(host, "127.0.0.1" | "localhost"))
+}
+
+fn magnet_info_hash(magnet: &str) -> Option<String> {
+    let url = url::Url::parse(magnet).ok()?;
+    url.query_pairs().find_map(|(key, value)| {
+        key.eq_ignore_ascii_case("xt")
+            .then(|| value.strip_prefix("urn:btih:"))
+            .flatten()
+            .and_then(normalize_info_hash)
     })
 }
 
@@ -2513,6 +2760,98 @@ mod tests {
                 .as_deref(),
             Some("pending")
         );
+    }
+
+    #[tokio::test]
+    async fn dmhy_legacy_fallback_downloads_torrent_computes_btih_and_persists_match() {
+        use axum::response::Html;
+        use axum::routing::get;
+        use axum::Router;
+
+        let info = b"d4:name4:test12:piece lengthi262144e6:pieces20:00000000000000000000e";
+        let torrent = [b"d4:info".as_slice(), info.as_slice(), b"e"].concat();
+        let expected_hash = format!("{:x}", sha1::Sha1::digest(info));
+        let torrent_bytes = torrent.clone();
+        let app = Router::new()
+            .route(
+                "/topics/view/legacy.html",
+                get(|| async { Html(r#"<a href="/legacy.torrent">download</a>"#) }),
+            )
+            .route(
+                "/legacy.torrent",
+                get(move || {
+                    let torrent_bytes = torrent_bytes.clone();
+                    async move { torrent_bytes }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let topic = format!("http://{address}/topics/view/legacy.html");
+
+        let directory = tempfile::tempdir().unwrap();
+        let db = RssDatabase::new(&directory.path().join("rss.db")).unwrap();
+        let subscription_id = db
+            .add_subscription("https://example.test/rss", None, "/source", 300)
+            .unwrap();
+        db.save_download_task(subscription_id, &topic).unwrap();
+        let mut tasks = db.list_download_tasks(subscription_id, None).unwrap();
+        let offline_files = vec![finished_offline("legacy-root", &expected_hash)];
+        let offline_hash_counts = HashMap::from([(expected_hash.clone(), 1usize)]);
+
+        let recovered = backfill_legacy_download_correlations(
+            &db,
+            subscription_id,
+            &mut tasks,
+            &offline_files,
+            &offline_hash_counts,
+            &|_, _, _, _| {},
+        )
+        .await;
+        server.abort();
+
+        assert_eq!(recovered, 1);
+        let task = db
+            .list_download_tasks(subscription_id, None)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(task.info_hash.as_deref(), Some(expected_hash.as_str()));
+        assert_eq!(task.remote_name.as_deref(), Some("legacy-root"));
+    }
+
+    #[test]
+    fn dmhy_legacy_fallback_extracts_only_allowed_torrent_links() {
+        let topic =
+            dmhy_topic_url("http://share.dmhy.org/topics/view/700008_legacy_item.html").unwrap();
+        let html = r#"
+            <a href="//dl.dmhy.org/2025/07/example.torrent">torrent</a>
+            <a href="https://evil.example/payload.torrent">evil</a>
+        "#;
+        assert_eq!(
+            extract_dmhy_torrent_url(&topic, html).unwrap().as_str(),
+            "http://dl.dmhy.org/2025/07/example.torrent"
+        );
+        assert!(dmhy_topic_url("https://evil.example/topics/view/1.html").is_none());
+        assert!(extract_dmhy_torrent_url(
+            &topic,
+            r#"<a href="https://evil.example/payload.torrent">evil</a>"#
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn dmhy_legacy_fallback_reads_hex_btih_from_computed_magnet() {
+        assert_eq!(
+            magnet_info_hash(
+                "magnet:?xt=urn:btih:1432A848087810103FDBC2555B0087AD8F3395A4&dn=test"
+            )
+            .as_deref(),
+            Some("1432a848087810103fdbc2555b0087ad8f3395a4")
+        );
+        assert!(magnet_info_hash("magnet:?xt=urn:btih:not-a-hash").is_none());
     }
 
     #[test]
