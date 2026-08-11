@@ -90,9 +90,10 @@ pub(crate) async fn execute_with_progress(
                 None,
                 None,
                 &format!(
-                    "Authenticated CloudDrive connection {connection_id}; source='{}', target='{}', remote_mlip={}, remove_empty_dirs={}",
+                    "Authenticated CloudDrive connection {connection_id}; source='{}', target='{}', mode={}, remote_mlip={}, remove_empty_dirs={}",
                     subscription.target_folder,
                     subscription.organize_target_folder.as_deref().unwrap_or("<missing>"),
+                    subscription.organize_mode,
                     subscription.remote_mlip,
                     subscription.remove_empty_dirs
                 ),
@@ -106,8 +107,9 @@ pub(crate) async fn execute_with_progress(
             .await?;
             return Ok(JobResult {
                 summary: format!(
-                    "Remote RSS organize moved {} media file(s), removed {} empty source folder(s), skipped {} conflict(s), left {} uncorrelated legacy task(s)",
+                    "Remote RSS organize moved {} media file(s), copied {} media file(s), removed {} empty source folder(s), skipped {} conflict(s), left {} uncorrelated legacy task(s)",
                     summary.moved_media,
+                    summary.copied_media,
                     summary.removed_empty_directories,
                     summary.skipped_conflicts,
                     summary.uncorrelated_legacy_tasks
@@ -396,6 +398,7 @@ mod tests {
             organize_season_mode: true,
             remove_empty_dirs: false,
             remote_mlip: false,
+            organize_mode: "offline".to_string(),
             organize_interval_secs: 300,
             last_organize_checked_at: None,
         };

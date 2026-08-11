@@ -95,7 +95,7 @@ aniorg.exe --daemon
 
 WebUI 和 typed WebAPI 仅监听 `http://127.0.0.1:32145/`。有限任务由一个持久化 worker 串行执行；daemon 数据位于 `%LOCALAPPDATA%\anime-organizer\daemon.db`。CloudDrive token、用户名和密码依赖当前 Windows 用户对该目录的 ACL 保护，以明文存储在本地数据库中，但不会由 API 返回，也不会写入浏览器存储。v1 仅适用于受信任的本机单用户环境。
 
-RSS 自动整理可选启用“远端 MLIP”。启用后，daemon 将完整视频 hash 通过 CloudDrive 下载流计算，把远端整理目标根目录的 `library.db` 下载到系统临时目录执行 SQLite 增量事务，再以远端临时文件、备份重命名和 SHA-256 校验发布回同一根目录。该流程不需要也不会请求本地挂载的媒体库路径；MLIP 发布失败时不会移动源 bundle、完成 RSS 任务或删除源目录。
+RSS 自动整理支持两种来源模式：`offline` 通过 BTIH 关联 CloudDrive 离线任务，`original` 直接扫描订阅配置的远端源目录，不依赖离线下载记录。启用“远端 MLIP”时，daemon 只在 hash 缓存未命中时把原始媒体下载到系统临时文件，校验大小并在本地计算完整 SHA-256；随后下载目标根目录的 `library.db` 执行 SQLite 增量事务，再通过远端临时文件、备份重命名和 SHA-256 校验发布，最后调用 CloudDrive API 移动媒体。关闭“远端 MLIP”的原始模式不会下载或 hash 媒体，而是直接调用 CloudDrive `CopyFile`；同名同大小的既有目标视为已复制，不会再次下载或复制。MLIP 发布失败时不会移动源 bundle、完成 RSS 任务或删除源目录。
 
 ### 🎯 快速开始
 

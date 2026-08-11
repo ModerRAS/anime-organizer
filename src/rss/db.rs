@@ -29,6 +29,9 @@ pub struct Subscription {
     pub remove_empty_dirs: bool,
     /// Whether automatic organization should publish a remote MLIP library.db.
     pub remote_mlip: bool,
+    /// Source selection for organization: `offline` correlates CloudDrive tasks;
+    /// `original` scans the configured remote source directory directly.
+    pub organize_mode: String,
     /// Seconds between CloudDrive offline-status checks for this subscription.
     pub organize_interval_secs: i64,
     /// Last time CloudDrive offline status was successfully reconciled.
@@ -86,6 +89,7 @@ fn subscription_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Subscripti
         organize_interval_secs: row.get(12)?,
         last_organize_checked_at: row.get(13)?,
         remote_mlip: row.get(14)?,
+        organize_mode: row.get(15)?,
     })
 }
 
@@ -139,7 +143,8 @@ impl RssDatabase {
                     remove_empty_dirs BOOLEAN NOT NULL DEFAULT 0,
                     organize_interval_secs INTEGER NOT NULL DEFAULT 300,
                     last_organize_checked_at TIMESTAMP,
-                    remote_mlip BOOLEAN NOT NULL DEFAULT 0
+                    remote_mlip BOOLEAN NOT NULL DEFAULT 0,
+                    organize_mode TEXT NOT NULL DEFAULT 'offline'
                 );
 
                 CREATE TABLE IF NOT EXISTS processed_items (
@@ -226,6 +231,13 @@ impl RssDatabase {
             "BOOLEAN NOT NULL DEFAULT 0",
         )?;
 
+        self.add_column_if_missing(
+            "subscriptions",
+            &subscription_columns,
+            "organize_mode",
+            "TEXT NOT NULL DEFAULT 'offline'",
+        )?;
+
         let download_task_columns = self.table_columns("download_tasks")?;
         self.add_column_if_missing(
             "download_tasks",
@@ -245,7 +257,7 @@ impl RssDatabase {
             )
             .map_err(|e| AppError::MetadataFetchError(format!("创建下载任务索引失败: {e}")))?;
         self.conn
-            .execute_batch("PRAGMA user_version = 5")
+            .execute_batch("PRAGMA user_version = 6")
             .map_err(|e| AppError::MetadataFetchError(format!("写入 RSS schema 版本失败: {e}")))?;
 
         Ok(())
@@ -348,11 +360,11 @@ impl RssDatabase {
     fn list_subscriptions_where(&self, enabled_only: bool) -> Result<Vec<Subscription>> {
         let mut stmt = if enabled_only {
             self.conn.prepare(
-                "SELECT id, url, filter_regex, target_folder, interval_secs, enabled, last_checked_at, connection_id, auto_organize, organize_target_folder, organize_season_mode, remove_empty_dirs, organize_interval_secs, last_organize_checked_at, remote_mlip FROM subscriptions WHERE enabled = 1 ORDER BY id",
+                "SELECT id, url, filter_regex, target_folder, interval_secs, enabled, last_checked_at, connection_id, auto_organize, organize_target_folder, organize_season_mode, remove_empty_dirs, organize_interval_secs, last_organize_checked_at, remote_mlip, organize_mode FROM subscriptions WHERE enabled = 1 ORDER BY id",
             )
         } else {
             self.conn.prepare(
-                "SELECT id, url, filter_regex, target_folder, interval_secs, enabled, last_checked_at, connection_id, auto_organize, organize_target_folder, organize_season_mode, remove_empty_dirs, organize_interval_secs, last_organize_checked_at, remote_mlip FROM subscriptions ORDER BY id",
+                "SELECT id, url, filter_regex, target_folder, interval_secs, enabled, last_checked_at, connection_id, auto_organize, organize_target_folder, organize_season_mode, remove_empty_dirs, organize_interval_secs, last_organize_checked_at, remote_mlip, organize_mode FROM subscriptions ORDER BY id",
             )
         }
         .map_err(|e| AppError::MetadataFetchError(format!("查询订阅失败: {e}")))?;
@@ -370,7 +382,7 @@ impl RssDatabase {
         let mut statement = self
             .conn
             .prepare(
-                "SELECT id, url, filter_regex, target_folder, interval_secs, enabled, last_checked_at, connection_id, auto_organize, organize_target_folder, organize_season_mode, remove_empty_dirs, organize_interval_secs, last_organize_checked_at, remote_mlip FROM subscriptions WHERE enabled = 1 AND (last_checked_at IS NULL OR datetime(last_checked_at, '+' || interval_secs || ' seconds') <= CURRENT_TIMESTAMP) ORDER BY id",
+                "SELECT id, url, filter_regex, target_folder, interval_secs, enabled, last_checked_at, connection_id, auto_organize, organize_target_folder, organize_season_mode, remove_empty_dirs, organize_interval_secs, last_organize_checked_at, remote_mlip, organize_mode FROM subscriptions WHERE enabled = 1 AND (last_checked_at IS NULL OR datetime(last_checked_at, '+' || interval_secs || ' seconds') <= CURRENT_TIMESTAMP) ORDER BY id",
             )
             .map_err(|e| AppError::MetadataFetchError(format!("查询到期订阅失败: {e}")))?;
         let rows = statement
@@ -388,7 +400,7 @@ impl RssDatabase {
         let mut statement = self
             .conn
             .prepare(
-                "SELECT id, url, filter_regex, target_folder, interval_secs, enabled, last_checked_at, connection_id, auto_organize, organize_target_folder, organize_season_mode, remove_empty_dirs, organize_interval_secs, last_organize_checked_at, remote_mlip FROM subscriptions WHERE enabled = 1 AND auto_organize = 1 AND connection_id IS NOT NULL AND organize_target_folder IS NOT NULL AND trim(organize_target_folder) != '' AND (last_organize_checked_at IS NULL OR datetime(last_organize_checked_at, '+' || organize_interval_secs || ' seconds') <= CURRENT_TIMESTAMP) AND EXISTS (SELECT 1 FROM download_tasks WHERE download_tasks.subscription_id = subscriptions.id AND trim(COALESCE(info_hash, '')) != '' AND COALESCE(status, 'pending') != 'completed') ORDER BY id",
+                "SELECT id, url, filter_regex, target_folder, interval_secs, enabled, last_checked_at, connection_id, auto_organize, organize_target_folder, organize_season_mode, remove_empty_dirs, organize_interval_secs, last_organize_checked_at, remote_mlip, organize_mode FROM subscriptions WHERE enabled = 1 AND auto_organize = 1 AND connection_id IS NOT NULL AND organize_target_folder IS NOT NULL AND trim(organize_target_folder) != '' AND (last_organize_checked_at IS NULL OR datetime(last_organize_checked_at, '+' || organize_interval_secs || ' seconds') <= CURRENT_TIMESTAMP) AND (organize_mode = 'original' OR EXISTS (SELECT 1 FROM download_tasks WHERE download_tasks.subscription_id = subscriptions.id AND trim(COALESCE(info_hash, '')) != '' AND COALESCE(status, 'pending') != 'completed')) ORDER BY id",
             )
             .map_err(|e| AppError::MetadataFetchError(format!("查询到期整理订阅失败: {e}")))?;
         let rows = statement
@@ -404,7 +416,7 @@ impl RssDatabase {
     pub fn get_subscription(&self, id: i64) -> Result<Option<Subscription>> {
         self.conn
             .query_row(
-                "SELECT id, url, filter_regex, target_folder, interval_secs, enabled, last_checked_at, connection_id, auto_organize, organize_target_folder, organize_season_mode, remove_empty_dirs, organize_interval_secs, last_organize_checked_at, remote_mlip FROM subscriptions WHERE id = ?1",
+                "SELECT id, url, filter_regex, target_folder, interval_secs, enabled, last_checked_at, connection_id, auto_organize, organize_target_folder, organize_season_mode, remove_empty_dirs, organize_interval_secs, last_organize_checked_at, remote_mlip, organize_mode FROM subscriptions WHERE id = ?1",
                 params![id],
                 subscription_from_row,
             )
@@ -477,13 +489,18 @@ impl RssDatabase {
         let remote_mlip = self
             .get_subscription(id)?
             .is_some_and(|subscription| subscription.remote_mlip);
-        self.update_subscription_organization_settings_with_mlip(
+        let organize_mode = self.get_subscription(id)?.map_or_else(
+            || "offline".to_string(),
+            |subscription| subscription.organize_mode,
+        );
+        self.update_subscription_organization_settings_with_mlip_and_mode(
             id,
             auto_organize,
             organize_target_folder,
             organize_season_mode,
             remove_empty_dirs,
             remote_mlip,
+            &organize_mode,
         )
     }
 
@@ -496,6 +513,37 @@ impl RssDatabase {
         remove_empty_dirs: bool,
         remote_mlip: bool,
     ) -> Result<()> {
+        let organize_mode = self.get_subscription(id)?.map_or_else(
+            || "offline".to_string(),
+            |subscription| subscription.organize_mode,
+        );
+        self.update_subscription_organization_settings_with_mlip_and_mode(
+            id,
+            auto_organize,
+            organize_target_folder,
+            organize_season_mode,
+            remove_empty_dirs,
+            remote_mlip,
+            &organize_mode,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_subscription_organization_settings_with_mlip_and_mode(
+        &self,
+        id: i64,
+        auto_organize: bool,
+        organize_target_folder: Option<&str>,
+        organize_season_mode: bool,
+        remove_empty_dirs: bool,
+        remote_mlip: bool,
+        organize_mode: &str,
+    ) -> Result<()> {
+        if !matches!(organize_mode, "offline" | "original") {
+            return Err(AppError::MetadataFetchError(format!(
+                "无效的 RSS 整理模式: {organize_mode}"
+            )));
+        }
         let existing = self
             .get_subscription(id)?
             .ok_or_else(|| AppError::MetadataFetchError(format!("订阅不存在: {id}")))?;
@@ -514,13 +562,14 @@ impl RssDatabase {
         let changed = self
             .conn
             .execute(
-                "UPDATE subscriptions SET auto_organize = ?1, organize_target_folder = ?2, organize_season_mode = ?3, remove_empty_dirs = ?4, remote_mlip = ?5 WHERE id = ?6",
+                "UPDATE subscriptions SET auto_organize = ?1, organize_target_folder = ?2, organize_season_mode = ?3, remove_empty_dirs = ?4, remote_mlip = ?5, organize_mode = ?6 WHERE id = ?7",
                 params![
                     auto_organize,
                     organize_target_folder,
                     organize_season_mode,
                     remove_empty_dirs,
                     remote_mlip,
+                    organize_mode,
                     id
                 ],
             )
@@ -986,7 +1035,7 @@ mod tests {
         let user_version: i32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(user_version, 5);
+        assert_eq!(user_version, 6);
 
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(subscriptions)")
@@ -1012,6 +1061,7 @@ mod tests {
             .iter()
             .any(|column| column == "last_organize_checked_at"));
         assert!(columns.iter().any(|column| column == "remote_mlip"));
+        assert!(columns.iter().any(|column| column == "organize_mode"));
 
         let download_task_columns: Vec<String> = conn
             .prepare("PRAGMA table_info(download_tasks)")
@@ -1080,6 +1130,7 @@ mod tests {
         assert!(subs[0].organize_season_mode);
         assert!(!subs[0].remove_empty_dirs);
         assert!(!subs[0].remote_mlip);
+        assert_eq!(subs[0].organize_mode, "offline");
         assert_eq!(subs[0].organize_interval_secs, 300);
         assert!(subs[0].last_organize_checked_at.is_none());
     }
@@ -1122,6 +1173,7 @@ mod tests {
         assert!(migrated.organize_season_mode);
         assert!(!migrated.remove_empty_dirs);
         assert!(!migrated.remote_mlip);
+        assert_eq!(migrated.organize_mode, "offline");
         assert_eq!(migrated.organize_interval_secs, 300);
         assert!(migrated.last_organize_checked_at.is_none());
         let tasks = db.list_download_tasks(1, None).unwrap();
@@ -1158,6 +1210,7 @@ mod tests {
         assert!(subscription.organize_season_mode);
         assert!(!subscription.remove_empty_dirs);
         assert!(!subscription.remote_mlip);
+        assert_eq!(subscription.organize_mode, "offline");
         assert_eq!(subscription.organize_interval_secs, 300);
         assert!(subscription.last_organize_checked_at.is_none());
         let task = db.list_download_tasks(1, None).unwrap().pop().unwrap();
@@ -1168,7 +1221,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(user_version, 5);
+        assert_eq!(user_version, 6);
     }
 
     #[test]
@@ -1393,6 +1446,37 @@ mod tests {
     }
 
     #[test]
+    fn original_mode_is_due_without_an_offline_task() {
+        let temp_dir = tempdir().unwrap();
+        let db = RssDatabase::new(&temp_dir.path().join("test.db")).unwrap();
+        let id = db
+            .add_subscription_with_connection(
+                "https://example.com/original.xml",
+                None,
+                "/downloads",
+                300,
+                Some(1),
+            )
+            .unwrap();
+        db.update_subscription_organization_settings_with_mlip_and_mode(
+            id,
+            true,
+            Some("/library"),
+            true,
+            false,
+            true,
+            "original",
+        )
+        .unwrap();
+
+        let due = db.list_due_organization_subscriptions().unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].organize_mode, "original");
+        db.mark_subscription_organize_checked(id).unwrap();
+        assert!(db.list_due_organization_subscriptions().unwrap().is_empty());
+    }
+
+    #[test]
     fn unfinished_correlated_tasks_can_receive_their_initial_organization_settings() {
         let temp_dir = tempdir().unwrap();
         let db = RssDatabase::new(&temp_dir.path().join("test.db")).unwrap();
@@ -1476,6 +1560,20 @@ mod tests {
             )
             .is_err());
         assert!(db.set_subscription_connection(id, Some(2)).is_err());
+        db.update_subscription_organization_settings_with_mlip_and_mode(
+            id,
+            true,
+            Some("/library"),
+            true,
+            false,
+            false,
+            "original",
+        )
+        .unwrap();
+        assert_eq!(
+            db.get_subscription(id).unwrap().unwrap().organize_mode,
+            "original"
+        );
     }
 
     #[test]

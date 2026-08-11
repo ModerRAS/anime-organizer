@@ -8,7 +8,7 @@ import { formatDateTime, t, type MessageParams } from '../i18n'
 const subscriptions = ref<Subscription[]>([])
 const connections = ref<Connection[]>([])
 const editing = ref<number | null>(null)
-const form = ref({ url: '', filter_regex: '', target_folder: '/', interval_secs: 300, connection_id: null as number | null, auto_organize: false, organize_target_folder: '', organize_interval_secs: 300, organize_season_mode: true, remove_empty_dirs: false, remote_mlip: false })
+const form = ref({ url: '', filter_regex: '', target_folder: '/', interval_secs: 300, connection_id: null as number | null, auto_organize: false, organize_target_folder: '', organize_interval_secs: 300, organize_mode: 'offline' as 'offline' | 'original', organize_season_mode: true, remove_empty_dirs: false, remote_mlip: false })
 const error = ref('')
 const notice = ref<{ key: string; params?: MessageParams } | null>(null)
 const loading = ref(false)
@@ -31,7 +31,7 @@ async function load() {
 
 function reset() {
   editing.value = null
-  form.value = { url: '', filter_regex: '', target_folder: '/', interval_secs: 300, connection_id: null, auto_organize: false, organize_target_folder: '', organize_interval_secs: 300, organize_season_mode: true, remove_empty_dirs: false, remote_mlip: false }
+  form.value = { url: '', filter_regex: '', target_folder: '/', interval_secs: 300, connection_id: null, auto_organize: false, organize_target_folder: '', organize_interval_secs: 300, organize_mode: 'offline', organize_season_mode: true, remove_empty_dirs: false, remote_mlip: false }
 }
 
 function edit(item: Subscription) {
@@ -45,6 +45,7 @@ function edit(item: Subscription) {
     auto_organize: item.auto_organize,
     organize_target_folder: item.organize_target_folder ?? '',
     organize_interval_secs: item.organize_interval_secs,
+    organize_mode: item.organize_mode,
     organize_season_mode: item.organize_season_mode,
     remove_empty_dirs: item.remove_empty_dirs,
     remote_mlip: item.remote_mlip,
@@ -179,7 +180,7 @@ onMounted(load)
       <tr v-for="item in subscriptions" :key="item.id">
         <td><RouterLink :to="`/rss/${item.id}`">{{ item.url }}</RouterLink><small class="table-subtext">{{ item.filter_regex || t('No filter') }}</small></td>
         <td class="error-cell">{{ item.target_folder }}</td>
-        <td><span>{{ t(item.auto_organize ? 'Automatic' : 'Off') }}</span><small v-if="item.auto_organize" class="table-subtext error-cell">{{ item.organize_target_folder }}</small><small v-if="item.auto_organize" class="table-subtext">{{ t('Last organization check') }}: {{ item.last_organize_checked_at ? formatDateTime(item.last_organize_checked_at) : t('Never') }}</small></td>
+        <td><span>{{ t(item.auto_organize ? 'Automatic' : 'Off') }}</span><small v-if="item.auto_organize" class="table-subtext">{{ t(item.organize_mode === 'original' ? 'Original source mode' : 'Offline task mode') }}</small><small v-if="item.auto_organize" class="table-subtext error-cell">{{ item.organize_target_folder }}</small><small v-if="item.auto_organize" class="table-subtext">{{ t('Last organization check') }}: {{ item.last_organize_checked_at ? formatDateTime(item.last_organize_checked_at) : t('Never') }}</small></td>
         <td>{{ t('{seconds}s', { seconds: item.interval_secs }) }}</td>
         <td>{{ item.auto_organize ? t('{seconds}s', { seconds: item.organize_interval_secs }) : '-' }}</td>
         <td>{{ t(item.enabled ? 'Enabled' : 'Disabled') }}<small v-if="item.connection_id === null" class="table-subtext">{{ t('Connection required') }}</small></td>
@@ -207,6 +208,7 @@ onMounted(load)
         <label class="form-field"><span>{{ t('Feed polling interval seconds') }}</span><input v-model.number="form.interval_secs" type="number" min="30" max="86400" required /></label>
         <label class="form-field"><span>{{ t('CloudDrive connection') }}</span><select v-model.number="form.connection_id" required><option :value="null" disabled>{{ t('Choose a connection') }}</option><option v-for="connection in connections" :key="connection.id" :value="connection.id">{{ connection.name }}</option></select></label>
         <label class="form-field"><span>{{ t('Remote organize target folder') }}</span><input v-model="form.organize_target_folder" type="text" autocomplete="off" placeholder="/Anime" :disabled="!form.auto_organize" :required="form.auto_organize" /></label>
+        <label class="form-field"><span>{{ t('Organization mode') }}</span><select v-model="form.organize_mode" :disabled="!form.auto_organize"><option value="offline">{{ t('Offline task mode') }}</option><option value="original">{{ t('Original source mode') }}</option></select></label>
         <label class="form-field"><span>{{ t('Organization interval seconds') }}</span><input v-model.number="form.organize_interval_secs" type="number" min="60" max="86400" :disabled="!form.auto_organize" :required="form.auto_organize" /></label>
       </div>
       <div class="checkbox-grid">

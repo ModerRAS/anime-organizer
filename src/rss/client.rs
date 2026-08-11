@@ -59,6 +59,11 @@ pub trait CloudDriveClientTrait: Send + Sync {
         Err(unsupported_operation("move files"))
     }
 
+    /// 将远程文件复制到目标目录，目标冲突时跳过
+    async fn copy_files(&self, _paths: Vec<String>, _destination: &str) -> Result<()> {
+        Err(unsupported_operation("copy files"))
+    }
+
     /// 通过远程父目录和路径查找文件
     async fn find_file_by_path(
         &self,
@@ -424,6 +429,22 @@ impl CloudDriveClientTrait for CloudDriveClient {
             .await
             .map_err(|error| rpc_error("MoveFile", error))?;
         operation_result("MoveFile", &response.into_inner())
+    }
+
+    async fn copy_files(&self, paths: Vec<String>, destination: &str) -> Result<()> {
+        let channel = self.build_channel().await?;
+        let mut client = proto::cloud_drive_file_srv_client::CloudDriveFileSrvClient::new(channel);
+        let request = self.authenticated_request(proto::CopyFileRequest {
+            the_file_paths: paths,
+            dest_path: destination.to_string(),
+            conflict_policy: Some(proto::copy_file_request::ConflictPolicy::Skip as i32),
+            handle_conflict_recursively: None,
+        })?;
+        let response = client
+            .copy_file(request)
+            .await
+            .map_err(|error| rpc_error("CopyFile", error))?;
+        operation_result("CopyFile", &response.into_inner())
     }
 
     async fn find_file_by_path(

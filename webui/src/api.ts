@@ -45,8 +45,8 @@ export class ApiError extends Error {
 }
 export const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error)
 
-export type Subscription = { id: number; url: string; filter_regex: string | null; target_folder: string; interval_secs: number; enabled: boolean; last_checked_at: string | null; connection_id: number | null; auto_organize: boolean; organize_target_folder: string | null; organize_interval_secs: number; organize_season_mode: boolean; remove_empty_dirs: boolean; remote_mlip: boolean; last_organize_checked_at: string | null }
-export type SubscriptionInput = Pick<Subscription, 'url' | 'target_folder' | 'interval_secs' | 'connection_id'> & Partial<Pick<Subscription, 'filter_regex' | 'auto_organize' | 'organize_target_folder' | 'organize_interval_secs' | 'organize_season_mode' | 'remove_empty_dirs' | 'remote_mlip'>>
+export type Subscription = { id: number; url: string; filter_regex: string | null; target_folder: string; interval_secs: number; enabled: boolean; last_checked_at: string | null; connection_id: number | null; auto_organize: boolean; organize_target_folder: string | null; organize_interval_secs: number; organize_season_mode: boolean; remove_empty_dirs: boolean; remote_mlip: boolean; organize_mode: 'offline' | 'original'; last_organize_checked_at: string | null }
+export type SubscriptionInput = Pick<Subscription, 'url' | 'target_folder' | 'interval_secs' | 'connection_id'> & Partial<Pick<Subscription, 'filter_regex' | 'auto_organize' | 'organize_target_folder' | 'organize_interval_secs' | 'organize_season_mode' | 'remove_empty_dirs' | 'remote_mlip' | 'organize_mode'>>
 export type SubscriptionUpdate = Required<SubscriptionInput>
 export type ProcessedItem = { id: number; subscription_id: number; item_hash: string; title: string | null; processed_at: string | null }
 export type DownloadTask = { id: number; subscription_id: number; item_hash: string; cloud_name: string | null; info_hash: string | null; remote_name: string | null; status: string | null; added_at: string | null; completed_at: string | null }
@@ -84,7 +84,7 @@ export const api = {
   enqueueTorrentScrape: (args: { source: 'dmhy' | 'nyaa' | 'all'; query: string | null; pages: number; output: string | null; headed: boolean }) => request<{ job: Job; duplicate: boolean }>('/jobs', { method: 'POST', body: JSON.stringify({ origin: 'manual', job: { type: 'torrent_scrape', args } }) }),
   enqueueCloudAddOffline: (args: { connection_id: number; url: string; target: string }) => request<{ job: Job; duplicate: boolean }>('/jobs', { method: 'POST', body: JSON.stringify({ origin: 'manual', job: { type: 'cloud_add_offline', args } }) }),
   subscriptions: () => request<{ subscriptions: Subscription[] }>('/rss/subscriptions'),
-  createSubscription: (value: SubscriptionInput) => request<Subscription>('/rss/subscriptions', { method: 'POST', body: JSON.stringify({ auto_organize: false, organize_target_folder: null, organize_interval_secs: 300, organize_season_mode: true, remove_empty_dirs: false, remote_mlip: false, ...value }) }),
+  createSubscription: (value: SubscriptionInput) => request<Subscription>('/rss/subscriptions', { method: 'POST', body: JSON.stringify({ auto_organize: false, organize_target_folder: null, organize_interval_secs: 300, organize_season_mode: true, remove_empty_dirs: false, remote_mlip: false, organize_mode: 'offline', ...value }) }),
   updateSubscription: (id: number, value: SubscriptionUpdate) => request<Subscription>(`/rss/subscriptions/${id}`, { method: 'PUT', body: JSON.stringify(value) }),
   deleteSubscription: (id: number) => request<void>(`/rss/subscriptions/${id}`, { method: 'DELETE' }),
   setEnabled: (id: number, enabled: boolean) => request<Subscription>(`/rss/subscriptions/${id}/${enabled ? 'enable' : 'disable'}`, { method: 'POST' }),

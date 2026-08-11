@@ -508,6 +508,8 @@ struct RssSubscriptionRequest {
     #[serde(default)]
     remote_mlip: Option<bool>,
     #[serde(default)]
+    organize_mode: Option<String>,
+    #[serde(default)]
     organize_interval_secs: Option<i64>,
 }
 
@@ -519,6 +521,7 @@ struct RssOrganizationSettings {
     organize_season_mode: bool,
     remove_empty_dirs: bool,
     remote_mlip: bool,
+    organize_mode: String,
     organize_interval_secs: i64,
 }
 
@@ -543,6 +546,11 @@ fn organization_settings(
         remote_mlip: request
             .remote_mlip
             .unwrap_or_else(|| existing.is_some_and(|subscription| subscription.remote_mlip)),
+        organize_mode: request
+            .organize_mode
+            .clone()
+            .or_else(|| existing.map(|subscription| subscription.organize_mode.clone()))
+            .unwrap_or_else(|| "offline".to_string()),
         organize_interval_secs: request.organize_interval_secs.unwrap_or_else(|| {
             existing.map_or(300, |subscription| subscription.organize_interval_secs)
         }),
@@ -633,6 +641,13 @@ fn validate_rss_request(
                 "filter_regex is invalid",
             ));
         }
+    }
+    if !matches!(organization.organize_mode.as_str(), "offline" | "original") {
+        return Err(error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            "organize_mode must be 'offline' or 'original'",
+        ));
     }
     if !(60..=86_400).contains(&organization.organize_interval_secs) {
         return Err(error(
@@ -739,7 +754,7 @@ async fn create_rss_subscription(
         request.connection_id,
     ) {
         Ok(id) => {
-            if let Err(db_error) = db.update_subscription_organization_settings_with_mlip(
+            if let Err(db_error) = db.update_subscription_organization_settings_with_mlip_and_mode(
                 id,
                 organization.auto_organize,
                 if organization.auto_organize {
@@ -753,6 +768,7 @@ async fn create_rss_subscription(
                 organization.organize_season_mode,
                 organization.remove_empty_dirs,
                 organization.auto_organize && organization.remote_mlip,
+                &organization.organize_mode,
             ) {
                 return error(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -842,7 +858,7 @@ async fn update_rss_subscription(
     ) {
         return error(StatusCode::NOT_FOUND, "not_found", db_error.to_string());
     }
-    if let Err(db_error) = db.update_subscription_organization_settings_with_mlip(
+    if let Err(db_error) = db.update_subscription_organization_settings_with_mlip_and_mode(
         id,
         organization.auto_organize,
         if organization.auto_organize {
@@ -856,6 +872,7 @@ async fn update_rss_subscription(
         organization.organize_season_mode,
         organization.remove_empty_dirs,
         organization.auto_organize && organization.remote_mlip,
+        &organization.organize_mode,
     ) {
         return error(StatusCode::NOT_FOUND, "not_found", db_error.to_string());
     }
@@ -1593,6 +1610,7 @@ mod tests {
                     organize_season_mode: Some(true),
                     remove_empty_dirs: Some(false),
                     remote_mlip: Some(false),
+                    organize_mode: None,
                     organize_interval_secs: Some(300),
                 })),
             )
@@ -1612,6 +1630,7 @@ mod tests {
                     organize_season_mode: Some(true),
                     remove_empty_dirs: Some(false),
                     remote_mlip: Some(false),
+                    organize_mode: None,
                     organize_interval_secs: Some(300),
                 })),
             )
@@ -1632,6 +1651,7 @@ mod tests {
                     organize_season_mode: Some(true),
                     remove_empty_dirs: Some(false),
                     remote_mlip: Some(false),
+                    organize_mode: None,
                     organize_interval_secs: Some(300),
                 })),
             )
@@ -1657,6 +1677,7 @@ mod tests {
                     organize_season_mode: Some(true),
                     remove_empty_dirs: Some(false),
                     remote_mlip: Some(false),
+                    organize_mode: None,
                     organize_interval_secs: Some(300),
                 })),
             )
@@ -1704,6 +1725,7 @@ mod tests {
                     organize_season_mode: None,
                     remove_empty_dirs: None,
                     remote_mlip: None,
+                    organize_mode: None,
                     organize_interval_secs: None,
                 })),
             )
@@ -1722,6 +1744,7 @@ mod tests {
             assert!(!subscription.organize_season_mode);
             assert!(subscription.remove_empty_dirs);
             assert!(subscription.remote_mlip);
+            assert_eq!(subscription.organize_mode, "offline");
             assert_eq!(subscription.organize_interval_secs, 600);
         }
 
@@ -1804,6 +1827,7 @@ mod tests {
                     organize_season_mode: Some(true),
                     remove_empty_dirs: Some(false),
                     remote_mlip: Some(false),
+                    organize_mode: None,
                     organize_interval_secs: Some(300),
                 })),
             )

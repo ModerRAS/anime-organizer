@@ -28,6 +28,8 @@ pub(crate) struct RemoteOrganizeSummary {
     pub(crate) finished_directories: usize,
     pub(crate) moved_media: usize,
     pub(crate) moved_files: usize,
+    pub(crate) copied_media: usize,
+    pub(crate) copied_files: usize,
     pub(crate) skipped_conflicts: usize,
     pub(crate) removed_empty_directories: usize,
     pub(crate) uncorrelated_legacy_tasks: i64,
@@ -63,20 +65,28 @@ pub(crate) async fn organize_subscription_with_progress(
         None,
         None,
         &format!(
-            "Starting remote organization: subscription={}, source='{source_root}', target='{target_root}', season_mode={}, remote_mlip={}, remove_empty_dirs={}",
+            "Starting remote organization: subscription={}, source='{source_root}', target='{target_root}', mode={}, season_mode={}, remote_mlip={}, remove_empty_dirs={}",
             subscription.id,
+            subscription.organize_mode,
             subscription.organize_season_mode,
             subscription.remote_mlip,
             subscription.remove_empty_dirs
         ),
     );
 
-    let mut tasks = db
-        .list_download_tasks(subscription.id, None)
-        .map_err(|error| error.to_string())?;
-    let initial_uncorrelated_legacy_tasks = db
-        .count_uncorrelated_download_tasks(subscription.id)
-        .map_err(|error| error.to_string())?;
+    let original_mode = subscription.organize_mode == "original";
+    let mut tasks = if original_mode {
+        Vec::new()
+    } else {
+        db.list_download_tasks(subscription.id, None)
+            .map_err(|error| error.to_string())?
+    };
+    let initial_uncorrelated_legacy_tasks = if original_mode {
+        0
+    } else {
+        db.count_uncorrelated_download_tasks(subscription.id)
+            .map_err(|error| error.to_string())?
+    };
 
     let source_entries = client
         .list_folder_fresh(&source_root)
@@ -91,99 +101,121 @@ pub(crate) async fn organize_subscription_with_progress(
             .or_insert(Some(entry));
     }
 
-    // This is the only offline-task query for a job. It is a status lookup,
-    // not a filesystem listing of the RSS source root.
-    let offline_files = client
-        .list_offline_files_by_path(&source_root)
-        .await
-        .map_err(|error| error.to_string())?;
-    let offline_file_count = offline_files.len();
-    progress(
-        "info",
-        None,
-        None,
-        &format!(
-            "Loaded {} RSS task(s), {source_entry_count} source root entry/entries, {offline_file_count} CloudDrive offline task(s), {initial_uncorrelated_legacy_tasks} uncorrelated legacy task(s)",
-            tasks.len()
-        ),
-    );
-    let mut offline_hash_counts = HashMap::new();
-    for offline in &offline_files {
-        if let Some(hash) = normalize_info_hash(&offline.info_hash) {
-            *offline_hash_counts.entry(hash).or_insert(0usize) += 1;
-        }
-    }
-    let recovered_legacy_tasks = backfill_legacy_download_correlations(
-        db,
-        subscription.id,
-        &mut tasks,
-        &offline_files,
-        &offline_hash_counts,
-        progress,
-    )
-    .await;
-    let uncorrelated_legacy_tasks = db
-        .count_uncorrelated_download_tasks(subscription.id)
-        .map_err(|error| error.to_string())?;
-    if initial_uncorrelated_legacy_tasks > 0 {
+    let mut finished_roots: Vec<(String, Option<(i64, String)>)> = Vec::new();
+    let uncorrelated_legacy_tasks;
+    if original_mode {
+        finished_roots.extend(source_entries_by_name.iter().filter_map(|(name, entry)| {
+            entry
+                .as_ref()
+                .filter(|_| safe_component(name))
+                .map(|_| (name.clone(), None))
+        }));
+        uncorrelated_legacy_tasks = 0;
         progress(
             "info",
-            Some(recovered_legacy_tasks),
-            usize::try_from(initial_uncorrelated_legacy_tasks).ok(),
+            Some(0),
+            Some(finished_roots.len()),
             &format!(
-                "Legacy correlation fallback recovered {recovered_legacy_tasks} task(s); {uncorrelated_legacy_tasks} remain uncorrelated"
+                "Original mode selected {} unique source root(s) directly; CloudDrive offline tasks were not queried",
+                finished_roots.len()
+            ),
+        );
+    } else {
+        // This is the only offline-task query for an offline-mode job. It is a
+        // status lookup, not a filesystem listing of the RSS source root.
+        let offline_files = client
+            .list_offline_files_by_path(&source_root)
+            .await
+            .map_err(|error| error.to_string())?;
+        let offline_file_count = offline_files.len();
+        progress(
+            "info",
+            None,
+            None,
+            &format!(
+                "Loaded {} RSS task(s), {source_entry_count} source root entry/entries, {offline_file_count} CloudDrive offline task(s), {initial_uncorrelated_legacy_tasks} uncorrelated legacy task(s)",
+                tasks.len()
+            ),
+        );
+        let mut offline_hash_counts = HashMap::new();
+        for offline in &offline_files {
+            if let Some(hash) = normalize_info_hash(&offline.info_hash) {
+                *offline_hash_counts.entry(hash).or_insert(0usize) += 1;
+            }
+        }
+        let recovered_legacy_tasks = backfill_legacy_download_correlations(
+            db,
+            subscription.id,
+            &mut tasks,
+            &offline_files,
+            &offline_hash_counts,
+            progress,
+        )
+        .await;
+        uncorrelated_legacy_tasks = db
+            .count_uncorrelated_download_tasks(subscription.id)
+            .map_err(|error| error.to_string())?;
+        if initial_uncorrelated_legacy_tasks > 0 {
+            progress(
+                "info",
+                Some(recovered_legacy_tasks),
+                usize::try_from(initial_uncorrelated_legacy_tasks).ok(),
+                &format!(
+                    "Legacy correlation fallback recovered {recovered_legacy_tasks} task(s); {uncorrelated_legacy_tasks} remain uncorrelated"
+                ),
+            );
+        }
+
+        let mut tasks_by_hash: HashMap<String, Vec<_>> = HashMap::new();
+        for task in &tasks {
+            if let Some(hash) = task.info_hash.as_deref().and_then(normalize_info_hash) {
+                tasks_by_hash.entry(hash).or_default().push(task);
+            }
+        }
+
+        for offline in offline_files {
+            let Some(info_hash) = normalize_info_hash(&offline.info_hash) else {
+                continue;
+            };
+            if offline_hash_counts.get(&info_hash) != Some(&1) {
+                continue;
+            }
+            let Some([task]) = tasks_by_hash.get(&info_hash).map(Vec::as_slice) else {
+                continue;
+            };
+            let was_completed = task.status.as_deref() == Some("completed");
+            let status = offline_status_name(offline.status);
+            if !db
+                .reconcile_download_task(
+                    task.id,
+                    subscription.id,
+                    &info_hash,
+                    status,
+                    &offline.name,
+                )
+                .map_err(|error| error.to_string())?
+            {
+                continue;
+            }
+            if offline.status == proto::OfflineFileStatus::OfflineFinished as i32
+                && !was_completed
+                && safe_component(&offline.name)
+            {
+                finished_roots.push((offline.name, Some((task.id, info_hash))));
+            }
+        }
+        progress(
+            "info",
+            Some(0),
+            Some(finished_roots.len()),
+            &format!(
+                "Reconciled CloudDrive status: {} completed root(s) are eligible for planning",
+                finished_roots.len()
             ),
         );
     }
-
-    let mut tasks_by_hash: HashMap<String, Vec<_>> = HashMap::new();
-    for task in &tasks {
-        if let Some(hash) = task.info_hash.as_deref().and_then(normalize_info_hash) {
-            tasks_by_hash.entry(hash).or_default().push(task);
-        }
-    }
-
-    let mut finished_roots = Vec::new();
-    for offline in offline_files {
-        let Some(info_hash) = normalize_info_hash(&offline.info_hash) else {
-            continue;
-        };
-        if offline_hash_counts.get(&info_hash) != Some(&1) {
-            continue;
-        }
-        // CloudDrive exposes no immutable per-submission identifier in the
-        // persisted task. A duplicate v1 BTIH in one subscription is therefore
-        // ambiguous and must remain untouched rather than moving either root.
-        let Some([task]) = tasks_by_hash.get(&info_hash).map(Vec::as_slice) else {
-            continue;
-        };
-        let was_completed = task.status.as_deref() == Some("completed");
-        let status = offline_status_name(offline.status);
-        if !db
-            .reconcile_download_task(task.id, subscription.id, &info_hash, status, &offline.name)
-            .map_err(|error| error.to_string())?
-        {
-            continue;
-        }
-        if offline.status == proto::OfflineFileStatus::OfflineFinished as i32
-            && !was_completed
-            && safe_component(&offline.name)
-        {
-            finished_roots.push((offline.name, task.id, info_hash));
-        }
-    }
-    // A successful reconciliation advances only the organization schedule.
     db.mark_subscription_organize_checked(subscription.id)
         .map_err(|error| error.to_string())?;
-    progress(
-        "info",
-        Some(0),
-        Some(finished_roots.len()),
-        &format!(
-            "Reconciled CloudDrive status: {} completed root(s) are eligible for planning",
-            finished_roots.len()
-        ),
-    );
 
     let mut summary = RemoteOrganizeSummary {
         finished_directories: finished_roots.len(),
@@ -194,20 +226,24 @@ pub(crate) async fn organize_subscription_with_progress(
     let mut planned_destination_names = HashSet::new();
     let mut ensured_destinations = HashSet::new();
     let finished_root_count = finished_roots.len();
-    for (root_index, (offline_name, task_id, info_hash)) in finished_roots.into_iter().enumerate() {
+    for (root_index, (source_name, task)) in finished_roots.into_iter().enumerate() {
+        let task_context = task.as_ref().map_or_else(
+            || "mode=original".to_string(),
+            |(task_id, info_hash)| format!("task_id={task_id}, info_hash={info_hash}"),
+        );
         progress(
             "info",
             Some(root_index + 1),
             Some(finished_root_count),
             &format!(
-                "Planning root {}/{}: '{}' (task_id={task_id}, info_hash={info_hash})",
+                "Planning root {}/{}: '{}' ({task_context})",
                 root_index + 1,
                 finished_root_count,
-                offline_name
+                source_name
             ),
         );
         let Some(root_entry) = source_entries_by_name
-            .get(&offline_name)
+            .get(&source_name)
             .and_then(Option::as_ref)
         else {
             progress(
@@ -216,11 +252,13 @@ pub(crate) async fn organize_subscription_with_progress(
                 Some(finished_root_count),
                 &format!(
                     "Skipped root '{}': no unique matching entry exists under '{}'",
-                    offline_name, source_root
+                    source_name, source_root
                 ),
             );
             continue;
         };
+        let offline_name = source_name;
+        let (task_id, info_hash) = task.map_or((None, None), |(id, hash)| (Some(id), Some(hash)));
         let root = join_remote_path(&source_root, &offline_name);
         let tree = if root_entry.is_directory {
             list_tree(client, &root).await?
@@ -424,64 +462,80 @@ pub(crate) async fn organize_subscription_with_progress(
                 .filter(|name| existing.contains_key(*name))
                 .count();
             let action = if conflict_count == 0 {
-                GroupAction::Move
+                if subscription.remote_mlip || !original_mode {
+                    GroupAction::Move
+                } else {
+                    GroupAction::Copy
+                }
             } else if conflict_count == files.len()
                 && files.iter().zip(&names).all(|(file, name)| {
                     file.size >= 0 && existing.get(name).is_some_and(|size| *size == file.size)
                 })
             {
-                let mut hashes_match = true;
-                for (file, name) in files.iter().zip(&names) {
-                    let target_path = join_remote_path(&destination, name);
+                if original_mode && !subscription.remote_mlip {
                     progress(
                         "info",
                         Some(root_index + 1),
                         Some(finished_root_count),
                         &format!(
-                            "Verifying same-size conflict by SHA-256: source='{}', destination='{}'",
-                            file.path, target_path
-                        ),
-                    );
-                    // The only remote reads: one streaming SHA-256 for each
-                    // side of a same-name, same-size conflict.
-                    let source_hash = client
-                        .sha256_file(&file.path)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    let target_hash = client
-                        .sha256_file(&target_path)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    if source_hash != target_hash {
-                        hashes_match = false;
-                        break;
-                    }
-                }
-                if hashes_match {
-                    progress(
-                        "info",
-                        Some(root_index + 1),
-                        Some(finished_root_count),
-                        &format!(
-                            "Duplicate bundle verified by SHA-256: source file(s) {:?}; existing destination='{}'",
+                            "Copy target already contains every source name with the same size; retaining original bundle without downloading it: source={:?}, destination='{}'",
                             files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(),
                             destination
                         ),
                     );
-                    GroupAction::DeleteDuplicates
+                    GroupAction::AlreadyCopied
                 } else {
-                    summary.skipped_conflicts += 1;
-                    progress(
-                        "warning",
-                        Some(root_index + 1),
-                        Some(finished_root_count),
-                        &format!(
-                            "Skipped root '{offline_name}': same-size destination conflict failed SHA-256 verification at '{}'",
-                            destination
-                        ),
-                    );
-                    conflicted = true;
-                    continue;
+                    let mut hashes_match = true;
+                    for (file, name) in files.iter().zip(&names) {
+                        let target_path = join_remote_path(&destination, name);
+                        progress(
+                            "info",
+                            Some(root_index + 1),
+                            Some(finished_root_count),
+                            &format!(
+                                "Verifying same-size conflict by SHA-256: source='{}', destination='{}'",
+                                file.path, target_path
+                            ),
+                        );
+                        let source_hash = client
+                            .sha256_file(&file.path)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        let target_hash = client
+                            .sha256_file(&target_path)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        if source_hash != target_hash {
+                            hashes_match = false;
+                            break;
+                        }
+                    }
+                    if hashes_match {
+                        progress(
+                            "info",
+                            Some(root_index + 1),
+                            Some(finished_root_count),
+                            &format!(
+                                "Duplicate bundle verified by SHA-256: source file(s) {:?}; existing destination='{}'",
+                                files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(),
+                                destination
+                            ),
+                        );
+                        GroupAction::DeleteDuplicates
+                    } else {
+                        summary.skipped_conflicts += 1;
+                        progress(
+                            "warning",
+                            Some(root_index + 1),
+                            Some(finished_root_count),
+                            &format!(
+                                "Skipped root '{offline_name}': same-size destination conflict failed SHA-256 verification at '{}'",
+                                destination
+                            ),
+                        );
+                        conflicted = true;
+                        continue;
+                    }
                 }
             } else {
                 // Mixed bundles and unequal-size collisions preserve both
@@ -543,10 +597,10 @@ pub(crate) async fn organize_subscription_with_progress(
         planned_destination_names.extend(root_destination_names);
 
         // Create each distinct target directory once. A final fresh listing is
-        // performed after MLIP publication immediately before each move.
+        // performed after MLIP publication immediately before each API action.
         for group in planned
             .iter()
-            .filter(|group| group.action == GroupAction::Move)
+            .filter(|group| matches!(group.action, GroupAction::Move | GroupAction::Copy))
         {
             if ensured_destinations.insert(group.destination.clone()) {
                 ensure_directory(client, &group.destination).await?;
@@ -607,9 +661,11 @@ pub(crate) async fn organize_subscription_with_progress(
         for group in planned_root
             .groups
             .iter()
-            .filter(|group| group.action == GroupAction::Move)
+            .filter(|group| matches!(group.action, GroupAction::Move | GroupAction::Copy))
         {
             completed_actions += 1;
+            let copying = group.action == GroupAction::Copy;
+            let verb = if copying { "Copying" } else { "Moving" };
             let mappings = group
                 .files
                 .iter()
@@ -628,39 +684,55 @@ pub(crate) async fn organize_subscription_with_progress(
                 Some(completed_actions),
                 Some(planned_group_count),
                 &format!(
-                    "Moving bundle {completed_actions}/{planned_group_count}: series='{}', season={}, episode={}; {mappings}",
+                    "{verb} bundle {completed_actions}/{planned_group_count}: series='{}', season={}, episode={}; {mappings}",
                     group.series_title, group.season, group.episode
                 ),
             );
             let existing = inspect_destination(client, &group.destination).await?;
             if group.names.iter().any(|name| existing.contains_key(name)) {
                 return Err(format!(
-                    "remote destination changed before move: destination='{}', planned_names={:?}",
+                    "remote destination changed before API action: destination='{}', planned_names={:?}",
                     group.destination, group.names
                 ));
             }
-            client
-                .move_files(
-                    group.files.iter().map(|file| file.path.clone()).collect(),
-                    &group.destination,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-            if !group_was_moved(client, group).await? {
+            let paths = group.files.iter().map(|file| file.path.clone()).collect();
+            if copying {
+                client.copy_files(paths, &group.destination).await
+            } else {
+                client.move_files(paths, &group.destination).await
+            }
+            .map_err(|error| error.to_string())?;
+            let verified = if copying {
+                group_was_copied(client, group).await?
+            } else {
+                group_was_moved(client, group).await?
+            };
+            if !verified {
                 return Err(format!(
-                    "CloudDrive did not move every planned bundle member to '{}': {:?}",
-                    group.destination, group.names
+                    "CloudDrive did not {} every planned bundle member to '{}': {:?}",
+                    if copying { "copy" } else { "move" },
+                    group.destination,
+                    group.names
                 ));
             }
-            summary.moved_media += 1;
-            summary.moved_files += group.files.len();
+            if copying {
+                summary.copied_media += 1;
+                summary.copied_files += group.files.len();
+            } else {
+                summary.moved_media += 1;
+                summary.moved_files += group.files.len();
+            }
             progress(
                 "info",
                 Some(completed_actions),
                 Some(planned_group_count),
                 &format!(
-                    "Move verified for series='{}', season={}, episode={} in '{}'",
-                    group.series_title, group.season, group.episode, group.destination
+                    "{} verified for series='{}', season={}, episode={} in '{}'",
+                    if copying { "Copy" } else { "Move" },
+                    group.series_title,
+                    group.season,
+                    group.episode,
+                    group.destination
                 ),
             );
         }
@@ -701,6 +773,24 @@ pub(crate) async fn organize_subscription_with_progress(
             );
         }
 
+        for group in planned_root
+            .groups
+            .iter()
+            .filter(|group| group.action == GroupAction::AlreadyCopied)
+        {
+            completed_actions += 1;
+            progress(
+                "info",
+                Some(completed_actions),
+                Some(planned_group_count),
+                &format!(
+                    "Original bundle already copied; retained source without download or API mutation: {:?}; destination='{}'",
+                    group.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(),
+                    group.destination
+                ),
+            );
+        }
+
         if subscription.remove_empty_dirs && planned_root.root_is_directory {
             // Re-list the whole source tree after every move. Delete only the
             // completed torrent root when no file remains anywhere below it.
@@ -725,30 +815,42 @@ pub(crate) async fn organize_subscription_with_progress(
                 );
             }
         }
-        db.complete_download_task(
-            planned_root.task_id,
-            subscription.id,
-            &planned_root.info_hash,
-        )
-        .map_err(|error| error.to_string())?;
-        progress(
-            "info",
-            Some(completed_actions),
-            Some(planned_group_count),
-            &format!(
-                "Completed RSS task {} for source root '{}' (info_hash={})",
-                planned_root.task_id, planned_root.root, planned_root.info_hash
-            ),
-        );
+        if let (Some(task_id), Some(info_hash)) =
+            (planned_root.task_id, planned_root.info_hash.as_deref())
+        {
+            db.complete_download_task(task_id, subscription.id, info_hash)
+                .map_err(|error| error.to_string())?;
+            progress(
+                "info",
+                Some(completed_actions),
+                Some(planned_group_count),
+                &format!(
+                    "Completed RSS task {task_id} for source root '{}' (info_hash={info_hash})",
+                    planned_root.root
+                ),
+            );
+        } else {
+            progress(
+                "info",
+                Some(completed_actions),
+                Some(planned_group_count),
+                &format!(
+                    "Completed original-mode source root '{}' without offline-task reconciliation",
+                    planned_root.root
+                ),
+            );
+        }
     }
     progress(
         "info",
         Some(completed_actions),
         Some(planned_group_count),
         &format!(
-            "Remote organization finished: moved_media={}, moved_files={}, skipped_conflicts={}, removed_empty_directories={}, uncorrelated_legacy_tasks={}",
+            "Remote organization finished: moved_media={}, moved_files={}, copied_media={}, copied_files={}, skipped_conflicts={}, removed_empty_directories={}, uncorrelated_legacy_tasks={}",
             summary.moved_media,
             summary.moved_files,
+            summary.copied_media,
+            summary.copied_files,
             summary.skipped_conflicts,
             summary.removed_empty_directories,
             summary.uncorrelated_legacy_tasks
@@ -770,8 +872,8 @@ struct RemoteEntry {
 struct PlannedRoot {
     root: String,
     root_is_directory: bool,
-    task_id: i64,
-    info_hash: String,
+    task_id: Option<i64>,
+    info_hash: Option<String>,
     groups: Vec<PlannedGroup>,
 }
 
@@ -789,6 +891,8 @@ struct PlannedGroup {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GroupAction {
     Move,
+    Copy,
+    AlreadyCopied,
     DeleteDuplicates,
 }
 
@@ -805,6 +909,24 @@ impl LocalTempDatabase {
 }
 
 impl Drop for LocalTempDatabase {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+struct LocalTempMedia(PathBuf);
+
+impl LocalTempMedia {
+    fn new() -> Self {
+        Self(std::env::temp_dir().join(format!("aniorg-rss-media-{}", unique_suffix())))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for LocalTempMedia {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
@@ -1086,29 +1208,42 @@ async fn build_remote_index_records(
                 media_size
             ),
         );
-        let (sha256_full, hash_source) =
-            if let Some(hash) = cached_hashes.get(&(relative_path.clone(), media_size)) {
-                (hash.clone(), "reused from existing MLIP")
-            } else {
-                progress(
+        let (sha256_full, hash_source) = if let Some(hash) =
+            cached_hashes.get(&(relative_path.clone(), media_size))
+        {
+            (hash.clone(), "reused from existing MLIP")
+        } else {
+            progress(
                     "info",
                     Some(group_index + 1),
                     Some(groups.len()),
                     &format!(
-                        "Computing remote SHA-256 {}/{} by streaming '{}'",
+                        "Downloading original media {}/{} to a daemon temporary file for local SHA-256: '{}'",
                         group_index + 1,
                         groups.len(),
                         hash_path
                     ),
                 );
-                (
-                    client
-                        .sha256_file(hash_path)
-                        .await
-                        .map_err(|error| error.to_string())?,
-                    "computed from remote media",
-                )
-            };
+            let local_media = LocalTempMedia::new();
+            client
+                .download_file(hash_path, local_media.path())
+                .await
+                .map_err(|error| error.to_string())?;
+            if let Some(expected_size) = media_size {
+                let downloaded_size = std::fs::metadata(local_media.path())
+                    .map_err(|error| format!("read downloaded media metadata failed: {error}"))?
+                    .len();
+                if downloaded_size != expected_size as u64 {
+                    return Err(format!(
+                            "downloaded media size mismatch for '{hash_path}': expected {expected_size}, got {downloaded_size}"
+                        ));
+                }
+            }
+            (
+                sha256_local_file(local_media.path())?,
+                "computed from downloaded original media",
+            )
+        };
         if sha256_full.len() != 64 || !sha256_full.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("CloudDrive returned an invalid media SHA-256".to_string());
         }
@@ -1175,13 +1310,13 @@ fn remote_relative_path(root: &str, path: &str) -> Result<String, String> {
 
 fn sha256_local_file(path: &Path) -> Result<String, String> {
     let mut file = std::fs::File::open(path)
-        .map_err(|error| format!("open local MLIP for hashing failed: {error}"))?;
+        .map_err(|error| format!("open local file for hashing failed: {error}"))?;
     let mut sha = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         let length = file
             .read(&mut buffer)
-            .map_err(|error| format!("read local MLIP for hashing failed: {error}"))?;
+            .map_err(|error| format!("read local file for hashing failed: {error}"))?;
         if length == 0 {
             break;
         }
@@ -1324,6 +1459,38 @@ async fn group_was_moved(
             return Ok(false);
         };
         if client
+            .list_folder_fresh(parent)
+            .await
+            .map_err(|error| error.to_string())?
+            .iter()
+            .any(|entry| entry.name == name)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn group_was_copied(
+    client: &dyn CloudDriveClientTrait,
+    group: &PlannedGroup,
+) -> Result<bool, String> {
+    let destination = inspect_destination(client, &group.destination).await?;
+    if group
+        .names
+        .iter()
+        .any(|name| !destination.contains_key(name))
+    {
+        return Ok(false);
+    }
+    for file in &group.files {
+        let Some(parent) = remote_parent(&file.path) else {
+            return Ok(false);
+        };
+        let Some(name) = remote_file_name(&file.path) else {
+            return Ok(false);
+        };
+        if !client
             .list_folder_fresh(parent)
             .await
             .map_err(|error| error.to_string())?
@@ -1653,12 +1820,15 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     type MoveCall = (Vec<String>, String);
+    type CopyCall = (Vec<String>, String);
 
     #[derive(Clone, Default)]
     struct MockCloud {
         folders: Arc<Mutex<BTreeMap<String, Vec<proto::CloudDriveFile>>>>,
         moves: Arc<Mutex<Vec<MoveCall>>>,
+        copies: Arc<Mutex<Vec<CopyCall>>>,
         deletes: Arc<Mutex<Vec<String>>>,
+        downloads: Arc<Mutex<Vec<String>>>,
         listed_paths: Arc<Mutex<Vec<String>>>,
         offline_calls: Arc<AtomicUsize>,
         find_calls: Arc<AtomicUsize>,
@@ -1787,6 +1957,34 @@ mod tests {
                 .push((paths, destination.to_string()));
             Ok(())
         }
+        async fn copy_files(&self, paths: Vec<String>, destination: &str) -> Result<()> {
+            let mut folders = self.folders.lock().unwrap();
+            let copied = paths
+                .iter()
+                .map(|path| {
+                    let parent = remote_parent(path).expect("mock source has a parent");
+                    let name = remote_file_name(path).expect("mock source has a name");
+                    folders
+                        .get(parent)
+                        .and_then(|entries| entries.iter().find(|entry| entry.name == name))
+                        .cloned()
+                        .expect("mock source exists")
+                })
+                .collect::<Vec<_>>();
+            let destination_entries = folders.entry(destination.to_string()).or_default();
+            for mut entry in copied {
+                entry.name = remote_file_name(&entry.full_path_name)
+                    .expect("mock source has a name")
+                    .to_string();
+                entry.full_path_name = join_remote_path(destination, &entry.name);
+                destination_entries.push(entry);
+            }
+            self.copies
+                .lock()
+                .unwrap()
+                .push((paths, destination.to_string()));
+            Ok(())
+        }
         async fn delete_file(&self, path: &str) -> Result<()> {
             let parent = remote_parent(path).expect("mock source has a parent");
             let name = remote_file_name(path).expect("mock source has a name");
@@ -1800,6 +1998,7 @@ mod tests {
             Ok(())
         }
         async fn download_file(&self, path: &str, destination: &Path) -> Result<()> {
+            self.downloads.lock().unwrap().push(path.to_string());
             let bytes = self
                 .remote_bytes
                 .lock()
@@ -1961,6 +2160,116 @@ mod tests {
         id
     }
 
+    fn configured_original_subscription(db: &RssDatabase, remote_mlip: bool) -> i64 {
+        let id = db
+            .add_subscription("https://example.test/original.xml", None, "/source", 300)
+            .unwrap();
+        db.update_subscription_organization_settings_with_mlip_and_mode(
+            id,
+            true,
+            Some("/library"),
+            false,
+            false,
+            remote_mlip,
+            "original",
+        )
+        .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn original_mode_with_mlip_downloads_media_once_hashes_locally_then_moves() {
+        let client = MockCloud::default();
+        let video = "/source/[ANi] Original Show - 01 [1080P].mkv";
+        let video_bytes = vec![7; 42];
+        let expected_hash = format!("{:x}", Sha256::digest(&video_bytes));
+        client.folders.lock().unwrap().extend([
+            (
+                "/source".to_string(),
+                vec![file_with_size(video, false, video_bytes.len() as i64)],
+            ),
+            ("/library".to_string(), Vec::new()),
+        ]);
+        client
+            .remote_bytes
+            .lock()
+            .unwrap()
+            .insert(video.to_string(), video_bytes);
+        let directory = tempfile::tempdir().unwrap();
+        let db = RssDatabase::new(&directory.path().join("rss.db")).unwrap();
+        let id = configured_original_subscription(&db, true);
+
+        let summary =
+            organize_subscription(&db, &db.get_subscription(id).unwrap().unwrap(), &client)
+                .await
+                .unwrap();
+
+        assert_eq!(summary.moved_media, 1);
+        assert_eq!(summary.copied_media, 0);
+        assert_eq!(client.offline_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(client.downloads.lock().unwrap().as_slice(), [video]);
+        assert_eq!(client.moves.lock().unwrap().len(), 1);
+        assert!(client.copies.lock().unwrap().is_empty());
+        let published = client
+            .remote_bytes
+            .lock()
+            .unwrap()
+            .get("/library/library.db")
+            .cloned()
+            .unwrap();
+        let local = directory.path().join("original.db");
+        std::fs::write(&local, published).unwrap();
+        let conn = rusqlite::Connection::open(local).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT sha256_full FROM media_file", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+            expected_hash
+        );
+    }
+
+    #[tokio::test]
+    async fn original_mode_without_mlip_copies_without_download_and_is_idempotent() {
+        let client = MockCloud::default();
+        let video = "/source/[ANi] Copy Show - 01 [1080P].mkv";
+        client.folders.lock().unwrap().extend([
+            (
+                "/source".to_string(),
+                vec![file_with_size(video, false, 42)],
+            ),
+            ("/library".to_string(), Vec::new()),
+        ]);
+        let directory = tempfile::tempdir().unwrap();
+        let db = RssDatabase::new(&directory.path().join("rss.db")).unwrap();
+        let id = configured_original_subscription(&db, false);
+        let subscription = db.get_subscription(id).unwrap().unwrap();
+
+        let first = organize_subscription(&db, &subscription, &client)
+            .await
+            .unwrap();
+        let second = organize_subscription(&db, &subscription, &client)
+            .await
+            .unwrap();
+
+        assert_eq!(first.copied_media, 1);
+        assert_eq!(first.moved_media, 0);
+        assert_eq!(second.copied_media, 0);
+        assert_eq!(client.copies.lock().unwrap().len(), 1);
+        assert!(client.moves.lock().unwrap().is_empty());
+        assert!(client.downloads.lock().unwrap().is_empty());
+        assert!(client.hash_calls.lock().unwrap().is_empty());
+        assert_eq!(client.offline_calls.load(Ordering::SeqCst), 0);
+        assert!(client
+            .folders
+            .lock()
+            .unwrap()
+            .get("/source")
+            .is_some_and(|files| files
+                .iter()
+                .any(|file| file.name == remote_file_name(video).unwrap())));
+    }
+
     #[tokio::test]
     async fn batches_multiple_finished_roots_into_one_remote_mlip_publication() {
         let client = MockCloud::default();
@@ -1990,9 +2299,9 @@ mod tests {
             finished_offline("torrent-a", first_hash),
             finished_offline("torrent-b", second_hash),
         ]);
-        client.hashes.lock().unwrap().extend([
-            (first_video.to_string(), "a".repeat(64)),
-            (second_video.to_string(), "b".repeat(64)),
+        client.remote_bytes.lock().unwrap().extend([
+            (first_video.to_string(), vec![1; 42]),
+            (second_video.to_string(), vec![2; 84]),
         ]);
         let directory = tempfile::tempdir().unwrap();
         let db = RssDatabase::new(&directory.path().join("rss.db")).unwrap();
@@ -2041,7 +2350,7 @@ mod tests {
         assert!(log.contains("series='First Show', season=1, episode=1"));
         assert!(log.contains(&format!("source='{first_video}'")));
         assert!(log.contains("target='/library/First Show/[ANi] First Show - 01 [1080P].mkv'"));
-        assert!(log.contains("Computing remote SHA-256 1/2"));
+        assert!(log.contains("Downloading original media 1/2"));
         assert!(log.contains("MLIP record 1/2"));
         assert!(log.contains("Moving bundle 1/2"));
         assert!(log.contains("Move verified for series='First Show'"));
@@ -2108,11 +2417,13 @@ mod tests {
             ),
             ("/library".to_string(), Vec::new()),
         ]);
+        let video_bytes = vec![3; 42];
+        let expected_video_hash = format!("{:x}", Sha256::digest(&video_bytes));
         client
-            .hashes
+            .remote_bytes
             .lock()
             .unwrap()
-            .insert(video.to_string(), "a".repeat(64));
+            .insert(video.to_string(), video_bytes);
         let directory = tempfile::tempdir().unwrap();
         let db = RssDatabase::new(&directory.path().join("rss.db")).unwrap();
         let id = configured_mlip_subscription(&db, true);
@@ -2140,7 +2451,7 @@ mod tests {
             media,
             (
                 "Test Show/[ANi] Test Show - 01 [1080P].mkv".to_string(),
-                "a".repeat(64)
+                expected_video_hash
             )
         );
         let subtitle_path: String = conn
@@ -2280,10 +2591,10 @@ mod tests {
             ("/library".to_string(), Vec::new()),
         ]);
         client
-            .hashes
+            .remote_bytes
             .lock()
             .unwrap()
-            .insert(video.to_string(), "b".repeat(64));
+            .insert(video.to_string(), vec![4; 42]);
         client.fail_uploads.store(1, Ordering::SeqCst);
         let directory = tempfile::tempdir().unwrap();
         let db = RssDatabase::new(&directory.path().join("rss.db")).unwrap();
