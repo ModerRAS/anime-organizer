@@ -1746,12 +1746,16 @@ mod tests {
             ["/source/torrent"]
         );
         assert_eq!(client.offline_calls.load(Ordering::SeqCst), 1);
-        assert!(!client
-            .listed_paths
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|path| path == "/source"));
+        assert_eq!(
+            client
+                .listed_paths
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|path| path.as_str() == "/source")
+                .count(),
+            1
+        );
         let task = db.list_download_tasks(id, None).unwrap().pop().unwrap();
         assert_eq!(task.status.as_deref(), Some("completed"));
         assert_eq!(task.remote_name.as_deref(), Some("torrent"));
