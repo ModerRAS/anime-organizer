@@ -499,11 +499,12 @@ impl RssDatabase {
         let existing = self
             .get_subscription(id)?
             .ok_or_else(|| AppError::MetadataFetchError(format!("订阅不存在: {id}")))?;
-        if (existing.auto_organize != auto_organize
-            || existing.organize_target_folder.as_deref() != organize_target_folder
-            || existing.organize_season_mode != organize_season_mode
-            || existing.remove_empty_dirs != remove_empty_dirs
-            || existing.remote_mlip != remote_mlip)
+        if existing.auto_organize
+            && (existing.auto_organize != auto_organize
+                || existing.organize_target_folder.as_deref() != organize_target_folder
+                || existing.organize_season_mode != organize_season_mode
+                || existing.remove_empty_dirs != remove_empty_dirs
+                || existing.remote_mlip != remote_mlip)
             && self.has_unfinished_correlated_download_tasks(id)?
         {
             return Err(AppError::MetadataFetchError(
@@ -1389,6 +1390,46 @@ mod tests {
         db.mark_subscription_organize_checked(id).unwrap();
         assert!(db.list_due_organization_subscriptions().unwrap().is_empty());
         assert_eq!(db.count_uncorrelated_download_tasks(id).unwrap(), 1);
+    }
+
+    #[test]
+    fn unfinished_correlated_tasks_can_receive_their_initial_organization_settings() {
+        let temp_dir = tempdir().unwrap();
+        let db = RssDatabase::new(&temp_dir.path().join("test.db")).unwrap();
+        let id = db
+            .add_subscription_with_connection(
+                "https://example.com/rss.xml",
+                None,
+                "/downloads",
+                300,
+                Some(1),
+            )
+            .unwrap();
+        db.save_download_task(id, "correlated").unwrap();
+        db.save_download_correlation(
+            id,
+            "correlated",
+            "abcdef1234567890abcdef1234567890abcdef12",
+            None,
+        )
+        .unwrap();
+
+        db.update_subscription_organization_settings_with_mlip(
+            id,
+            true,
+            Some("/library"),
+            true,
+            false,
+            true,
+        )
+        .unwrap();
+        let subscription = db.get_subscription(id).unwrap().unwrap();
+        assert!(subscription.auto_organize);
+        assert_eq!(
+            subscription.organize_target_folder.as_deref(),
+            Some("/library")
+        );
+        assert!(subscription.remote_mlip);
     }
 
     #[test]

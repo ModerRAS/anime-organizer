@@ -102,6 +102,9 @@ pub(crate) async fn organize_subscription(
         uncorrelated_legacy_tasks,
         ..RemoteOrganizeSummary::default()
     };
+    let mut planned_roots = Vec::new();
+    let mut planned_destination_names = HashSet::new();
+    let mut ensured_destinations = HashSet::new();
     for (offline_name, task_id, info_hash) in finished_roots {
         let root = join_remote_path(&source_root, &offline_name);
         let root_entry = client
@@ -267,37 +270,64 @@ pub(crate) async fn organize_subscription(
         if conflicted || planned.is_empty() {
             continue;
         }
-        let mut planned_destination_names = HashSet::new();
-        if planned.iter().any(|group| {
-            group.names.iter().any(|name| {
-                !planned_destination_names.insert((group.destination.as_str(), name.as_str()))
+        let root_destination_names = planned
+            .iter()
+            .flat_map(|group| {
+                group
+                    .names
+                    .iter()
+                    .map(|name| (group.destination.clone(), name.clone()))
             })
-        }) {
+            .collect::<HashSet<_>>();
+        let planned_name_count = planned.iter().map(|group| group.names.len()).sum::<usize>();
+        if root_destination_names.len() != planned_name_count
+            || root_destination_names
+                .iter()
+                .any(|name| planned_destination_names.contains(name))
+        {
             summary.skipped_conflicts += 1;
             continue;
         }
+        planned_destination_names.extend(root_destination_names);
 
-        // Re-list each destination immediately before the first mutation so a
-        // stale preflight cannot overwrite a newly-created destination file.
+        // Create each distinct target directory once. A final fresh listing is
+        // performed after MLIP publication immediately before each move.
         for group in planned
             .iter()
             .filter(|group| group.action == GroupAction::Move)
         {
-            ensure_directory(client, &group.destination).await?;
+            if ensured_destinations.insert(group.destination.clone()) {
+                ensure_directory(client, &group.destination).await?;
+            }
+        }
+
+        planned_roots.push(PlannedRoot {
+            root,
+            root_is_directory: root_entry.is_directory,
+            task_id,
+            info_hash,
+            groups: planned,
+        });
+    }
+
+    if subscription.remote_mlip && !planned_roots.is_empty() {
+        let groups = planned_roots
+            .iter()
+            .flat_map(|root| root.groups.iter().cloned())
+            .collect::<Vec<_>>();
+        publish_remote_mlip(client, &target_root, &groups).await?;
+    }
+
+    for planned_root in planned_roots {
+        for group in planned_root
+            .groups
+            .iter()
+            .filter(|group| group.action == GroupAction::Move)
+        {
             let existing = inspect_destination(client, &group.destination).await?;
             if group.names.iter().any(|name| existing.contains_key(name)) {
                 return Err("remote destination changed during organization".to_string());
             }
-        }
-
-        if subscription.remote_mlip {
-            publish_remote_mlip(client, &target_root, &planned).await?;
-        }
-
-        for group in planned
-            .iter()
-            .filter(|group| group.action == GroupAction::Move)
-        {
             client
                 .move_files(
                     group.files.iter().map(|file| file.path.clone()).collect(),
@@ -311,7 +341,8 @@ pub(crate) async fn organize_subscription(
             summary.moved_media += 1;
             summary.moved_files += group.files.len();
         }
-        for group in planned
+        for group in planned_root
+            .groups
             .iter()
             .filter(|group| group.action == GroupAction::DeleteDuplicates)
         {
@@ -327,19 +358,27 @@ pub(crate) async fn organize_subscription(
             summary.moved_files += group.files.len();
         }
 
-        if subscription.remove_empty_dirs && root_entry.is_directory {
+        if subscription.remove_empty_dirs && planned_root.root_is_directory {
             // Re-list the whole source tree after every move. Delete only the
             // completed torrent root when no file remains anywhere below it.
-            if list_tree(client, &root).await?.files.is_empty() {
+            if list_tree(client, &planned_root.root)
+                .await?
+                .files
+                .is_empty()
+            {
                 client
-                    .delete_file(&root)
+                    .delete_file(&planned_root.root)
                     .await
                     .map_err(|error| error.to_string())?;
                 summary.removed_empty_directories += 1;
             }
         }
-        db.complete_download_task(task_id, subscription.id, &info_hash)
-            .map_err(|error| error.to_string())?;
+        db.complete_download_task(
+            planned_root.task_id,
+            subscription.id,
+            &planned_root.info_hash,
+        )
+        .map_err(|error| error.to_string())?;
     }
     Ok(summary)
 }
@@ -354,6 +393,15 @@ struct RemoteEntry {
     size: i64,
 }
 
+struct PlannedRoot {
+    root: String,
+    root_is_directory: bool,
+    task_id: i64,
+    info_hash: String,
+    groups: Vec<PlannedGroup>,
+}
+
+#[derive(Clone)]
 struct PlannedGroup {
     destination: String,
     files: Vec<RemoteEntry>,
@@ -882,6 +930,7 @@ mod tests {
         deletes: Arc<Mutex<Vec<String>>>,
         listed_paths: Arc<Mutex<Vec<String>>>,
         offline_calls: Arc<AtomicUsize>,
+        offline_files: Arc<Mutex<Vec<proto::OfflineFile>>>,
         hashes: Arc<Mutex<HashMap<String, String>>>,
         remote_bytes: Arc<Mutex<HashMap<String, Vec<u8>>>>,
         hash_calls: Arc<Mutex<Vec<String>>>,
@@ -914,6 +963,10 @@ mod tests {
         }
         async fn list_offline_files_by_path(&self, _: &str) -> Result<Vec<proto::OfflineFile>> {
             self.offline_calls.fetch_add(1, Ordering::SeqCst);
+            let configured = self.offline_files.lock().unwrap().clone();
+            if !configured.is_empty() {
+                return Ok(configured);
+            }
             Ok(vec![proto::OfflineFile {
                 name: "torrent".to_string(),
                 status: proto::OfflineFileStatus::OfflineFinished as i32,
@@ -1125,6 +1178,15 @@ mod tests {
         }
     }
 
+    fn finished_offline(name: &str, info_hash: &str) -> proto::OfflineFile {
+        proto::OfflineFile {
+            name: name.to_string(),
+            status: proto::OfflineFileStatus::OfflineFinished as i32,
+            info_hash: info_hash.to_string(),
+            ..Default::default()
+        }
+    }
+
     fn configured_subscription(db: &RssDatabase) -> i64 {
         let id = db
             .add_subscription("https://example.test/rss", None, "/source", 300)
@@ -1164,6 +1226,93 @@ mod tests {
         )
         .unwrap();
         id
+    }
+
+    #[tokio::test]
+    async fn batches_multiple_finished_roots_into_one_remote_mlip_publication() {
+        let client = MockCloud::default();
+        let first_hash = "1111111111111111111111111111111111111111";
+        let second_hash = "2222222222222222222222222222222222222222";
+        let first_video = "/source/torrent-a/[ANi] First Show - 01 [1080P].mkv";
+        let second_video = "/source/torrent-b/[ANi] Second Show - 02 [1080P].mkv";
+        client.folders.lock().unwrap().extend([
+            (
+                "/source".to_string(),
+                vec![
+                    file("/source/torrent-a", true),
+                    file("/source/torrent-b", true),
+                ],
+            ),
+            (
+                "/source/torrent-a".to_string(),
+                vec![file_with_size(first_video, false, 42)],
+            ),
+            (
+                "/source/torrent-b".to_string(),
+                vec![file_with_size(second_video, false, 84)],
+            ),
+            ("/library".to_string(), Vec::new()),
+        ]);
+        client.offline_files.lock().unwrap().extend([
+            finished_offline("torrent-a", first_hash),
+            finished_offline("torrent-b", second_hash),
+        ]);
+        client.hashes.lock().unwrap().extend([
+            (first_video.to_string(), "a".repeat(64)),
+            (second_video.to_string(), "b".repeat(64)),
+        ]);
+        let directory = tempfile::tempdir().unwrap();
+        let db = RssDatabase::new(&directory.path().join("rss.db")).unwrap();
+        let id = db
+            .add_subscription("https://example.test/rss", None, "/source", 300)
+            .unwrap();
+        db.update_subscription_organization_settings_with_mlip(
+            id,
+            true,
+            Some("/library"),
+            false,
+            false,
+            true,
+        )
+        .unwrap();
+        for (item, hash) in [("first", first_hash), ("second", second_hash)] {
+            db.save_download_task(id, item).unwrap();
+            db.save_download_correlation(id, item, hash, None).unwrap();
+        }
+
+        organize_subscription(&db, &db.get_subscription(id).unwrap().unwrap(), &client)
+            .await
+            .unwrap();
+
+        let temporary_hashes = client
+            .hash_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| path.starts_with("/library/.library.db.") && path.ends_with(".tmp"))
+            .count();
+        assert_eq!(temporary_hashes, 1);
+        let bytes = client
+            .remote_bytes
+            .lock()
+            .unwrap()
+            .get("/library/library.db")
+            .cloned()
+            .unwrap();
+        let local_db = directory.path().join("batched.db");
+        std::fs::write(&local_db, bytes).unwrap();
+        let conn = rusqlite::Connection::open(local_db).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM media_file", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert!(db
+            .list_download_tasks(id, None)
+            .unwrap()
+            .iter()
+            .all(|task| task.status.as_deref() == Some("completed")));
     }
 
     #[tokio::test]
