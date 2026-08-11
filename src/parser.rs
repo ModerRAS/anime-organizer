@@ -331,6 +331,21 @@ impl FilenameParser {
             }
         }
 
+        if let Some(tags_pos) = input.find(" [") {
+            let title = input[..tags_pos].trim();
+            let normalized = title.to_ascii_lowercase();
+            let is_explicit_unnumbered_release = normalized.starts_with("gekijouban ")
+                || normalized.ends_with(" heroines")
+                || title.contains("劇場版");
+            if is_explicit_unnumbered_release && !title.is_empty() {
+                return Some((
+                    title.to_string(),
+                    "01".to_string(),
+                    input[tags_pos..].trim_start(),
+                ));
+            }
+        }
+
         // Try to find "[XX]" pattern (dmhy.org format with episode in brackets)
         // Look for last occurrence of "[" followed by digits and "]"
         for i in (0..bytes.len()).rev() {

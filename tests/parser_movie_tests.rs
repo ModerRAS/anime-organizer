@@ -22,3 +22,21 @@ fn ani_movie_marker_maps_to_single_media_episode() {
         assert_eq!(info.target_filename(), "01 [1080P][Baha].mp4");
     }
 }
+
+#[test]
+fn explicit_unnumbered_movie_and_special_titles_map_to_single_media_episode() {
+    for (filename, expected_title) in [
+        (
+            "[LoliHouse] Gekijouban Ansatsu Kyoushitsu Minna no Jikan [WebRip 1080p HEVC-10bit AAC].mkv",
+            "Gekijouban Ansatsu Kyoushitsu Minna no Jikan",
+        ),
+        (
+            "[LoliHouse] ONE PIECE HEROINES [WebRip 1080p HEVC-10bit AAC SRTx2].mkv",
+            "ONE PIECE HEROINES",
+        ),
+    ] {
+        let info = FilenameParser::parse(filename).unwrap();
+        assert_eq!(info.anime_name, expected_title);
+        assert_eq!(info.episode, "01");
+    }
+}
