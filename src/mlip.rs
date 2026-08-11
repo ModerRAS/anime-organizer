@@ -137,11 +137,14 @@ pub(crate) async fn fetch_anime_metadata(
     }
 
     let alias = if metadata.is_none() {
-        lookup_queries.iter().find_map(|query| {
-            alias_lookup
-                .find(query)
-                .or_else(|| alias_lookup.find_fuzzy(query))
-        })
+        [series_name, anime_name]
+            .into_iter()
+            .find_map(|query| alias_lookup.find_with_season(query, season_hint))
+            .or_else(|| {
+                lookup_queries
+                    .iter()
+                    .find_map(|query| alias_lookup.find_with_season(query, season_hint))
+            })
     } else {
         None
     };
@@ -207,11 +210,15 @@ pub(crate) async fn fetch_anime_metadata(
                 }
             }
 
-            let alias = lookup_queries.iter().find_map(|query| {
-                alias_lookup
-                    .find(query)
-                    .or_else(|| alias_lookup.find_fuzzy(query))
-            });
+            let alias = resolved
+                .titles
+                .iter()
+                .find_map(|title| alias_lookup.find_with_season(title, season_hint))
+                .or_else(|| {
+                    lookup_queries
+                        .iter()
+                        .find_map(|query| alias_lookup.find_with_season(query, season_hint))
+                });
             if let Some(entry) = alias {
                 if let Ok(mut meta) = bangumi.fetch_metadata(entry.bangumi_id).await {
                     meta.tmdb_id = entry.tmdb_id;

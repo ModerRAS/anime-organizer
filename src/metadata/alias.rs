@@ -24,6 +24,7 @@ struct AnimeAtlasAliasRow {
     metadata_json: String,
     tmdb_id: Option<String>,
     anidb_id: Option<String>,
+    season_number: Option<u32>,
 }
 
 static RELEASE_TITLE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
@@ -58,6 +59,12 @@ pub struct AliasEntry {
     pub anidb_id: Option<u32>,
 }
 
+#[derive(Debug, Clone)]
+struct SeriesAliasCandidate {
+    entry: AliasEntry,
+    season_number: Option<u32>,
+}
+
 /// 别名库查找
 ///
 /// 管理动画名称别名到元数据 ID 的映射关系，支持从 Bangumi 或 AnimeAtlas SQLite 数据库加载。
@@ -75,26 +82,29 @@ pub struct AliasEntry {
 pub struct AliasLookup {
     aliases: HashMap<String, AliasEntry>,
     normalized_keys: HashMap<String, String>,
+    series_aliases: HashMap<String, Vec<SeriesAliasCandidate>>,
+    normalized_series_aliases: HashMap<String, Vec<SeriesAliasCandidate>>,
 }
 
 impl AliasLookup {
     /// 从可选的数据源加载别名库。
     ///
-    /// - `db_path` 存在时，从 Bangumi 或 AnimeAtlas SQLite `aliases` 表加载。
+    /// - `db_path` 存在时，从 Bangumi 或 AnimeAtlas SQLite 别名表加载。
     /// - `alias_file` 存在时，从 JSON 文件加载，并覆盖同名数据库别名。
     /// - 两者都缺失时，返回空的别名库，供首次运行时回退到名称搜索。
     pub fn load_from_sources(db_path: Option<&Path>, alias_file: Option<&Path>) -> Result<Self> {
         let mut aliases = HashMap::new();
+        let mut series_aliases = HashMap::new();
 
         if let Some(path) = db_path.filter(|path| path.is_file()) {
-            Self::load_database_aliases(path, &mut aliases)?;
+            Self::load_database_aliases(path, &mut aliases, &mut series_aliases)?;
         }
 
         if let Some(path) = alias_file {
-            Self::load_alias_file(path, &mut aliases)?;
+            Self::load_alias_file(path, &mut aliases, &mut series_aliases)?;
         }
 
-        Ok(Self::from_aliases(aliases))
+        Ok(Self::from_aliases(aliases, series_aliases))
     }
 
     /// 从 Bangumi 或 AnimeAtlas SQLite 数据库加载别名库
@@ -111,25 +121,40 @@ impl AliasLookup {
         }
 
         let mut aliases = HashMap::new();
-        Self::load_database_aliases(db_path, &mut aliases)?;
+        let mut series_aliases = HashMap::new();
+        Self::load_database_aliases(db_path, &mut aliases, &mut series_aliases)?;
 
-        Ok(Self::from_aliases(aliases))
+        Ok(Self::from_aliases(aliases, series_aliases))
     }
 
-    fn from_aliases(mut aliases: HashMap<String, AliasEntry>) -> Self {
+    fn from_aliases(
+        mut aliases: HashMap<String, AliasEntry>,
+        series_aliases: HashMap<String, Vec<SeriesAliasCandidate>>,
+    ) -> Self {
         expand_generated_aliases(&mut aliases);
+
+        let normalized_series_aliases = build_normalized_series_aliases(&series_aliases);
+        let ambiguous_series_keys: HashSet<_> = normalized_series_aliases
+            .iter()
+            .filter(|(_, candidates)| unique_candidate_count(candidates) > 1)
+            .map(|(key, _)| key.clone())
+            .collect();
+        aliases.retain(|alias, _| !ambiguous_series_keys.contains(&normalize_name(alias)));
 
         let normalized_keys = build_normalized_index(&aliases);
 
         Self {
             aliases,
             normalized_keys,
+            series_aliases,
+            normalized_series_aliases,
         }
     }
 
     fn load_database_aliases(
         db_path: &Path,
         aliases: &mut HashMap<String, AliasEntry>,
+        series_aliases: &mut HashMap<String, Vec<SeriesAliasCandidate>>,
     ) -> Result<()> {
         let conn = Connection::open(db_path)
             .map_err(|e| AppError::AliasLoadError(format!("打开数据库失败: {e}")))?;
@@ -137,7 +162,11 @@ impl AliasLookup {
         match detect_database_schema(&conn)? {
             AliasDatabaseSchema::Bangumi => Self::load_bangumi_database_aliases(&conn, aliases),
             AliasDatabaseSchema::AnimeAtlas => {
-                Self::load_animeatlas_database_aliases(&conn, aliases)
+                Self::load_animeatlas_database_aliases(&conn, aliases)?;
+                if table_exists(&conn, "series_aliases")? && table_exists(&conn, "series")? {
+                    Self::load_animeatlas_series_aliases(&conn, series_aliases)?;
+                }
+                Ok(())
             }
         }
     }
@@ -190,7 +219,8 @@ impl AliasLookup {
                     m.title,
                     m.metadata_json,
                     (SELECT provider_id FROM provider_refs WHERE media_id = a.media_id AND provider = 'tmdb' LIMIT 1),
-                    (SELECT provider_id FROM provider_refs WHERE media_id = a.media_id AND provider = 'anidb' LIMIT 1)
+                    (SELECT provider_id FROM provider_refs WHERE media_id = a.media_id AND provider = 'anidb' LIMIT 1),
+                    NULL
                 FROM aliases a
                 JOIN provider_refs bgm
                     ON bgm.media_id = a.media_id
@@ -210,6 +240,7 @@ impl AliasLookup {
                     metadata_json: row.get::<_, String>(3)?,
                     tmdb_id: row.get::<_, Option<String>>(4)?,
                     anidb_id: row.get::<_, Option<String>>(5)?,
+                    season_number: row.get::<_, Option<u32>>(6)?,
                 })
             })
             .map_err(|e| AppError::AliasLoadError(format!("查询 AnimeAtlas 别名失败: {e}")))?;
@@ -222,26 +253,83 @@ impl AliasLookup {
                 continue;
             }
 
-            let entry = AliasEntry {
-                bangumi_id: parse_provider_id(&row.bangumi_id, "bangumi")?,
-                name: row
-                    .title
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|title| !title.is_empty())
-                    .map(ToOwned::to_owned)
-                    .or_else(|| metadata_json_title(&row.metadata_json))
-                    .unwrap_or_else(|| alias.to_string()),
-                tmdb_id: parse_optional_provider_id(row.tmdb_id.as_deref(), "tmdb")?,
-                anidb_id: parse_optional_provider_id(row.anidb_id.as_deref(), "anidb")?,
-            };
-            aliases.insert(alias.to_string(), entry);
+            aliases.insert(alias.to_string(), animeatlas_alias_entry(&row)?);
         }
 
         Ok(())
     }
 
-    fn load_alias_file(alias_file: &Path, aliases: &mut HashMap<String, AliasEntry>) -> Result<()> {
+    fn load_animeatlas_series_aliases(
+        conn: &Connection,
+        aliases: &mut HashMap<String, Vec<SeriesAliasCandidate>>,
+    ) -> Result<()> {
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT
+                    a.value,
+                    bgm.provider_id,
+                    m.title,
+                    m.metadata_json,
+                    (SELECT provider_id FROM provider_refs WHERE media_id = m.id AND provider = 'tmdb' LIMIT 1),
+                    (SELECT provider_id FROM provider_refs WHERE media_id = m.id AND provider = 'anidb' LIMIT 1),
+                    m.season_number
+                FROM series_aliases a
+                JOIN media m ON m.series_id = a.series_id
+                JOIN provider_refs bgm
+                    ON bgm.media_id = m.id
+                    AND bgm.provider = 'bangumi'
+                    AND bgm.entity = 'subject'
+                "#,
+            )
+            .map_err(|e| {
+                AppError::AliasLoadError(format!("预处理 AnimeAtlas 系列别名 SQL 失败: {e}"))
+            })?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(AnimeAtlasAliasRow {
+                    alias: row.get::<_, String>(0)?,
+                    bangumi_id: row.get::<_, String>(1)?,
+                    title: row.get::<_, Option<String>>(2)?,
+                    metadata_json: row.get::<_, String>(3)?,
+                    tmdb_id: row.get::<_, Option<String>>(4)?,
+                    anidb_id: row.get::<_, Option<String>>(5)?,
+                    season_number: row.get::<_, Option<u32>>(6)?,
+                })
+            })
+            .map_err(|e| AppError::AliasLoadError(format!("查询 AnimeAtlas 系列别名失败: {e}")))?;
+
+        for row in rows {
+            let row = row.map_err(|e| {
+                AppError::AliasLoadError(format!("读取 AnimeAtlas 系列别名失败: {e}"))
+            })?;
+            let alias = row.alias.trim();
+            if alias.is_empty() {
+                continue;
+            }
+            let season_number = row.season_number;
+            let candidate = SeriesAliasCandidate {
+                entry: animeatlas_alias_entry(&row)?,
+                season_number,
+            };
+            let candidates = aliases.entry(alias.to_string()).or_default();
+            if !candidates
+                .iter()
+                .any(|existing| existing.entry.bangumi_id == candidate.entry.bangumi_id)
+            {
+                candidates.push(candidate);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn load_alias_file(
+        alias_file: &Path,
+        aliases: &mut HashMap<String, AliasEntry>,
+        series_aliases: &mut HashMap<String, Vec<SeriesAliasCandidate>>,
+    ) -> Result<()> {
         let content = std::fs::read_to_string(alias_file).map_err(|e| {
             AppError::AliasLoadError(format!(
                 "读取自定义别名文件失败 {}: {e}",
@@ -262,15 +350,44 @@ impl AliasLookup {
                 continue;
             }
 
+            series_aliases.retain(|key, _| normalize_name(key) != normalize_name(trimmed));
             aliases.insert(trimmed.to_string(), entry);
         }
 
         Ok(())
     }
 
-    /// 根据名称精确查找别名
+    /// 根据名称精确查找无歧义别名。
     pub fn find(&self, name: &str) -> Option<&AliasEntry> {
+        if let Some(candidates) = self.series_aliases.get(name) {
+            return select_series_candidate(candidates, None);
+        }
         self.aliases.get(name)
+    }
+
+    /// 根据名称和 Season 查找 v2 系列别名；无 Season 的多媒体候选不会猜测。
+    pub fn find_with_season(&self, name: &str, season_hint: Option<u32>) -> Option<&AliasEntry> {
+        if let Some(candidates) = self.series_aliases.get(name) {
+            return select_series_candidate(candidates, season_hint);
+        }
+        if let Some(entry) = self.aliases.get(name) {
+            return Some(entry);
+        }
+
+        for candidate in extract_lookup_candidates(name) {
+            let normalized = normalize_name(&candidate);
+            if let Some(candidates) = self.normalized_series_aliases.get(&normalized) {
+                return select_series_candidate(candidates, season_hint);
+            }
+            if let Some(entry) = self
+                .normalized_keys
+                .get(&normalized)
+                .and_then(|key| self.aliases.get(key))
+            {
+                return Some(entry);
+            }
+        }
+        None
     }
 
     /// 根据名称模糊查找（大小写不敏感，去除空格）
@@ -279,6 +396,9 @@ impl AliasLookup {
             .into_iter()
             .find_map(|candidate| {
                 let normalized = normalize_name(&candidate);
+                if let Some(candidates) = self.normalized_series_aliases.get(&normalized) {
+                    return select_series_candidate(candidates, None);
+                }
                 self.normalized_keys
                     .get(&normalized)
                     .and_then(|key| self.aliases.get(key))
@@ -295,15 +415,15 @@ impl AliasLookup {
 
     /// 返回别名库中的条目数量
     pub fn len(&self) -> usize {
-        self.aliases.len()
+        self.aliases.len() + self.series_aliases.len()
     }
 
     /// 别名库是否为空
     pub fn is_empty(&self) -> bool {
-        self.aliases.is_empty()
+        self.aliases.is_empty() && self.series_aliases.is_empty()
     }
 
-    /// 返回底层别名表，供匹配/导出流程使用。
+    /// 返回底层无歧义媒体别名表，供匹配/导出流程使用。
     pub fn entries(&self) -> &HashMap<String, AliasEntry> {
         &self.aliases
     }
@@ -320,6 +440,46 @@ fn build_normalized_index(aliases: &HashMap<String, AliasEntry>) -> HashMap<Stri
     }
 
     index
+}
+
+fn build_normalized_series_aliases(
+    aliases: &HashMap<String, Vec<SeriesAliasCandidate>>,
+) -> HashMap<String, Vec<SeriesAliasCandidate>> {
+    let mut index: HashMap<String, Vec<SeriesAliasCandidate>> = HashMap::new();
+    for (alias, candidates) in aliases {
+        let normalized = normalize_name(alias);
+        let target = index.entry(normalized).or_default();
+        for candidate in candidates {
+            if !target
+                .iter()
+                .any(|existing| existing.entry.bangumi_id == candidate.entry.bangumi_id)
+            {
+                target.push(candidate.clone());
+            }
+        }
+    }
+    index
+}
+
+fn unique_candidate_count(candidates: &[SeriesAliasCandidate]) -> usize {
+    candidates
+        .iter()
+        .map(|candidate| candidate.entry.bangumi_id)
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+fn select_series_candidate(
+    candidates: &[SeriesAliasCandidate],
+    season_hint: Option<u32>,
+) -> Option<&AliasEntry> {
+    let mut matches = candidates.iter().filter(|candidate| {
+        season_hint.is_none_or(|season| candidate.season_number == Some(season))
+    });
+    let first = matches.next()?;
+    matches
+        .all(|candidate| candidate.entry.bangumi_id == first.entry.bangumi_id)
+        .then_some(&first.entry)
 }
 
 fn expand_generated_aliases(aliases: &mut HashMap<String, AliasEntry>) {
@@ -512,6 +672,22 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     Ok(false)
 }
 
+fn animeatlas_alias_entry(row: &AnimeAtlasAliasRow) -> Result<AliasEntry> {
+    Ok(AliasEntry {
+        bangumi_id: parse_provider_id(&row.bangumi_id, "bangumi")?,
+        name: row
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| metadata_json_title(&row.metadata_json))
+            .unwrap_or_else(|| row.alias.trim().to_string()),
+        tmdb_id: parse_optional_provider_id(row.tmdb_id.as_deref(), "tmdb")?,
+        anidb_id: parse_optional_provider_id(row.anidb_id.as_deref(), "anidb")?,
+    })
+}
+
 fn metadata_json_title(metadata_json: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(metadata_json)
         .ok()?
@@ -669,6 +845,80 @@ mod tests {
         dir
     }
 
+    fn create_animeatlas_v2_test_db() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("animeatlas-v2.sqlite");
+        let conn = Connection::open(&db_path).unwrap();
+
+        conn.execute_batch(
+            r#"
+            CREATE TABLE series (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                relationships_json TEXT NOT NULL
+            );
+            CREATE TABLE media (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                series_id TEXT REFERENCES series(id),
+                title TEXT,
+                season_number INTEGER,
+                part_number INTEGER,
+                cour_number INTEGER,
+                summary TEXT,
+                metadata_json TEXT NOT NULL,
+                provenance_json TEXT NOT NULL
+            );
+            CREATE TABLE series_aliases (
+                series_id TEXT NOT NULL REFERENCES series(id),
+                value TEXT NOT NULL,
+                normalized TEXT NOT NULL,
+                language TEXT,
+                type TEXT,
+                source TEXT,
+                confidence REAL,
+                PRIMARY KEY (series_id, value)
+            );
+            CREATE TABLE aliases (
+                media_id TEXT NOT NULL REFERENCES media(id),
+                value TEXT NOT NULL,
+                normalized TEXT NOT NULL,
+                language TEXT,
+                type TEXT,
+                source TEXT,
+                confidence REAL,
+                PRIMARY KEY (media_id, value)
+            );
+            CREATE TABLE provider_refs (
+                media_id TEXT NOT NULL REFERENCES media(id),
+                provider TEXT NOT NULL,
+                entity TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                provider_key TEXT NOT NULL UNIQUE
+            );
+
+            INSERT INTO series VALUES ('series-frieren', '葬送的芙莉莲', '{}');
+            INSERT INTO media VALUES ('media-frieren-s1', 'anime', 'series-frieren', '葬送的芙莉莲', 1, NULL, NULL, '', '{}', '{}');
+            INSERT INTO media VALUES ('media-frieren-s2', 'anime', 'series-frieren', '葬送的芙莉莲 第二季', 2, NULL, NULL, '', '{}', '{}');
+            INSERT INTO series_aliases VALUES ('series-frieren', '葬送的芙莉莲', '葬送的芙莉莲', 'zh-Hans', 'localized', 'community', 1.0);
+            INSERT INTO series_aliases VALUES ('series-frieren', 'Sousou no Frieren', 'sousou no frieren', 'ja-Latn', 'romanized', 'community', 1.0);
+            INSERT INTO aliases VALUES ('media-frieren-s1', '芙莉莲', '芙莉莲', 'zh-Hans', 'localized', 'community', 1.0);
+            INSERT INTO aliases VALUES ('media-frieren-s2', '芙莉莲 第二季', '芙莉莲 第二季', 'zh-Hans', 'localized', 'community', 1.0);
+            INSERT INTO provider_refs VALUES ('media-frieren-s1', 'bangumi', 'subject', '400602', 'anime:bangumi:subject:400602');
+            INSERT INTO provider_refs VALUES ('media-frieren-s2', 'bangumi', 'subject', '515759', 'anime:bangumi:subject:515759');
+
+            INSERT INTO series VALUES ('series-bocchi', 'ぼっち・ざ・ろっく！', '{}');
+            INSERT INTO media VALUES ('media-bocchi', 'anime', 'series-bocchi', 'ぼっち・ざ・ろっく！', 1, NULL, NULL, '', '{}', '{}');
+            INSERT INTO series_aliases VALUES ('series-bocchi', '孤独摇滚', '孤独摇滚', 'zh-Hans', 'localized', 'community', 1.0);
+            INSERT INTO aliases VALUES ('media-bocchi', 'ぼっち・ざ・ろっく！', 'ぼっち・ざ・ろっく！', 'ja', 'official', 'community', 1.0);
+            INSERT INTO provider_refs VALUES ('media-bocchi', 'bangumi', 'subject', '378862', 'anime:bangumi:subject:378862');
+            "#,
+        )
+        .unwrap();
+
+        dir
+    }
+
     #[test]
     fn test_load_from_database() {
         let dir = create_test_db();
@@ -692,6 +942,64 @@ mod tests {
         assert_eq!(entry.name, "葬送のフリーレン");
         assert_eq!(entry.tmdb_id, Some(209867));
         assert_eq!(entry.anidb_id, Some(18597));
+    }
+
+    #[test]
+    fn test_load_from_animeatlas_v2_database() {
+        let dir = create_animeatlas_v2_test_db();
+        let lookup = AliasLookup::load(&dir.path().join("animeatlas-v2.sqlite")).unwrap();
+
+        assert!(lookup.find("葬送的芙莉莲").is_none());
+        assert!(lookup.find_fuzzy("Sousou no Frieren").is_none());
+        assert_eq!(
+            lookup
+                .find_with_season("葬送的芙莉莲", Some(1))
+                .unwrap()
+                .bangumi_id,
+            400602
+        );
+        assert_eq!(
+            lookup
+                .find_with_season("[ANi] Sousou no Frieren - 01.mkv", Some(2))
+                .unwrap()
+                .bangumi_id,
+            515759
+        );
+        assert!(lookup.find_with_season("葬送的芙莉莲", Some(3)).is_none());
+        assert_eq!(lookup.find("孤独摇滚").unwrap().bangumi_id, 378862);
+        assert_eq!(lookup.find("芙莉莲 第二季").unwrap().bangumi_id, 515759);
+    }
+
+    #[test]
+    fn test_animeatlas_v2_custom_alias_overrides_series_candidates() {
+        let dir = create_animeatlas_v2_test_db();
+        let alias_path = dir.path().join("aliases.json");
+        std::fs::write(
+            &alias_path,
+            r#"{
+  "葬送的芙莉莲": {
+    "bangumi_id": 999,
+    "name": "Custom Frieren",
+    "tmdb_id": null,
+    "anidb_id": null
+  }
+}"#,
+        )
+        .unwrap();
+
+        let lookup = AliasLookup::load_from_sources(
+            Some(&dir.path().join("animeatlas-v2.sqlite")),
+            Some(&alias_path),
+        )
+        .unwrap();
+        assert_eq!(lookup.find("葬送的芙莉莲").unwrap().bangumi_id, 999);
+        assert_eq!(
+            lookup
+                .find_with_season("葬送的芙莉莲", Some(2))
+                .unwrap()
+                .bangumi_id,
+            999
+        );
     }
 
     #[test]
