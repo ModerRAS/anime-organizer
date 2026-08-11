@@ -275,8 +275,18 @@ impl FilenameParser {
 
                             break;
                         }
-                        let after_digits = if num_end < bytes.len() {
-                            bytes[num_end]
+                        let mut suffix_end = num_end;
+                        if suffix_end + 1 < bytes.len()
+                            && matches!(bytes[suffix_end], b'v' | b'V')
+                            && bytes[suffix_end + 1].is_ascii_digit()
+                        {
+                            suffix_end += 2;
+                            while suffix_end < bytes.len() && bytes[suffix_end].is_ascii_digit() {
+                                suffix_end += 1;
+                            }
+                        }
+                        let after_digits = if suffix_end < bytes.len() {
+                            bytes[suffix_end]
                         } else {
                             b' '
                         };
@@ -286,7 +296,7 @@ impl FilenameParser {
                             || after_digits == b'-'
                             || after_digits == b'.'
                             || after_digits == b'('
-                            || num_end >= bytes.len()
+                            || suffix_end >= bytes.len()
                         {
                             episode_info = Some((i, num_start, num_end));
                         }
@@ -331,8 +341,22 @@ impl FilenameParser {
                 }
                 if j > 0 && bytes[j - 1] == b'[' {
                     let content = &bytes[j..i];
-                    if !content.is_empty() && content.iter().all(|&b| b.is_ascii_digit()) {
-                        let episode_str = std::str::from_utf8(content).ok()?;
+                    let version_separator =
+                        content.iter().position(|byte| matches!(byte, b'v' | b'V'));
+                    let episode_content =
+                        version_separator.map_or(content, |position| &content[..position]);
+                    let version_is_valid = version_separator.is_none_or(|position| {
+                        position > 0
+                            && position + 1 < content.len()
+                            && content[position + 1..]
+                                .iter()
+                                .all(|byte| byte.is_ascii_digit())
+                    });
+                    if !episode_content.is_empty()
+                        && episode_content.iter().all(|byte| byte.is_ascii_digit())
+                        && version_is_valid
+                    {
+                        let episode_str = std::str::from_utf8(episode_content).ok()?;
                         if let Ok(ep_num) = episode_str.parse::<u32>() {
                             if (1..=9999).contains(&ep_num) {
                                 let episode = format!("{:0>2}", episode_str);
