@@ -34,6 +34,26 @@ fn explicit_unnumbered_movie_and_special_titles_map_to_single_media_episode() {
             "[LoliHouse] ONE PIECE HEROINES [WebRip 1080p HEVC-10bit AAC SRTx2].mkv",
             "ONE PIECE HEROINES",
         ),
+        (
+            "[Skymoon-Raws] Crayon Shin-chan the Movie：Super Magificent! Scorching Kasukabe Dancers [UVOD][WEB-DL][CHT][1080p][AVC AAC].mp4",
+            "Crayon Shin-chan the Movie：Super Magificent! Scorching Kasukabe Dancers",
+        ),
+        (
+            "[Skymoon-Raws] Kimetsu no Yaiba Infinity Castle 2025 [ViuTV][WEB-DL][CHT][SRT][1080p][AVC AAC].mkv",
+            "Kimetsu no Yaiba Infinity Castle",
+        ),
+        (
+            "[Skymoon-Raws][Kimetsu no Yaiba Infinity Castle 2025][Baha][WEB-DL][1080p][AVC AAC][CHT][MP4].mp4",
+            "Kimetsu no Yaiba Infinity Castle",
+        ),
+        (
+            "[Skymoon-Raws][劇場版 我與機器子][Me & Roboco the Movie][Baha][WEB-DL][1080p][AVC AAC][CHT][MP4].mp4",
+            "劇場版 我與機器子",
+        ),
+        (
+            "[Skymoon-Raws][成為星星的少女][Trapezium][Baha][WEB-DL][1080p][AVC AAC][CHT][MP4].mp4",
+            "成為星星的少女",
+        ),
     ] {
         let info = FilenameParser::parse(filename).unwrap();
         assert_eq!(info.anime_name, expected_title);

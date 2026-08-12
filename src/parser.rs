@@ -335,11 +335,13 @@ impl FilenameParser {
             let title = input[..tags_pos].trim();
             let normalized = title.to_ascii_lowercase();
             let is_explicit_unnumbered_release = normalized.starts_with("gekijouban ")
+                || normalized.contains(" the movie")
                 || normalized.ends_with(" heroines")
-                || title.contains("劇場版");
+                || title.contains("劇場版")
+                || Self::strip_release_year(title).is_some();
             if is_explicit_unnumbered_release && !title.is_empty() {
                 return Some((
-                    title.to_string(),
+                    Self::strip_release_year(title).unwrap_or(title).to_string(),
                     "01".to_string(),
                     input[tags_pos..].trim_start(),
                 ));
@@ -386,7 +388,35 @@ impl FilenameParser {
             }
         }
 
+        if let Some((title, rest)) = Self::parse_bracketed_unnumbered_release(input) {
+            return Some((title, "01".to_string(), rest));
+        }
+
         None
+    }
+
+    fn parse_bracketed_unnumbered_release(input: &str) -> Option<(String, &str)> {
+        let title_end = input.strip_prefix('[')?.find(']')? + 1;
+        let title = input[1..title_end].trim();
+        let rest = input[title_end + 1..].trim_start();
+        let normalized = rest.to_ascii_lowercase();
+        if title.is_empty()
+            || !rest.starts_with('[')
+            || !normalized.contains("[web-dl]")
+            || !(normalized.contains("[baha]") || normalized.contains("[uvod]"))
+        {
+            return None;
+        }
+        Some((
+            Self::strip_release_year(title).unwrap_or(title).to_string(),
+            rest,
+        ))
+    }
+
+    fn strip_release_year(title: &str) -> Option<&str> {
+        let (prefix, year) = title.rsplit_once(' ')?;
+        let year = year.parse::<u16>().ok()?;
+        (1900..=2099).contains(&year).then_some(prefix.trim_end())
     }
 
     fn parse_tags_and_ext(input: &str) -> Option<(String, String)> {
