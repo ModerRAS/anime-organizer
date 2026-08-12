@@ -551,7 +551,6 @@ impl RssDatabase {
             && (existing.auto_organize != auto_organize
                 || existing.organize_target_folder.as_deref() != organize_target_folder
                 || existing.organize_season_mode != organize_season_mode
-                || existing.remove_empty_dirs != remove_empty_dirs
                 || existing.remote_mlip != remote_mlip)
             && self.has_unfinished_correlated_download_tasks(id)?
         {
@@ -1559,6 +1558,9 @@ mod tests {
                 false
             )
             .is_err());
+        db.update_subscription_organization_settings(id, true, Some("/library"), true, true)
+            .unwrap();
+        assert!(db.get_subscription(id).unwrap().unwrap().remove_empty_dirs);
         assert!(db.set_subscription_connection(id, Some(2)).is_err());
         db.update_subscription_organization_settings_with_mlip_and_mode(
             id,
