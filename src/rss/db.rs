@@ -140,7 +140,7 @@ impl RssDatabase {
                     auto_organize BOOLEAN NOT NULL DEFAULT 0,
                     organize_target_folder TEXT,
                     organize_season_mode BOOLEAN NOT NULL DEFAULT 1,
-                    remove_empty_dirs BOOLEAN NOT NULL DEFAULT 0,
+                    remove_empty_dirs BOOLEAN NOT NULL DEFAULT 1,
                     organize_interval_secs INTEGER NOT NULL DEFAULT 300,
                     last_organize_checked_at TIMESTAMP,
                     remote_mlip BOOLEAN NOT NULL DEFAULT 0,
@@ -210,7 +210,7 @@ impl RssDatabase {
             "subscriptions",
             &subscription_columns,
             "remove_empty_dirs",
-            "BOOLEAN NOT NULL DEFAULT 0",
+            "BOOLEAN NOT NULL DEFAULT 1",
         )?;
         self.add_column_if_missing(
             "subscriptions",
@@ -1128,7 +1128,7 @@ mod tests {
         assert!(!subs[0].auto_organize);
         assert!(subs[0].organize_target_folder.is_none());
         assert!(subs[0].organize_season_mode);
-        assert!(!subs[0].remove_empty_dirs);
+        assert!(subs[0].remove_empty_dirs);
         assert!(!subs[0].remote_mlip);
         assert_eq!(subs[0].organize_mode, "offline");
         assert_eq!(subs[0].organize_interval_secs, 300);
@@ -1171,7 +1171,7 @@ mod tests {
         assert!(!migrated.auto_organize);
         assert!(migrated.organize_target_folder.is_none());
         assert!(migrated.organize_season_mode);
-        assert!(!migrated.remove_empty_dirs);
+        assert!(migrated.remove_empty_dirs);
         assert!(!migrated.remote_mlip);
         assert_eq!(migrated.organize_mode, "offline");
         assert_eq!(migrated.organize_interval_secs, 300);
@@ -1208,7 +1208,7 @@ mod tests {
         assert!(!subscription.auto_organize);
         assert!(subscription.organize_target_folder.is_none());
         assert!(subscription.organize_season_mode);
-        assert!(!subscription.remove_empty_dirs);
+        assert!(subscription.remove_empty_dirs);
         assert!(!subscription.remote_mlip);
         assert_eq!(subscription.organize_mode, "offline");
         assert_eq!(subscription.organize_interval_secs, 300);
@@ -1245,7 +1245,7 @@ mod tests {
         assert!(!subscription.auto_organize);
         assert!(subscription.organize_target_folder.is_none());
         assert!(subscription.organize_season_mode);
-        assert!(!subscription.remove_empty_dirs);
+        assert!(subscription.remove_empty_dirs);
         assert!(!subscription.remote_mlip);
 
         db.update_subscription_organization_settings_with_mlip(

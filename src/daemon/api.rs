@@ -272,6 +272,7 @@ async fn capabilities() -> Json<CapabilitiesResponse> {
         "rss_poll",
         "rss_poll_all",
         "remote_rss_organize",
+        "cleanup_empty_dirs",
         "cloud_add_offline",
     ]);
     Json(CapabilitiesResponse {
@@ -542,7 +543,7 @@ fn organization_settings(
         }),
         remove_empty_dirs: request
             .remove_empty_dirs
-            .unwrap_or_else(|| existing.is_some_and(|subscription| subscription.remove_empty_dirs)),
+            .unwrap_or_else(|| existing.is_none_or(|subscription| subscription.remove_empty_dirs)),
         remote_mlip: request
             .remote_mlip
             .unwrap_or_else(|| existing.is_some_and(|subscription| subscription.remote_mlip)),

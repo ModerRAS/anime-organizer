@@ -255,6 +255,7 @@ fn run_organize(
             args.verbose,
             &subtitle_candidates,
             args.writes_library_index() && !args.dry_run,
+            &source,
             log,
         ) {
             Ok((target_path, sha256_full)) => {
@@ -553,6 +554,7 @@ async fn run_with_metadata(
                 args.verbose,
                 &subtitle_candidates,
                 args.writes_library_index() && !args.dry_run,
+                &source,
                 log,
             ) {
                 Ok((target_path, sha256_full)) => {
@@ -769,6 +771,39 @@ async fn prefetch_group_metadata(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn cleanup_moved_source_directories(
+    source: &Path,
+    subtitles: &[PathBuf],
+    source_root: &Path,
+    log: &dyn Fn(&str),
+) -> Result<(), AppError> {
+    let mut directories = subtitles
+        .iter()
+        .filter_map(|path| path.parent().map(Path::to_path_buf))
+        .chain(source.parent().map(Path::to_path_buf))
+        .collect::<Vec<_>>();
+    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    directories.dedup();
+    for directory in directories {
+        match FileOrganizer::cleanup_empty_ancestors(&directory, source_root) {
+            Ok(removed) => {
+                for path in removed {
+                    log(&format!(
+                        "Removed empty source directory {}",
+                        path.display()
+                    ));
+                }
+            }
+            Err(error) => log(&format!(
+                "Failed to clean empty source directory {}: {error}",
+                directory.display()
+            )),
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn organize_file_to_dir(
     anime_file: &AnimeFileInfo,
     target_dir: &Path,
@@ -778,6 +813,7 @@ fn organize_file_to_dir(
     verbose: bool,
     subtitle_candidates: &[PathBuf],
     hash_source: bool,
+    source_root: &Path,
     log: &dyn Fn(&str),
 ) -> Result<(PathBuf, Option<String>), AppError> {
     let source_hash = if hash_source {
@@ -806,6 +842,14 @@ fn organize_file_to_dir(
         anime_file, target_dir, mode, dry_run, &subtitles,
     ) {
         Ok(target_path) => {
+            if mode == OperationMode::Move && !dry_run {
+                cleanup_moved_source_directories(
+                    Path::new(&anime_file.original_path),
+                    &subtitles,
+                    source_root,
+                    log,
+                )?;
+            }
             if verbose && !dry_run {
                 println!(
                     "成功: {} -> {}",
@@ -833,7 +877,17 @@ fn organize_file_to_dir(
                         return FileOrganizer::organize_to_dir_with_subtitles(
                             anime_file, target_dir, fallback, dry_run, &subtitles,
                         )
-                        .map(|target_path| (target_path, source_hash))
+                        .and_then(|target_path| {
+                            if fallback == OperationMode::Move && !dry_run {
+                                cleanup_moved_source_directories(
+                                    Path::new(&anime_file.original_path),
+                                    &subtitles,
+                                    source_root,
+                                    log,
+                                )?;
+                            }
+                            Ok((target_path, source_hash))
+                        })
                         .map_err(|fallback_error| {
                             eprintln!(
                                 "处理文件失败 {}: {fallback_error}",

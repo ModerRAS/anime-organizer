@@ -118,6 +118,63 @@ pub(crate) async fn execute_with_progress(
                 artifacts: Vec::new(),
             });
         }
+        JobSpec::CleanupEmptyDirs {
+            subscription_id,
+            dry_run,
+        } => {
+            let subscription = db
+                .get_subscription(subscription_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("RSS subscription {subscription_id} was not found"))?;
+            let connection_id = subscription.connection_id.ok_or_else(|| {
+                format!("RSS subscription {subscription_id} has no CloudDrive connection")
+            })?;
+            let connection = runtime
+                .cloud
+                .repository
+                .get(connection_id)
+                .map_err(|error| error.to_string())?;
+            let client = runtime
+                .cloud
+                .authenticated_client(&connection)
+                .await
+                .map_err(|error| error.to_string())?;
+            let offline = client
+                .list_offline_files_by_path(&subscription.target_folder)
+                .await
+                .map_err(|error| error.to_string())?;
+            if offline.iter().any(|file| {
+                matches!(
+                    file.status,
+                    value if value == anime_organizer::rss::client::proto::OfflineFileStatus::OfflineInit as i32
+                        || value == anime_organizer::rss::client::proto::OfflineFileStatus::OfflineDownloading as i32
+                )
+            }) {
+                return Err(format!(
+                    "RSS subscription {subscription_id} still has active offline downloads; empty-directory cleanup was not started"
+                ));
+            }
+            let removed = cleanup_remote_empty_directories(
+                &*client,
+                &subscription.target_folder,
+                dry_run,
+                progress,
+            )
+            .await?;
+            return Ok(JobResult {
+                summary: if dry_run {
+                    format!("Found {} removable empty source folder(s)", removed.len())
+                } else {
+                    format!("Removed {} empty source folder(s)", removed.len())
+                },
+                data: serde_json::json!({
+                    "dry_run": dry_run,
+                    "root": subscription.target_folder,
+                    "directories": removed,
+                }),
+                artifacts: Vec::new(),
+            });
+        }
         _ => return Err("not an RSS job".to_string()),
     };
     Ok(JobResult {
@@ -125,6 +182,74 @@ pub(crate) async fn execute_with_progress(
         data: serde_json::json!({ "submitted": submitted }),
         artifacts: Vec::new(),
     })
+}
+
+async fn cleanup_remote_empty_directories(
+    client: &dyn CloudDriveClientTrait,
+    root: &str,
+    dry_run: bool,
+    progress: &ProgressReporter<'_>,
+) -> std::result::Result<Vec<String>, String> {
+    let root = root.trim_end_matches('/');
+    let mut pending = vec![root.to_string()];
+    let mut directories = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in client
+            .list_folder_fresh(&directory)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            if entry.is_directory {
+                if !safe_remote_component(&entry.name) {
+                    return Err(format!(
+                        "CloudDrive returned an unsafe directory name under '{directory}'"
+                    ));
+                }
+                let path = format!("{}/{}", directory.trim_end_matches('/'), entry.name);
+                directories.push(path.clone());
+                pending.push(path);
+            }
+        }
+    }
+    directories.sort_by_key(|path| std::cmp::Reverse(path.matches('/').count()));
+
+    let mut removed = Vec::new();
+    for directory in directories {
+        let entries = client
+            .list_folder_fresh(&directory)
+            .await
+            .map_err(|error| error.to_string())?;
+        let effectively_empty = entries.iter().all(|entry| {
+            entry.is_directory
+                && removed.iter().any(|removed_path| {
+                    removed_path == &format!("{}/{}", directory.trim_end_matches('/'), entry.name)
+                })
+        });
+        if effectively_empty {
+            if !dry_run {
+                client
+                    .delete_file(&directory)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            progress(
+                "info",
+                Some(removed.len() + 1),
+                None,
+                &format!(
+                    "{} empty source directory '{}'",
+                    if dry_run { "Found" } else { "Removed" },
+                    directory
+                ),
+            );
+            removed.push(directory);
+        }
+    }
+    Ok(removed)
+}
+
+fn safe_remote_component(value: &str) -> bool {
+    !value.is_empty() && value != "." && value != ".." && !value.contains(['/', '\\'])
 }
 
 async fn poll_one(
@@ -317,6 +442,65 @@ mod tests {
         async fn list_folder(&self, _: &str) -> Result<Vec<CloudDriveFile>> {
             Ok(Vec::new())
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct EmptyTreeCloud {
+        deleted: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl CloudDriveClientTrait for EmptyTreeCloud {
+        async fn login(&mut self, _: &str, _: &str) -> Result<String> {
+            Ok("token".to_string())
+        }
+
+        async fn add_offline_files(&self, _: Vec<String>, _: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn list_folder(&self, path: &str) -> Result<Vec<CloudDriveFile>> {
+            let deleted = self.deleted.lock().unwrap();
+            let child = match path {
+                "/source" if !deleted.iter().any(|value| value == "/source/parent") => {
+                    Some("parent")
+                }
+                "/source/parent" if !deleted.iter().any(|value| value == "/source/parent/leaf") => {
+                    Some("leaf")
+                }
+                _ => None,
+            };
+            Ok(child
+                .map(|name| CloudDriveFile {
+                    name: name.to_string(),
+                    is_directory: true,
+                    ..Default::default()
+                })
+                .into_iter()
+                .collect())
+        }
+
+        async fn delete_file(&self, path: &str) -> Result<()> {
+            self.deleted.lock().unwrap().push(path.to_string());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_empty_descendants_deepest_first_and_keeps_root() {
+        let cloud = EmptyTreeCloud::default();
+        let removed = cleanup_remote_empty_directories(&cloud, "/source", false, &|_, _, _, _| {})
+            .await
+            .unwrap();
+
+        assert_eq!(
+            removed,
+            vec![
+                "/source/parent/leaf".to_string(),
+                "/source/parent".to_string()
+            ]
+        );
+        assert_eq!(*cloud.deleted.lock().unwrap(), removed);
     }
 
     #[tokio::test]

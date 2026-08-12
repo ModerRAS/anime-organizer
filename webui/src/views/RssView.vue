@@ -8,7 +8,7 @@ import { formatDateTime, t, type MessageParams } from '../i18n'
 const subscriptions = ref<Subscription[]>([])
 const connections = ref<Connection[]>([])
 const editing = ref<number | null>(null)
-const form = ref({ url: '', filter_regex: '', target_folder: '/', interval_secs: 300, connection_id: null as number | null, auto_organize: false, organize_target_folder: '', organize_interval_secs: 300, organize_mode: 'offline' as 'offline' | 'original', organize_season_mode: true, remove_empty_dirs: false, remote_mlip: false })
+const form = ref({ url: '', filter_regex: '', target_folder: '/', interval_secs: 300, connection_id: null as number | null, auto_organize: false, organize_target_folder: '', organize_interval_secs: 300, organize_mode: 'offline' as 'offline' | 'original', organize_season_mode: true, remove_empty_dirs: true, remote_mlip: false })
 const error = ref('')
 const notice = ref<{ key: string; params?: MessageParams } | null>(null)
 const loading = ref(false)
@@ -31,7 +31,7 @@ async function load() {
 
 function reset() {
   editing.value = null
-  form.value = { url: '', filter_regex: '', target_folder: '/', interval_secs: 300, connection_id: null, auto_organize: false, organize_target_folder: '', organize_interval_secs: 300, organize_mode: 'offline', organize_season_mode: true, remove_empty_dirs: false, remote_mlip: false }
+  form.value = { url: '', filter_regex: '', target_folder: '/', interval_secs: 300, connection_id: null, auto_organize: false, organize_target_folder: '', organize_interval_secs: 300, organize_mode: 'offline', organize_season_mode: true, remove_empty_dirs: true, remote_mlip: false }
 }
 
 function edit(item: Subscription) {

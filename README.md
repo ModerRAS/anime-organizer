@@ -97,6 +97,8 @@ WebUI 和 typed WebAPI 仅监听 `http://127.0.0.1:32145/`。有限任务由一�
 
 RSS 自动整理支持两种来源模式：`offline` 通过 BTIH 关联 CloudDrive 离线任务，`original` 直接扫描订阅配置的远端源目录，不依赖离线下载记录。启用“远端 MLIP”时，daemon 只在 hash 缓存未命中时把原始媒体下载到系统临时文件，校验大小并在本地计算完整 SHA-256；随后下载目标根目录的 `library.db` 执行 SQLite 增量事务，再通过远端临时文件、备份重命名和 SHA-256 校验发布，最后调用 CloudDrive API 移动媒体。关闭“远端 MLIP”的原始模式不会下载或 hash 媒体，而是直接调用 CloudDrive `CopyFile`；同名同大小的既有目标视为已复制，不会再次下载或复制。MLIP 发布失败时不会移动源 bundle、完成 RSS 任务或删除源目录。
 
+本地 `move` 成功后默认从最深层开始清理本次文件涉及的空源目录，保留源根目录及任何仍含文件的目录。新 RSS 订阅默认删除已完成离线任务留下的空根目录。订阅详情页还提供“预览空目录”和“清理空目录”：手动清理会递归处理该订阅源目录下所有空目录，但保留订阅根目录；只要 CloudDrive 仍报告 `init` 或 `downloading` 离线任务，daemon 就拒绝开始清理。
+
 ### 🎯 快速开始
 
 #### 基本用法
@@ -806,6 +808,8 @@ aniorg.exe --daemon
 The WebUI and typed WebAPI listen only on `http://127.0.0.1:32145/`. One durable worker executes finite jobs serially, with daemon state stored in `%LOCALAPPDATA%\anime-organizer\daemon.db`. CloudDrive tokens, usernames, and passwords rely on the current Windows user's ACL and are stored as plaintext in that local database; they are never returned by the API or stored in the browser. v1 is intended only for a trusted, single-user local machine.
 
 RSS automatic organization can optionally publish a remote MLIP index. The daemon hashes videos through CloudDrive download streams, downloads `library.db` from the remote organization root into a system temporary file, applies an incremental SQLite transaction, then publishes it back using a remote temporary file, backup rename, and SHA-256 verification. No locally mounted media root is requested or required. An MLIP publication failure leaves the source bundle unmoved, the RSS task unfinished, and source cleanup disabled for that attempt.
+
+After a successful local `move`, empty source ancestors involved in that move are removed deepest-first while the source root and every non-empty directory are retained. New RSS subscriptions remove completed offline-task roots by default. The subscription detail page also provides preview and apply actions for recursively cleaning all empty directories below that subscription's source root. The root itself is retained, and cleanup is rejected while CloudDrive reports any `init` or `downloading` offline task.
 
 ### 🎯 Quick Start
 

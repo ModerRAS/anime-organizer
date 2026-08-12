@@ -81,6 +81,12 @@ pub(crate) enum JobSpec {
         subscription_id: i64,
     },
     #[cfg(feature = "clouddrive")]
+    CleanupEmptyDirs {
+        subscription_id: i64,
+        #[serde(default)]
+        dry_run: bool,
+    },
+    #[cfg(feature = "clouddrive")]
     CloudAddOffline(CloudAddOfflineJobArgs),
     #[cfg(feature = "scraper")]
     Scrape(crate::cli::ScrapeArgs),
@@ -121,6 +127,8 @@ impl JobSpec {
             #[cfg(feature = "clouddrive")]
             Self::RemoteRssOrganize { .. } => "remote_rss_organize",
             #[cfg(feature = "clouddrive")]
+            Self::CleanupEmptyDirs { .. } => "cleanup_empty_dirs",
+            #[cfg(feature = "clouddrive")]
             Self::CloudAddOffline(_) => "cloud_add_offline",
             #[cfg(feature = "scraper")]
             Self::Scrape(_) => "scrape",
@@ -144,9 +152,11 @@ impl JobSpec {
     pub(crate) fn resource_key(&self) -> Option<String> {
         #[cfg(feature = "clouddrive")]
         match self {
-            Self::RssPoll { subscription_id } | Self::RemoteRssOrganize { subscription_id } => {
-                Some(format!("rss:{subscription_id}"))
-            }
+            Self::RssPoll { subscription_id }
+            | Self::RemoteRssOrganize { subscription_id }
+            | Self::CleanupEmptyDirs {
+                subscription_id, ..
+            } => Some(format!("rss:{subscription_id}")),
             Self::RssPollAll => Some("rss:all".to_string()),
             _ => None,
         }
@@ -163,6 +173,7 @@ impl JobSpec {
             Self::RssPoll { .. }
             | Self::RssPollAll
             | Self::RemoteRssOrganize { .. }
+            | Self::CleanupEmptyDirs { .. }
             | Self::CloudAddOffline(_) => true,
             #[cfg(feature = "scraper")]
             Self::Scrape(_) | Self::MatchAliases(_) => true,
@@ -248,6 +259,22 @@ impl JobSpec {
                     return Err(
                         "normalize layout jobs cannot originate from qBittorrent".to_string()
                     );
+                }
+                Ok(())
+            }
+            #[cfg(feature = "clouddrive")]
+            Self::CleanupEmptyDirs {
+                subscription_id,
+                dry_run,
+            } => {
+                if *subscription_id <= 0 {
+                    return Err("subscription_id must be positive".to_string());
+                }
+                if !dry_run && !confirmed {
+                    return Err("cleanup_empty_dirs requires confirmed=true".to_string());
+                }
+                if origin != JobOrigin::Manual {
+                    return Err("cleanup_empty_dirs must be submitted manually".to_string());
                 }
                 Ok(())
             }
@@ -579,6 +606,25 @@ mod tests {
         assert!(response.contains("[redacted]"));
         assert!(response.contains("1970-01-01T00:00:00Z"));
         assert!(response.contains("\"cancelable\":true"));
+    }
+
+    #[cfg(feature = "clouddrive")]
+    #[test]
+    fn empty_directory_cleanup_requires_manual_confirmation() {
+        let preview = JobSpec::CleanupEmptyDirs {
+            subscription_id: 1,
+            dry_run: true,
+        };
+        assert!(preview.validate(false, JobOrigin::Manual, None).is_ok());
+
+        let apply = JobSpec::CleanupEmptyDirs {
+            subscription_id: 1,
+            dry_run: false,
+        };
+        assert!(apply.validate(false, JobOrigin::Manual, None).is_err());
+        assert!(apply.validate(true, JobOrigin::Scheduled, None).is_err());
+        assert!(apply.validate(true, JobOrigin::Manual, None).is_ok());
+        assert_eq!(apply.resource_key().as_deref(), Some("rss:1"));
     }
 
     #[cfg(feature = "clouddrive")]

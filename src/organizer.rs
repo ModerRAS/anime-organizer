@@ -186,6 +186,59 @@ impl FileOrganizer {
         Ok(target_path)
     }
 
+    /// 从最深层开始删除根目录下的空目录，保留根目录本身。
+    pub fn cleanup_empty_directories<P: AsRef<Path>>(
+        root: P,
+        dry_run: bool,
+    ) -> Result<Vec<PathBuf>> {
+        let root = root.as_ref();
+        if !root.is_dir() {
+            return Err(AppError::SourceNotFound(root.to_path_buf()));
+        }
+        let mut directories = WalkDir::new(root)
+            .min_depth(1)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_dir())
+            .map(|entry| entry.into_path())
+            .collect::<Vec<_>>();
+        directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+
+        let mut removed = Vec::new();
+        for directory in directories {
+            let is_empty = fs::read_dir(&directory)?.next().is_none();
+            if is_empty {
+                if !dry_run {
+                    fs::remove_dir(&directory)?;
+                }
+                removed.push(directory);
+            }
+        }
+        Ok(removed)
+    }
+
+    /// 删除指定目录及其空父目录，最多清理到根目录但不删除根目录本身。
+    pub fn cleanup_empty_ancestors<P: AsRef<Path>, Q: AsRef<Path>>(
+        directory: P,
+        root: Q,
+    ) -> Result<Vec<PathBuf>> {
+        let root = root.as_ref();
+        let mut current = directory.as_ref().to_path_buf();
+        let mut removed = Vec::new();
+        while current != root && current.starts_with(root) {
+            if !current.is_dir() || fs::read_dir(&current)?.next().is_some() {
+                break;
+            }
+            fs::remove_dir(&current)?;
+            removed.push(current.clone());
+            let Some(parent) = current.parent() else {
+                break;
+            };
+            current = parent.to_path_buf();
+        }
+        Ok(removed)
+    }
+
     /// 扫描一次批处理根目录中的所有外部字幕候选。
     ///
     /// 单文件任务（例如 qBittorrent 完成钩子）从文件的父目录扫描，
@@ -612,6 +665,35 @@ mod tests {
 
         assert_eq!(target_path, source_file);
         assert_eq!(fs::read_to_string(target_path).unwrap(), "test content");
+    }
+
+    #[test]
+    fn cleanup_empty_directories_removes_only_empty_descendants() {
+        let root = TempDir::new().unwrap();
+        let empty_leaf = root.path().join("empty").join("leaf");
+        let occupied = root.path().join("occupied");
+        fs::create_dir_all(&empty_leaf).unwrap();
+        fs::create_dir_all(&occupied).unwrap();
+        create_test_file(&occupied, "keep.txt", "keep");
+
+        let removed = FileOrganizer::cleanup_empty_directories(root.path(), false).unwrap();
+
+        assert_eq!(removed.len(), 2);
+        assert!(!root.path().join("empty").exists());
+        assert!(occupied.exists());
+        assert!(root.path().exists());
+    }
+
+    #[test]
+    fn cleanup_empty_directories_dry_run_keeps_directories() {
+        let root = TempDir::new().unwrap();
+        let empty = root.path().join("empty");
+        fs::create_dir(&empty).unwrap();
+
+        let removed = FileOrganizer::cleanup_empty_directories(root.path(), true).unwrap();
+
+        assert_eq!(removed, vec![empty.clone()]);
+        assert!(empty.exists());
     }
 
     #[test]

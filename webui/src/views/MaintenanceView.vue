@@ -31,11 +31,12 @@ function valid(form: FormState) {
 async function loadJobs() {
   loading.value = true
   try {
-    const [layoutJobs, artworkJobs] = await Promise.all([
+    const [layoutJobs, artworkJobs, cleanupJobs] = await Promise.all([
       api.jobs({ kind: 'normalize_layout', limit: 20 }),
       api.jobs({ kind: 'compact_artwork_packs', limit: 20 }),
+      api.jobs({ kind: 'cleanup_empty_dirs', limit: 20 }),
     ])
-    jobs.value = [...layoutJobs.jobs, ...artworkJobs.jobs].sort((a, b) => b.id - a.id)
+    jobs.value = [...layoutJobs.jobs, ...artworkJobs.jobs, ...cleanupJobs.jobs].sort((a, b) => b.id - a.id)
     error.value = ''
   } catch (reason) {
     error.value = errorMessage(reason)
