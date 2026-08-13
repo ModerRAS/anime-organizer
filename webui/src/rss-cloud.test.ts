@@ -31,6 +31,23 @@ describe('RSS and CloudDrive API contracts', () => {
     })
   })
 
+  it('queues a typed empty-directory cleanup job with dry-run safety flags', async () => {
+    const response = () => new Response(JSON.stringify({ job: { id: 10 }, duplicate: false }), { status: 202 })
+    const fetchMock = vi.fn().mockImplementation(response)
+    vi.stubGlobal('fetch', fetchMock)
+    await api.cleanupEmptyDirs(7, true)
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      origin: 'manual',
+      confirmed: false,
+      job: { type: 'cleanup_empty_dirs', args: { subscription_id: 7, dry_run: true } },
+    })
+    await api.cleanupEmptyDirs(7, false)
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({
+      origin: 'manual',
+      confirmed: true,
+      job: { type: 'cleanup_empty_dirs', args: { subscription_id: 7, dry_run: false } },
+    })
+  })
   it('uses the bounded folder endpoint with a breadcrumb path', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ entries: [] }), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)

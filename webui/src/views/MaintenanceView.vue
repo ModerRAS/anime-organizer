@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref, watch } from 'vue'
-import { Archive, FileCheck2, FilePlus2, LoaderCircle, Play, RefreshCw, Rows3 } from 'lucide-vue-next'
+import { Archive, Eye, FileCheck2, FilePlus2, LoaderCircle, Play, RefreshCw, Rows3, Trash2 } from 'lucide-vue-next'
 import { RouterLink, useRouter } from 'vue-router'
-import { api, errorMessage, type Job } from '../api'
+import { api, errorMessage, type Job, type Subscription } from '../api'
 import { formatDateTime, t, valueLabel } from '../i18n'
 
 type Mode = 'plan' | 'apply'
@@ -13,6 +13,8 @@ const target = ref('')
 const layout = reactive<FormState>({ mode: 'plan', path: '', confirmed: false })
 const artwork = reactive<FormState>({ mode: 'plan', path: '', confirmed: false })
 const jobs = ref<Job[]>([])
+const subscriptions = ref<Subscription[]>([])
+const cleanupState = reactive<Record<number, 'preview' | 'apply' | ''>>({})
 const loading = ref(false)
 const submitting = ref<'layout' | 'artwork' | ''>('')
 const error = ref('')
@@ -31,17 +33,34 @@ function valid(form: FormState) {
 async function loadJobs() {
   loading.value = true
   try {
-    const [layoutJobs, artworkJobs, cleanupJobs] = await Promise.all([
+    const [layoutJobs, artworkJobs, cleanupJobs, rss] = await Promise.all([
       api.jobs({ kind: 'normalize_layout', limit: 20 }),
       api.jobs({ kind: 'compact_artwork_packs', limit: 20 }),
       api.jobs({ kind: 'cleanup_empty_dirs', limit: 20 }),
+      api.subscriptions().catch(() => ({ subscriptions: [] })),
     ])
     jobs.value = [...layoutJobs.jobs, ...artworkJobs.jobs, ...cleanupJobs.jobs].sort((a, b) => b.id - a.id)
+    subscriptions.value = rss.subscriptions
     error.value = ''
   } catch (reason) {
     error.value = errorMessage(reason)
   } finally {
     loading.value = false
+  }
+}
+
+async function cleanupEmptyDirs(subscription: Subscription, dryRun: boolean) {
+  if (cleanupState[subscription.id]) return
+  if (!dryRun && !window.confirm(t('Delete all empty folders under this subscription source?'))) return
+  cleanupState[subscription.id] = dryRun ? 'preview' : 'apply'
+  error.value = ''
+  try {
+    const result = await api.cleanupEmptyDirs(subscription.id, dryRun)
+    await router.push(`/jobs/${result.job.id}`)
+  } catch (reason) {
+    error.value = errorMessage(reason)
+  } finally {
+    cleanupState[subscription.id] = ''
   }
 }
 
@@ -134,6 +153,13 @@ onMounted(loadJobs)
       </form>
     </section>
   </div>
+
+  <section v-if="subscriptions.length" class="section-block" aria-labelledby="rss-cleanup-heading">
+    <div class="section-heading"><div><p class="eyebrow">{{ t('CloudDrive') }}</p><h2 id="rss-cleanup-heading">{{ t('RSS source cleanup') }}</h2></div></div>
+    <div class="table-wrap"><table><thead><tr><th>{{ t('Subscription') }}</th><th>{{ t('Source folder') }}</th><th>{{ t('Empty folder cleanup') }}</th><th><span class="sr-only">{{ t('Actions') }}</span></th></tr></thead><tbody>
+      <tr v-for="subscription in subscriptions" :key="subscription.id"><td><RouterLink :to="`/rss/${subscription.id}`">#{{ subscription.id }}</RouterLink><small class="table-subtext">{{ subscription.url }}</small></td><td class="error-cell">{{ subscription.target_folder }}</td><td>{{ t(subscription.remove_empty_dirs ? 'Enabled' : 'Disabled') }}</td><td class="actions"><button class="button secondary" type="button" :disabled="(cleanupState[subscription.id] || '') !== ''" @click="cleanupEmptyDirs(subscription, true)"><LoaderCircle v-if="cleanupState[subscription.id] === 'preview'" class="spinning" :size="15" aria-hidden="true" /><Eye v-else :size="15" aria-hidden="true" />{{ t('Preview empty folders') }}</button><button class="button danger" type="button" :disabled="(cleanupState[subscription.id] || '') !== ''" @click="cleanupEmptyDirs(subscription, false)"><LoaderCircle v-if="cleanupState[subscription.id] === 'apply'" class="spinning" :size="15" aria-hidden="true" /><Trash2 v-else :size="15" aria-hidden="true" />{{ t('Clean empty folders') }}</button></td></tr>
+    </tbody></table></div>
+  </section>
 
   <section class="section-block" aria-labelledby="maintenance-history-heading">
     <div class="section-heading"><div><p class="eyebrow">{{ t('History') }}</p><h2 id="maintenance-history-heading">{{ t('Recent maintenance jobs') }}</h2></div><span class="record-count">{{ t('{count} records', { count: jobs.length }) }}</span></div>
