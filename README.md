@@ -93,9 +93,29 @@ Windows 使用以下唯一入口启动本地 daemon：
 aniorg.exe --daemon
 ```
 
-WebUI 和 typed WebAPI 仅监听 `http://127.0.0.1:32145/`。有限任务由一个持久化 worker 串行执行；daemon 数据位于 `%LOCALAPPDATA%\anime-organizer\daemon.db`。CloudDrive token、用户名和密码依赖当前 Windows 用户对该目录的 ACL 保护，以明文存储在本地数据库中，但不会由 API 返回，也不会写入浏览器存储。v1 仅适用于受信任的本机单用户环境。
+WebUI 和 typed WebAPI 仅监听 `http://127.0.0.1:32145/`。有限任务由一个持久化 worker 串行执行；daemon 数据位于 `%LOCALAPPDATA%\anime-organizer\daemon.db`。CloudDrive token 以及 CloudDrive/WebDAV 用户名和密码依赖当前 Windows 用户对该目录的 ACL 保护，以明文存储在本地数据库中，但不会由 API 返回，也不会写入浏览器存储。v1 仅适用于受信任的本机单用户环境。
 
-RSS 自动整理支持两种来源模式：`offline` 通过 BTIH 关联 CloudDrive 离线任务，`original` 直接扫描订阅配置的远端源目录，不依赖离线下载记录。启用“远端 MLIP”时，daemon 只在 hash 缓存未命中时把原始媒体下载到系统临时文件，校验大小并在本地计算完整 SHA-256；随后下载目标根目录的 `library.db` 执行 SQLite 增量事务，再通过远端临时文件、备份重命名和 SHA-256 校验发布，最后调用 CloudDrive API 移动媒体。关闭“远端 MLIP”的原始模式不会下载或 hash 媒体，而是直接调用 CloudDrive `CopyFile`；同名同大小的既有目标视为已复制，不会再次下载或复制。MLIP 发布失败时不会移动源 bundle、完成 RSS 任务或删除源目录。
+RSS 自动整理支持两种来源模式：`offline` 通过 BTIH 关联 CloudDrive 离线任务，`original` 直接扫描订阅配置的远端源目录，不依赖离线下载记录。RSS 下载连接必须是 CloudDrive；整理目标连接可独立选择 CloudDrive 或 WebDAV。启用“远端 MLIP”时，daemon 只在 hash 缓存未命中时把原始媒体下载到系统临时文件，校验大小并在本地计算完整 SHA-256；随后下载目标根目录的 `library.db` 执行 SQLite 增量事务，再通过远端临时文件、备份重命名和 SHA-256 校验发布，最后才移动媒体。关闭“远端 MLIP”的原始模式不会 hash 媒体；同连接使用原生 `CopyFile`，跨连接使用经过大小和 SHA-256 验证的流式传输。MLIP 发布失败时不会移动源 bundle、完成 RSS 任务或删除源目录。
+
+通用 `storage_organize` typed job 支持本地目录、CloudDrive 连接和 WebDAV 连接之间的 `copy`/`move` 组合。相同远端连接优先使用后端原生 `COPY`/`MOVE`；跨端点先下载到 daemon 临时文件，再以隐藏临时名上传，按大小和 SHA-256 校验，重命名为最终文件，最后才删除源。WebDAV 连接支持标准 `PROPFIND/MKCOL/GET/PUT/COPY/MOVE/DELETE` 和可选 Basic Auth，不提供 magnet/offline 下载。硬链接仍由原本地 `organize` job 处理。
+
+```json
+{
+  "origin": "manual",
+  "confirmed": true,
+  "job": {
+    "type": "storage_organize",
+    "args": {
+      "source": { "type": "local", "path": "C:\\Downloads\\Anime" },
+      "target": { "type": "connection", "connection_id": 2, "path": "/Anime" },
+      "mode": "move",
+      "season_mode": true,
+      "mlip": true,
+      "remove_empty_dirs": true
+    }
+  }
+}
+```
 
 本地 `move` 成功后默认从最深层开始清理本次文件涉及的空源目录，保留源根目录及任何仍含文件的目录。新 RSS 订阅默认删除已完成离线任务留下的空根目录。订阅详情页还提供“预览空目录”和“清理空目录”：手动清理会递归处理该订阅源目录下所有空目录，但保留订阅根目录；只要 CloudDrive 仍报告 `init` 或 `downloading` 离线任务，daemon 就拒绝开始清理。
 
@@ -805,9 +825,11 @@ On Windows, start the local daemon through its single entry point:
 aniorg.exe --daemon
 ```
 
-The WebUI and typed WebAPI listen only on `http://127.0.0.1:32145/`. One durable worker executes finite jobs serially, with daemon state stored in `%LOCALAPPDATA%\anime-organizer\daemon.db`. CloudDrive tokens, usernames, and passwords rely on the current Windows user's ACL and are stored as plaintext in that local database; they are never returned by the API or stored in the browser. v1 is intended only for a trusted, single-user local machine.
+The WebUI and typed WebAPI listen only on `http://127.0.0.1:32145/`. One durable worker executes finite jobs serially, with daemon state stored in `%LOCALAPPDATA%\anime-organizer\daemon.db`. CloudDrive tokens and CloudDrive/WebDAV usernames and passwords rely on the current Windows user's ACL and are stored as plaintext in that local database; they are never returned by the API or stored in the browser. v1 is intended only for a trusted, single-user local machine.
 
-RSS automatic organization can optionally publish a remote MLIP index. The daemon hashes videos through CloudDrive download streams, downloads `library.db` from the remote organization root into a system temporary file, applies an incremental SQLite transaction, then publishes it back using a remote temporary file, backup rename, and SHA-256 verification. No locally mounted media root is requested or required. An MLIP publication failure leaves the source bundle unmoved, the RSS task unfinished, and source cleanup disabled for that attempt.
+RSS automatic organization keeps CloudDrive as the download/offline-task connection, while its organization target may independently use CloudDrive or WebDAV. Remote MLIP publication downloads uncached source media to a daemon temporary file for size and SHA-256 verification, updates `library.db` locally, then publishes it through a staged remote file, backup rename, and hash verification. Publication completes before any source mutation.
+
+The `storage_organize` typed job supports `copy` and `move` between local directories, CloudDrive connections, and WebDAV connections. Same-connection operations prefer native `COPY`/`MOVE`; cross-endpoint moves stage, upload, verify size and SHA-256, publish final names, and only then delete source files. WebDAV supports standard file operations with optional Basic Auth but not magnet/offline download. Local hard links remain part of the existing `organize` job.
 
 After a successful local `move`, empty source ancestors involved in that move are removed deepest-first while the source root and every non-empty directory are retained. New RSS subscriptions remove completed offline-task roots by default. The subscription detail page also provides preview and apply actions for recursively cleaning all empty directories below that subscription's source root. The root itself is retained, and cleanup is rejected while CloudDrive reports any `init` or `downloading` offline task.
 

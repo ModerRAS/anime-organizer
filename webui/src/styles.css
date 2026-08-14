@@ -59,6 +59,9 @@ a:hover { text-decoration: underline; }
 .button.secondary { background: #fff; border-color: #ccd7de; color: #43515b; }
 .button.secondary:hover { border-color: #1769aa; color: #1769aa; }
 .button:disabled { cursor: not-allowed; opacity: .55; }
+.organize-tabs { background: #edf2f5; border: 1px solid #d5dee4; border-radius: 5px; display: inline-flex; margin: -8px 0 22px; padding: 3px; }
+.organize-tabs button { background: transparent; border: 0; border-radius: 3px; color: #63717b; cursor: pointer; min-height: 32px; padding: 6px 13px; }
+.organize-tabs button.active { background: #fff; box-shadow: 0 1px 2px rgba(35, 50, 60, .12); color: #1769aa; font-weight: 650; }
 .text-link { align-items: center; display: inline-flex; gap: 5px; font-size: 13px; }
 .back-link { align-items: center; display: inline-flex; font-size: 13px; gap: 5px; margin-bottom: 11px; }
 .record-count { color: #7d8992; font-size: 12px; padding-bottom: 7px; }

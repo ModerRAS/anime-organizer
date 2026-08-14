@@ -1,5 +1,8 @@
 use super::cloud::CloudDriveState;
-use super::model::{EnqueueRequest, JobOrigin, JobResult, JobSpec};
+use super::model::{
+    EnqueueRequest, JobOrigin, JobResult, JobSpec, StorageEndpointArgs, StorageOrganizeJobArgs,
+    StorageOrganizeMode,
+};
 use super::queue::QueueRepository;
 use anime_organizer::rss::client::CloudDriveClientTrait;
 use anime_organizer::rss::db::RssDatabase;
@@ -61,7 +64,7 @@ pub(crate) async fn execute_with_progress(
                 "info",
                 None,
                 None,
-                &format!("Loading RSS subscription {subscription_id} and CloudDrive connection"),
+                &format!("Loading RSS subscription {subscription_id} and storage connections"),
             );
             let subscription = db
                 .get_subscription(subscription_id)
@@ -75,22 +78,41 @@ pub(crate) async fn execute_with_progress(
             let connection_id = subscription.connection_id.ok_or_else(|| {
                 format!("RSS subscription {subscription_id} has no CloudDrive connection")
             })?;
-            let connection = runtime
+            let source_connection = runtime
                 .cloud
                 .repository
                 .get(connection_id)
                 .map_err(|error| error.to_string())?;
-            let client = runtime
+            let source_client = runtime
                 .cloud
-                .authenticated_client(&connection)
+                .authenticated_client(&source_connection)
                 .await
                 .map_err(|error| error.to_string())?;
+            let target_connection_id = subscription
+                .organize_target_connection_id
+                .unwrap_or(connection_id);
+            let target_client = if target_connection_id == connection_id {
+                None
+            } else {
+                let target_connection = runtime
+                    .cloud
+                    .repository
+                    .get(target_connection_id)
+                    .map_err(|error| error.to_string())?;
+                Some(
+                    runtime
+                        .cloud
+                        .authenticated_client(&target_connection)
+                        .await
+                        .map_err(|error| error.to_string())?,
+                )
+            };
             progress(
                 "info",
                 None,
                 None,
                 &format!(
-                    "Authenticated CloudDrive connection {connection_id}; source='{}', target='{}', mode={}, remote_mlip={}, remove_empty_dirs={}",
+                    "Authenticated RSS storage connections: source={connection_id}, target={target_connection_id}; source='{}', target='{}', mode={}, remote_mlip={}, remove_empty_dirs={}",
                     subscription.target_folder,
                     subscription.organize_target_folder.as_deref().unwrap_or("<missing>"),
                     subscription.organize_mode,
@@ -98,10 +120,19 @@ pub(crate) async fn execute_with_progress(
                     subscription.remove_empty_dirs
                 ),
             );
-            let summary = super::remote_organize::organize_subscription_with_progress(
+            let target_client = target_client.as_deref().unwrap_or(&*source_client);
+            let summary = super::remote_organize::organize_subscription_between_with_progress(
                 &db,
                 &subscription,
-                &*client,
+                &*source_client,
+                target_client,
+                super::remote_organize::RemoteOrganizeOptions {
+                    same_connection: target_connection_id == connection_id,
+                    use_native_transfers: target_connection_id == connection_id,
+                    move_sources: subscription.remote_mlip
+                        || subscription.organize_mode != "original",
+                    source_root_as_bundle: false,
+                },
                 progress,
             )
             .await?;
@@ -184,13 +215,164 @@ pub(crate) async fn execute_with_progress(
     })
 }
 
+pub(crate) async fn execute_storage_organize(
+    args: &StorageOrganizeJobArgs,
+    runtime: &RssRuntime,
+    progress: &ProgressReporter<'_>,
+) -> std::result::Result<JobResult, String> {
+    validate_local_endpoint_relationship(&args.source, &args.target)?;
+    let temporary = tempfile::NamedTempFile::new()
+        .map_err(|error| format!("create storage organize planning database failed: {error}"))?;
+    let db = RssDatabase::new(temporary.path()).map_err(|error| error.to_string())?;
+    let source_path = endpoint_logical_path(&args.source);
+    let target_path = endpoint_logical_path(&args.target);
+    let subscription_id = db
+        .add_subscription(
+            "https://storage-organize.invalid/plan",
+            None,
+            source_path,
+            300,
+        )
+        .map_err(|error| error.to_string())?;
+    db.update_subscription_organization_settings_with_mlip_and_mode(
+        subscription_id,
+        true,
+        Some(target_path),
+        args.season_mode,
+        args.remove_empty_dirs,
+        args.mlip,
+        "original",
+    )
+    .map_err(|error| error.to_string())?;
+    let subscription = db
+        .get_subscription(subscription_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "temporary storage organization plan disappeared".to_string())?;
+
+    let source_client = endpoint_client(&args.source, runtime).await?;
+    let same_connection = matches!(
+        (&args.source, &args.target),
+        (
+            StorageEndpointArgs::Connection { connection_id: source, .. },
+            StorageEndpointArgs::Connection { connection_id: target, .. }
+        ) if source == target
+    );
+    let use_native_transfers = if same_connection {
+        let StorageEndpointArgs::Connection { connection_id, .. } = &args.source else {
+            unreachable!("same_connection only matches connection endpoints")
+        };
+        runtime
+            .cloud
+            .repository
+            .get(*connection_id)
+            .map_err(|error| error.to_string())?
+            .kind
+            == "clouddrive"
+    } else {
+        false
+    };
+    let target_client = if same_connection {
+        None
+    } else {
+        Some(endpoint_client(&args.target, runtime).await?)
+    };
+    let target_client = target_client.as_deref().unwrap_or(&*source_client);
+    let mut summary = super::remote_organize::organize_subscription_between_with_progress(
+        &db,
+        &subscription,
+        &*source_client,
+        target_client,
+        super::remote_organize::RemoteOrganizeOptions {
+            same_connection,
+            use_native_transfers,
+            move_sources: args.mode == StorageOrganizeMode::Move,
+            source_root_as_bundle: true,
+        },
+        progress,
+    )
+    .await?;
+    if args.remove_empty_dirs {
+        let removed =
+            cleanup_remote_empty_directories(&*source_client, source_path, false, progress).await?;
+        summary.removed_empty_directories += removed.len();
+    }
+    Ok(JobResult {
+        summary: format!(
+            "Storage organize moved {} media file(s), copied {} media file(s), removed {} empty source folder(s), skipped {} conflict(s)",
+            summary.moved_media,
+            summary.copied_media,
+            summary.removed_empty_directories,
+            summary.skipped_conflicts
+        ),
+        data: serde_json::to_value(summary).map_err(|error| error.to_string())?,
+        artifacts: Vec::new(),
+    })
+}
+
+fn validate_local_endpoint_relationship(
+    source: &StorageEndpointArgs,
+    target: &StorageEndpointArgs,
+) -> std::result::Result<(), String> {
+    let (StorageEndpointArgs::Local { path: source }, StorageEndpointArgs::Local { path: target }) =
+        (source, target)
+    else {
+        return Ok(());
+    };
+    let source = source
+        .canonicalize()
+        .map_err(|error| format!("resolve local storage source failed: {error}"))?;
+    let target = target
+        .canonicalize()
+        .map_err(|error| format!("resolve local storage target failed: {error}"))?;
+    if source == target || source.starts_with(&target) || target.starts_with(&source) {
+        return Err("local storage source and target must not be equal or nested".to_string());
+    }
+    Ok(())
+}
+
+fn endpoint_logical_path(endpoint: &StorageEndpointArgs) -> &str {
+    match endpoint {
+        StorageEndpointArgs::Local { .. } => "/",
+        StorageEndpointArgs::Connection { path, .. } => path,
+    }
+}
+
+async fn endpoint_client(
+    endpoint: &StorageEndpointArgs,
+    runtime: &RssRuntime,
+) -> std::result::Result<Box<dyn CloudDriveClientTrait>, String> {
+    match endpoint {
+        StorageEndpointArgs::Local { path } => {
+            anime_organizer::rss::local::LocalStorageClient::new(path)
+                .map(|client| Box::new(client) as Box<dyn CloudDriveClientTrait>)
+                .map_err(|error| error.to_string())
+        }
+        StorageEndpointArgs::Connection { connection_id, .. } => {
+            let connection = runtime
+                .cloud
+                .repository
+                .get(*connection_id)
+                .map_err(|error| error.to_string())?;
+            runtime
+                .cloud
+                .authenticated_client(&connection)
+                .await
+                .map_err(|error| error.to_string())
+        }
+    }
+}
+
 async fn cleanup_remote_empty_directories(
     client: &dyn CloudDriveClientTrait,
     root: &str,
     dry_run: bool,
     progress: &ProgressReporter<'_>,
 ) -> std::result::Result<Vec<String>, String> {
-    let root = root.trim_end_matches('/');
+    let root = if root == "/" {
+        "/"
+    } else {
+        root.trim_end_matches('/')
+    };
     let mut pending = vec![root.to_string()];
     let mut directories = Vec::new();
     while let Some(directory) = pending.pop() {
@@ -205,7 +387,11 @@ async fn cleanup_remote_empty_directories(
                         "CloudDrive returned an unsafe directory name under '{directory}'"
                     ));
                 }
-                let path = format!("{}/{}", directory.trim_end_matches('/'), entry.name);
+                let path = if directory == "/" {
+                    format!("/{}", entry.name)
+                } else {
+                    format!("{}/{}", directory.trim_end_matches('/'), entry.name)
+                };
                 directories.push(path.clone());
                 pending.push(path);
             }
@@ -222,7 +408,12 @@ async fn cleanup_remote_empty_directories(
         let effectively_empty = entries.iter().all(|entry| {
             entry.is_directory
                 && removed.iter().any(|removed_path| {
-                    removed_path == &format!("{}/{}", directory.trim_end_matches('/'), entry.name)
+                    let child = if directory == "/" {
+                        format!("/{}", entry.name)
+                    } else {
+                        format!("{}/{}", directory.trim_end_matches('/'), entry.name)
+                    };
+                    removed_path == &child
                 })
         });
         if effectively_empty {
@@ -487,6 +678,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn storage_organize_moves_local_video_and_subtitle_as_one_bundle() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("source");
+        let target = directory.path().join("target");
+        std::fs::create_dir_all(source.join("empty").join("nested")).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        let video_name = "[ANi] Storage Show - 01 [1080P].mkv";
+        let subtitle_name = "[ANi] Storage Show - 01 [1080P].zh-CN.ass";
+        std::fs::write(source.join(video_name), b"video bytes").unwrap();
+        std::fs::write(source.join(subtitle_name), b"subtitle bytes").unwrap();
+        let repository =
+            CloudConnectionRepository::new(&directory.path().join("daemon.db")).unwrap();
+        let runtime = RssRuntime {
+            cloud: CloudDriveState::with_factory(
+                repository,
+                Arc::new(|_| Ok(Box::new(MockCloud) as Box<dyn CloudDriveClientTrait>)),
+            ),
+            rss_db_path: directory.path().join("rss.db"),
+        };
+        let args = StorageOrganizeJobArgs {
+            source: StorageEndpointArgs::Local {
+                path: source.clone(),
+            },
+            target: StorageEndpointArgs::Local {
+                path: target.clone(),
+            },
+            mode: StorageOrganizeMode::Move,
+            season_mode: false,
+            mlip: false,
+            remove_empty_dirs: true,
+        };
+
+        let result = execute_storage_organize(&args, &runtime, &|_, _, _, _| {})
+            .await
+            .unwrap();
+
+        assert_eq!(result.data["moved_media"], 1);
+        assert!(source.is_dir());
+        assert!(!source.join("empty").exists());
+        assert!(!source.join(video_name).exists());
+        assert!(!source.join(subtitle_name).exists());
+        assert_eq!(
+            std::fs::read(target.join("Storage Show").join(video_name)).unwrap(),
+            b"video bytes"
+        );
+        assert_eq!(
+            std::fs::read(target.join("Storage Show").join(subtitle_name)).unwrap(),
+            b"subtitle bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_organize_rejects_nested_local_endpoints() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("source");
+        let target = source.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let repository =
+            CloudConnectionRepository::new(&directory.path().join("daemon.db")).unwrap();
+        let runtime = RssRuntime {
+            cloud: CloudDriveState::with_factory(
+                repository,
+                Arc::new(|_| Ok(Box::new(MockCloud) as Box<dyn CloudDriveClientTrait>)),
+            ),
+            rss_db_path: directory.path().join("rss.db"),
+        };
+        let args = StorageOrganizeJobArgs {
+            source: StorageEndpointArgs::Local { path: source },
+            target: StorageEndpointArgs::Local { path: target },
+            mode: StorageOrganizeMode::Copy,
+            season_mode: false,
+            mlip: false,
+            remove_empty_dirs: false,
+        };
+
+        let error = execute_storage_organize(&args, &runtime, &|_, _, _, _| {})
+            .await
+            .unwrap_err();
+        assert!(error.contains("must not be equal or nested"));
+    }
+
+    #[tokio::test]
     async fn cleanup_removes_empty_descendants_deepest_first_and_keeps_root() {
         let cloud = EmptyTreeCloud::default();
         let removed = cleanup_remote_empty_directories(&cloud, "/source", false, &|_, _, _, _| {})
@@ -579,6 +852,7 @@ mod tests {
             connection_id: Some(1),
             auto_organize: false,
             organize_target_folder: None,
+            organize_target_connection_id: None,
             organize_season_mode: true,
             remove_empty_dirs: false,
             remote_mlip: false,

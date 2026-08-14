@@ -40,17 +40,20 @@ export type CompactArtworkPacksArgs = {
   apply_plan: string | null
 }
 
+export type StorageEndpoint = { type: 'local'; path: string } | { type: 'connection'; connection_id: number; path: string }
+export type StorageOrganizeArgs = { source: StorageEndpoint; target: StorageEndpoint; mode: 'move' | 'copy'; season_mode: boolean; mlip: boolean; remove_empty_dirs: boolean }
+
 export class ApiError extends Error {
   constructor(public code: string, message: string, public status: number) { super(message) }
 }
 export const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error)
 
-export type Subscription = { id: number; url: string; filter_regex: string | null; target_folder: string; interval_secs: number; enabled: boolean; last_checked_at: string | null; connection_id: number | null; auto_organize: boolean; organize_target_folder: string | null; organize_interval_secs: number; organize_season_mode: boolean; remove_empty_dirs: boolean; remote_mlip: boolean; organize_mode: 'offline' | 'original'; last_organize_checked_at: string | null }
-export type SubscriptionInput = Pick<Subscription, 'url' | 'target_folder' | 'interval_secs' | 'connection_id'> & Partial<Pick<Subscription, 'filter_regex' | 'auto_organize' | 'organize_target_folder' | 'organize_interval_secs' | 'organize_season_mode' | 'remove_empty_dirs' | 'remote_mlip' | 'organize_mode'>>
+export type Subscription = { id: number; url: string; filter_regex: string | null; target_folder: string; interval_secs: number; enabled: boolean; last_checked_at: string | null; connection_id: number | null; auto_organize: boolean; organize_target_folder: string | null; organize_target_connection_id: number | null; organize_interval_secs: number; organize_season_mode: boolean; remove_empty_dirs: boolean; remote_mlip: boolean; organize_mode: 'offline' | 'original'; last_organize_checked_at: string | null }
+export type SubscriptionInput = Pick<Subscription, 'url' | 'target_folder' | 'interval_secs' | 'connection_id'> & Partial<Pick<Subscription, 'filter_regex' | 'auto_organize' | 'organize_target_folder' | 'organize_target_connection_id' | 'organize_interval_secs' | 'organize_season_mode' | 'remove_empty_dirs' | 'remote_mlip' | 'organize_mode'>>
 export type SubscriptionUpdate = Required<SubscriptionInput>
 export type ProcessedItem = { id: number; subscription_id: number; item_hash: string; title: string | null; processed_at: string | null }
 export type DownloadTask = { id: number; subscription_id: number; item_hash: string; cloud_name: string | null; info_hash: string | null; remote_name: string | null; status: string | null; added_at: string | null; completed_at: string | null }
-export type Connection = { id: number; name: string; url: string; has_token: boolean; has_username: boolean; has_password: boolean; created_at: string; updated_at: string }
+export type Connection = { id: number; kind: 'clouddrive' | 'webdav'; name: string; url: string; has_token: boolean; has_username: boolean; has_password: boolean; created_at: string; updated_at: string }
 export type FolderEntry = { id: string; name: string; path: string; size: number; is_directory: boolean }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -72,6 +75,7 @@ export const api = {
   cancel: (id: number) => request<Job>(`/jobs/${id}`, { method: 'DELETE' }),
   retry: (id: number) => request<Job>(`/jobs/${id}/retry`, { method: 'POST' }),
   enqueueOrganize: (args: OrganizeArgs, confirmed: boolean) => request<{ job: Job; duplicate: boolean }>('/jobs', { method: 'POST', body: JSON.stringify({ origin: 'manual', confirmed, job: { type: 'organize', args } }) }),
+  enqueueStorageOrganize: (args: StorageOrganizeArgs, confirmed: boolean) => request<{ job: Job; duplicate: boolean }>('/jobs', { method: 'POST', body: JSON.stringify({ origin: 'manual', confirmed, job: { type: 'storage_organize', args } }) }),
   enqueueNormalizeLayout: (args: NormalizeLayoutArgs, confirmed: boolean) => request<{ job: Job; duplicate: boolean }>('/jobs', { method: 'POST', body: JSON.stringify({ origin: 'manual', confirmed, job: { type: 'normalize_layout', args } }) }),
   enqueueCompactArtworkPacks: (args: CompactArtworkPacksArgs, confirmed: boolean) => request<{ job: Job; duplicate: boolean }>('/jobs', { method: 'POST', body: JSON.stringify({ origin: 'manual', confirmed, job: { type: 'compact_artwork_packs', args } }) }),
   enqueueScrape: (args: { days: number; format: 'json' | 'pretty'; tmdb_api_key?: string | null }) => request<{ job: Job; duplicate: boolean }>('/jobs', { method: 'POST', body: JSON.stringify({ origin: 'manual', job: { type: 'scrape', args } }) }),
@@ -84,7 +88,7 @@ export const api = {
   enqueueTorrentScrape: (args: { source: 'dmhy' | 'nyaa' | 'all'; query: string | null; pages: number; output: string | null; headed: boolean }) => request<{ job: Job; duplicate: boolean }>('/jobs', { method: 'POST', body: JSON.stringify({ origin: 'manual', job: { type: 'torrent_scrape', args } }) }),
   enqueueCloudAddOffline: (args: { connection_id: number; url: string; target: string }) => request<{ job: Job; duplicate: boolean }>('/jobs', { method: 'POST', body: JSON.stringify({ origin: 'manual', job: { type: 'cloud_add_offline', args } }) }),
   subscriptions: () => request<{ subscriptions: Subscription[] }>('/rss/subscriptions'),
-  createSubscription: (value: SubscriptionInput) => request<Subscription>('/rss/subscriptions', { method: 'POST', body: JSON.stringify({ auto_organize: false, organize_target_folder: null, organize_interval_secs: 300, organize_season_mode: true, remove_empty_dirs: true, remote_mlip: false, organize_mode: 'offline', ...value }) }),
+  createSubscription: (value: SubscriptionInput) => request<Subscription>('/rss/subscriptions', { method: 'POST', body: JSON.stringify({ auto_organize: false, organize_target_folder: null, organize_target_connection_id: null, organize_interval_secs: 300, organize_season_mode: true, remove_empty_dirs: true, remote_mlip: false, organize_mode: 'offline', ...value }) }),
   updateSubscription: (id: number, value: SubscriptionUpdate) => request<Subscription>(`/rss/subscriptions/${id}`, { method: 'PUT', body: JSON.stringify(value) }),
   deleteSubscription: (id: number) => request<void>(`/rss/subscriptions/${id}`, { method: 'DELETE' }),
   setEnabled: (id: number, enabled: boolean) => request<Subscription>(`/rss/subscriptions/${id}/${enabled ? 'enable' : 'disable'}`, { method: 'POST' }),

@@ -289,6 +289,21 @@ fn execute(
             ))
         }
         #[cfg(feature = "clouddrive")]
+        JobSpec::StorageOrganize(args) => {
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|error| format!("failed to create storage runtime: {error}"))?;
+            runtime.block_on(super::rss_schedule::execute_storage_organize(
+                args,
+                rss_runtime,
+                &|level, current, total, message| {
+                    let current = current.and_then(|value| i64::try_from(value).ok());
+                    let total = total.and_then(|value| i64::try_from(value).ok());
+                    let _ = queue.set_detailed_progress(job.id, current, total, message);
+                    let _ = queue.append_log(job.id, level, message);
+                },
+            ))
+        }
+        #[cfg(feature = "clouddrive")]
         JobSpec::CloudAddOffline(args) => execute_cloud_add_offline(args, rss_runtime),
         #[cfg(feature = "scraper")]
         JobSpec::Scrape(args) => execute_scrape(queue, job.id, args),
@@ -738,6 +753,7 @@ mod tests {
         let connection = repository
             .create(
                 &CloudConnectionRequest {
+                    kind: "clouddrive".to_string(),
                     name: "test".to_string(),
                     url: "http://localhost:19798".to_string(),
                     token: Some("token".to_string()),
@@ -785,6 +801,7 @@ mod tests {
         let connection = repository
             .create(
                 &CloudConnectionRequest {
+                    kind: "clouddrive".to_string(),
                     name: "login".to_string(),
                     url: "http://localhost:19798".to_string(),
                     token: None,

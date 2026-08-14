@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ChevronRight, LoaderCircle, Save, Send, Trash2 } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
-import { api, errorMessage } from '../api'
+import { api, errorMessage, type Connection, type StorageEndpoint } from '../api'
+import { loadCapabilities } from '../stores/status'
 import { t } from '../i18n'
 import {
   defaultOrganizeForm,
@@ -17,6 +18,23 @@ import {
 } from '../organize'
 
 const router = useRouter()
+const view = ref<'local' | 'storage'>('local')
+const storageAvailable = ref(false)
+const connections = ref<Connection[]>([])
+const storageForm = reactive({
+  sourceType: 'local' as 'local' | 'connection',
+  sourceConnectionId: null as number | null,
+  sourcePath: '',
+  targetType: 'connection' as 'local' | 'connection',
+  targetConnectionId: null as number | null,
+  targetPath: '/',
+  mode: 'move' as 'move' | 'copy',
+  seasonMode: true,
+  mlip: false,
+  removeEmptyDirs: true,
+})
+const storageConfirmed = ref(false)
+const storageSubmitting = ref(false)
 const form = reactive<OrganizeForm>(defaultOrganizeForm())
 const errors = ref<Record<string, string>>({})
 const apiError = ref('')
@@ -27,6 +45,10 @@ const selectedPreset = ref('')
 const presetName = ref('')
 const presetError = ref('')
 const needsConfirmation = computed(() => form.mode === 'move' || form.rebuild_library_index)
+
+watch(storageAvailable, (available) => {
+  if (!available) view.value = 'local'
+})
 
 watch(needsConfirmation, (required, wasRequired) => {
   if (required !== wasRequired) confirmed.value = false
@@ -64,6 +86,54 @@ function deletePreset() {
   selectedPreset.value = ''
 }
 
+async function submitStorage() {
+  apiError.value = ''
+  const endpoint = (type: 'local' | 'connection', connectionId: number | null, path: string): StorageEndpoint | null => {
+    const normalized = path.trim()
+    if (!normalized || (type === 'connection' && connectionId === null)) return null
+    return type === 'local'
+      ? { type: 'local', path: normalized }
+      : { type: 'connection', connection_id: connectionId as number, path: normalized }
+  }
+  const source = endpoint(storageForm.sourceType, storageForm.sourceConnectionId, storageForm.sourcePath)
+  const target = endpoint(storageForm.targetType, storageForm.targetConnectionId, storageForm.targetPath)
+  if (!source || !target) {
+    apiError.value = t('Both storage endpoints and their paths are required.')
+    return
+  }
+  if ((storageForm.mode === 'move' || storageForm.removeEmptyDirs) && !storageConfirmed.value) {
+    apiError.value = t('Confirm this storage move before submitting.')
+    return
+  }
+  storageSubmitting.value = true
+  try {
+    const result = await api.enqueueStorageOrganize({
+      source,
+      target,
+      mode: storageForm.mode,
+      season_mode: storageForm.seasonMode,
+      mlip: storageForm.mlip,
+      remove_empty_dirs: storageForm.removeEmptyDirs,
+    }, storageConfirmed.value)
+    await router.push(`/jobs/${result.job.id}`)
+  } catch (reason) {
+    apiError.value = errorMessage(reason)
+  } finally {
+    storageSubmitting.value = false
+  }
+}
+
+onMounted(async () => {
+  try {
+    const capabilities = await loadCapabilities()
+    storageAvailable.value = capabilities.job_types.includes('storage_organize')
+    if (storageAvailable.value) connections.value = (await api.connections()).connections
+  } catch (reason) {
+    storageAvailable.value = false
+    apiError.value = errorMessage(reason)
+  }
+})
+
 async function submit() {
   apiError.value = ''
   errors.value = validateOrganize(form, confirmed.value)
@@ -87,8 +157,13 @@ async function submit() {
     <div><p class="eyebrow">{{ t('Manual job') }}</p><h1>{{ t('Organize') }}</h1><p class="page-subtitle">{{ t('Submit one complete organize request to the daemon queue.') }}</p></div>
   </div>
 
+  <div v-if="storageAvailable" class="organize-tabs" role="tablist" :aria-label="t('Organization source type')">
+    <button type="button" role="tab" :class="{ active: view === 'local' }" :aria-selected="view === 'local'" @click="view = 'local'">{{ t('Local filesystem') }}</button>
+    <button type="button" role="tab" :class="{ active: view === 'storage' }" :aria-selected="view === 'storage'" @click="view = 'storage'">{{ t('Cross-storage') }}</button>
+  </div>
+
   <p v-if="apiError" class="alert error" role="alert">{{ apiError }}</p>
-  <section class="section-block preset-section" aria-labelledby="preset-heading">
+  <section v-if="view === 'local'" class="section-block preset-section" aria-labelledby="preset-heading">
     <div class="section-heading"><div><p class="eyebrow">{{ t('Defaults') }}</p><h2 id="preset-heading">{{ t('Presets') }}</h2></div></div>
     <div class="preset-bar">
       <label class="form-field preset-select"><span>{{ t('Saved preset') }}</span><select v-model="selectedPreset" @change="loadPreset"><option value="">{{ t('Choose a preset') }}</option><option v-for="preset in presets" :key="preset.name" :value="preset.name">{{ preset.name }}</option></select></label>
@@ -99,7 +174,7 @@ async function submit() {
     </div>
   </section>
 
-  <form class="organize-form" novalidate @submit.prevent="submit">
+  <form v-if="view === 'local'" class="organize-form" novalidate @submit.prevent="submit">
     <section class="section-block" aria-labelledby="paths-heading">
       <div class="section-heading"><div><p class="eyebrow">{{ t('Required') }}</p><h2 id="paths-heading">{{ t('Paths and operation') }}</h2></div></div>
       <div class="form-grid">
@@ -141,5 +216,30 @@ async function submit() {
       <small v-if="errorFor('confirmed')" class="field-error" role="alert">{{ errorFor('confirmed') }}</small>
     </div>
     <div class="form-actions"><button class="button primary" type="submit" :disabled="submitting"><LoaderCircle v-if="submitting" class="spinning" :size="16" aria-hidden="true" /><Send v-else :size="16" aria-hidden="true" />{{ submitting ? t('Submitting...') : t('Submit organize job') }}</button><span class="form-hint">{{ t('Required fields are marked *') }}</span></div>
+  </form>
+
+  <form v-if="view === 'storage' && storageAvailable" class="organize-form" @submit.prevent="submitStorage">
+    <section class="section-block" aria-labelledby="storage-paths-heading">
+      <div class="section-heading"><div><p class="eyebrow">{{ t('Required') }}</p><h2 id="storage-paths-heading">{{ t('Storage endpoints') }}</h2></div></div>
+      <div class="form-grid">
+        <label class="form-field"><span>{{ t('Source type') }}</span><select v-model="storageForm.sourceType"><option value="local">{{ t('Local filesystem') }}</option><option value="connection">{{ t('Saved connection') }}</option></select></label>
+        <label v-if="storageForm.sourceType === 'connection'" class="form-field"><span>{{ t('Source connection') }}</span><select v-model.number="storageForm.sourceConnectionId" required><option :value="null" disabled>{{ t('Choose a connection') }}</option><option v-for="connection in connections" :key="connection.id" :value="connection.id">{{ connection.name }} ({{ connection.kind === 'webdav' ? 'WebDAV' : 'CloudDrive' }})</option></select></label>
+        <label class="form-field"><span>{{ t('Source path') }}</span><input v-model="storageForm.sourcePath" required autocomplete="off" :placeholder="storageForm.sourceType === 'local' ? 'C:\\Downloads\\Anime' : '/Incoming'" /></label>
+        <label class="form-field"><span>{{ t('Target type') }}</span><select v-model="storageForm.targetType"><option value="local">{{ t('Local filesystem') }}</option><option value="connection">{{ t('Saved connection') }}</option></select></label>
+        <label v-if="storageForm.targetType === 'connection'" class="form-field"><span>{{ t('Target connection') }}</span><select v-model.number="storageForm.targetConnectionId" required><option :value="null" disabled>{{ t('Choose a connection') }}</option><option v-for="connection in connections" :key="connection.id" :value="connection.id">{{ connection.name }} ({{ connection.kind === 'webdav' ? 'WebDAV' : 'CloudDrive' }})</option></select></label>
+        <label class="form-field"><span>{{ t('Target path') }}</span><input v-model="storageForm.targetPath" required autocomplete="off" :placeholder="storageForm.targetType === 'local' ? 'S:\\Anime' : '/Anime'" /></label>
+        <label class="form-field"><span>{{ t('Mode') }}</span><select v-model="storageForm.mode"><option value="copy">{{ t('Copy') }}</option><option value="move">{{ t('Move') }}</option></select></label>
+      </div>
+      <div class="checkbox-grid">
+        <label class="checkbox-field"><input v-model="storageForm.seasonMode" type="checkbox" /><span>{{ t('Season mode') }}</span></label>
+        <label class="checkbox-field"><input v-model="storageForm.mlip" type="checkbox" /><span>{{ t('Build MLIP library') }}</span></label>
+        <label class="checkbox-field"><input v-model="storageForm.removeEmptyDirs" type="checkbox" /><span>{{ t('Remove empty source folders') }}</span></label>
+      </div>
+    </section>
+    <div v-if="storageForm.mode === 'move' || storageForm.removeEmptyDirs" class="notice danger-confirmation" role="alert">
+      <strong>{{ t('Confirmation required') }}</strong>
+      <label class="checkbox-field"><input v-model="storageConfirmed" type="checkbox" /><span>{{ t('I confirm the destination must verify before source files are deleted.') }}</span></label>
+    </div>
+    <div class="form-actions"><button class="button primary" type="submit" :disabled="storageSubmitting"><LoaderCircle v-if="storageSubmitting" class="spinning" :size="16" aria-hidden="true" /><Send v-else :size="16" aria-hidden="true" />{{ storageSubmitting ? t('Submitting...') : t('Submit cross-storage job') }}</button></div>
   </form>
 </template>

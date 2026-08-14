@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS cloud_connections (
     username TEXT,
     password TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'clouddrive'
 );
 "#;
 
@@ -40,6 +41,7 @@ pub(crate) type CloudResult<T> = std::result::Result<T, CloudError>;
 #[derive(Debug, Clone)]
 pub(crate) struct StoredCloudConnection {
     pub(crate) id: i64,
+    pub(crate) kind: String,
     pub(crate) name: String,
     pub(crate) url: String,
     pub(crate) token: Option<String>,
@@ -51,6 +53,8 @@ pub(crate) struct StoredCloudConnection {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct CloudConnectionRequest {
+    #[serde(default = "default_connection_kind")]
+    pub(crate) kind: String,
     pub(crate) name: String,
     pub(crate) url: String,
     #[serde(default)]
@@ -63,6 +67,12 @@ pub(crate) struct CloudConnectionRequest {
 
 impl CloudConnectionRequest {
     pub(crate) fn normalize(self) -> CloudResult<Self> {
+        let kind = self.kind.trim().to_ascii_lowercase();
+        if !matches!(kind.as_str(), "clouddrive" | "webdav") {
+            return Err(CloudError::Invalid(
+                "kind must be clouddrive or webdav".to_string(),
+            ));
+        }
         let name = self.name.trim().to_string();
         if name.is_empty() || name.len() > 200 {
             return Err(CloudError::Invalid(
@@ -112,7 +122,14 @@ impl CloudConnectionRequest {
             ));
         }
 
+        if kind == "webdav" && token.is_some() {
+            return Err(CloudError::Invalid(
+                "WebDAV connections use optional username/password, not token".to_string(),
+            ));
+        }
+
         Ok(Self {
+            kind,
             name,
             url,
             token,
@@ -122,6 +139,10 @@ impl CloudConnectionRequest {
     }
 }
 
+fn default_connection_kind() -> String {
+    "clouddrive".to_string()
+}
+
 fn non_empty(value: Option<String>) -> Option<String> {
     value.and_then(|value| (!value.is_empty()).then_some(value))
 }
@@ -129,6 +150,7 @@ fn non_empty(value: Option<String>) -> Option<String> {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct CloudConnectionView {
     pub(crate) id: i64,
+    pub(crate) kind: String,
     pub(crate) name: String,
     pub(crate) url: String,
     pub(crate) has_token: bool,
@@ -142,6 +164,7 @@ impl From<&StoredCloudConnection> for CloudConnectionView {
     fn from(connection: &StoredCloudConnection) -> Self {
         Self {
             id: connection.id,
+            kind: connection.kind.clone(),
             name: connection.name.clone(),
             url: connection.url.clone(),
             has_token: connection.token.is_some(),
@@ -186,8 +209,23 @@ pub(crate) struct CloudDriveState {
 impl CloudDriveState {
     pub(crate) fn new(path: &Path) -> CloudResult<Self> {
         let factory: CloudDriveClientFactory = Arc::new(|connection| {
-            let client = CloudDriveClient::new(&connection.url, connection.token.clone())?;
-            Ok(Box::new(client) as Box<dyn CloudDriveClientTrait>)
+            let client: Box<dyn CloudDriveClientTrait> = match connection.kind.as_str() {
+                "clouddrive" => Box::new(CloudDriveClient::new(
+                    &connection.url,
+                    connection.token.clone(),
+                )?),
+                "webdav" => Box::new(anime_organizer::rss::webdav::WebDavClient::new(
+                    &connection.url,
+                    connection.username.clone(),
+                    connection.password.clone(),
+                )?),
+                kind => {
+                    return Err(anime_organizer::error::AppError::MetadataFetchError(
+                        format!("Unsupported storage connection kind: {kind}"),
+                    ))
+                }
+            };
+            Ok(client)
         });
         Ok(Self {
             repository: CloudConnectionRepository::new(path)?,
@@ -211,6 +249,9 @@ impl CloudDriveState {
         connection: &StoredCloudConnection,
     ) -> CloudResult<Box<dyn CloudDriveClientTrait>> {
         let mut client = (self.client_factory)(connection).map_err(|_| CloudError::Operation)?;
+        if connection.kind == "webdav" {
+            return Ok(client);
+        }
         if let Some(username) = connection.username.as_deref() {
             let password = connection
                 .password
@@ -246,7 +287,24 @@ impl CloudConnectionRepository {
         repository.with_connection(|connection| {
             connection
                 .execute_batch(SCHEMA)
-                .map_err(|error| CloudError::Database(error.to_string()))
+                .map_err(|error| CloudError::Database(error.to_string()))?;
+            let columns = connection
+                .prepare("PRAGMA table_info(cloud_connections)")
+                .and_then(|mut statement| {
+                    statement
+                        .query_map([], |row| row.get::<_, String>(1))?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .map_err(|error| CloudError::Database(error.to_string()))?;
+            if !columns.iter().any(|column| column == "kind") {
+                connection
+                    .execute(
+                        "ALTER TABLE cloud_connections ADD COLUMN kind TEXT NOT NULL DEFAULT 'clouddrive'",
+                        [],
+                    )
+                    .map_err(|error| CloudError::Database(error.to_string()))?;
+            }
+            Ok(())
         })?;
         Ok(repository)
     }
@@ -298,7 +356,7 @@ impl CloudConnectionRepository {
         &self,
         request: &CloudConnectionRequest,
     ) -> CloudResult<StoredCloudConnection> {
-        if request.token.is_none() && request.username.is_none() {
+        if request.kind == "clouddrive" && request.token.is_none() && request.username.is_none() {
             return Err(CloudError::Invalid(
                 "a token or username/password login is required".to_string(),
             ));
@@ -307,8 +365,8 @@ impl CloudConnectionRepository {
         self.with_connection(|connection| {
             connection
                 .execute(
-                    "INSERT INTO cloud_connections (name, url, token, username, password, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-                    params![request.name, request.url, request.token, request.username, request.password, now],
+                    "INSERT INTO cloud_connections (kind, name, url, token, username, password, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                    params![request.kind, request.name, request.url, request.token, request.username, request.password, now],
                 )
                 .map_err(|error| CloudError::Database(error.to_string()))?;
             let id = connection.last_insert_rowid();
@@ -327,11 +385,22 @@ impl CloudConnectionRepository {
         id: i64,
         request: &CloudConnectionRequest,
     ) -> CloudResult<StoredCloudConnection> {
+        let existing = self.get(id)?;
+        if request.kind == "clouddrive"
+            && request.token.is_none()
+            && request.username.is_none()
+            && existing.token.is_none()
+            && existing.username.is_none()
+        {
+            return Err(CloudError::Invalid(
+                "a token or username/password login is required".to_string(),
+            ));
+        }
         let changed = self.with_connection(|connection| {
             connection
                 .execute(
-                    "UPDATE cloud_connections SET name = ?1, url = ?2, token = CASE WHEN ?3 IS NOT NULL THEN ?3 WHEN ?4 IS NOT NULL THEN NULL ELSE token END, username = CASE WHEN ?3 IS NOT NULL THEN NULL WHEN ?4 IS NOT NULL THEN ?4 ELSE username END, password = CASE WHEN ?3 IS NOT NULL THEN NULL WHEN ?4 IS NOT NULL THEN ?5 ELSE password END, updated_at = ?6 WHERE id = ?7",
-                    params![request.name, request.url, request.token, request.username, request.password, now_string(), id],
+                    "UPDATE cloud_connections SET kind = ?1, name = ?2, url = ?3, token = CASE WHEN ?4 IS NOT NULL THEN ?4 WHEN ?5 IS NOT NULL OR ?1 = 'webdav' THEN NULL ELSE token END, username = CASE WHEN ?4 IS NOT NULL THEN NULL WHEN ?5 IS NOT NULL THEN ?5 ELSE username END, password = CASE WHEN ?4 IS NOT NULL THEN NULL WHEN ?5 IS NOT NULL THEN ?6 ELSE password END, updated_at = ?7 WHERE id = ?8",
+                    params![request.kind, request.name, request.url, request.token, request.username, request.password, now_string(), id],
                 )
                 .map_err(|error| CloudError::Database(error.to_string()))
         })?;
@@ -381,10 +450,11 @@ fn row_to_connection(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredCloudCon
         password: row.get(5)?,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
+        kind: row.get(8)?,
     })
 }
 
-const SELECT_COLUMNS: &str = "SELECT id, name, url, token, username, password, created_at, updated_at FROM cloud_connections";
+const SELECT_COLUMNS: &str = "SELECT id, name, url, token, username, password, created_at, updated_at, kind FROM cloud_connections";
 
 fn now_string() -> String {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
@@ -400,6 +470,7 @@ mod tests {
 
     fn request() -> CloudConnectionRequest {
         CloudConnectionRequest {
+            kind: default_connection_kind(),
             name: "primary".to_string(),
             url: "http://localhost:19798".to_string(),
             token: Some("secret-token".to_string()),
@@ -424,6 +495,7 @@ mod tests {
             .update(
                 created.id,
                 &CloudConnectionRequest {
+                    kind: default_connection_kind(),
                     name: "renamed".to_string(),
                     url: "https://localhost:19798".to_string(),
                     token: None,
@@ -452,6 +524,7 @@ mod tests {
             .update(
                 created.id,
                 &CloudConnectionRequest {
+                    kind: default_connection_kind(),
                     name: "primary".to_string(),
                     url: "https://localhost".to_string(),
                     token: None,
@@ -469,6 +542,7 @@ mod tests {
             .update(
                 created.id,
                 &CloudConnectionRequest {
+                    kind: default_connection_kind(),
                     name: "primary".to_string(),
                     url: "https://localhost".to_string(),
                     token: Some("replacement".to_string()),
@@ -486,6 +560,7 @@ mod tests {
     #[test]
     fn request_normalization_rejects_unbounded_or_non_http_values() {
         let invalid = CloudConnectionRequest {
+            kind: default_connection_kind(),
             name: " ".to_string(),
             url: "ftp://localhost".to_string(),
             token: None,
@@ -495,6 +570,7 @@ mod tests {
         assert!(matches!(invalid.normalize(), Err(CloudError::Invalid(_))));
 
         let incomplete_login = CloudConnectionRequest {
+            kind: default_connection_kind(),
             name: "primary".to_string(),
             url: "https://localhost".to_string(),
             token: None,
@@ -508,11 +584,64 @@ mod tests {
     }
 
     #[test]
+    fn legacy_schema_migrates_to_clouddrive_kind() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("daemon.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE cloud_connections (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    token TEXT,
+                    username TEXT,
+                    password TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO cloud_connections
+                    (name, url, token, created_at, updated_at)
+                VALUES ('legacy', 'https://localhost', 'token', '1', '1');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let repository = CloudConnectionRepository::new(&path).unwrap();
+        assert_eq!(repository.get(1).unwrap().kind, "clouddrive");
+    }
+
+    #[test]
+    fn anonymous_webdav_connection_is_allowed_and_redacted() {
+        let directory = tempdir().unwrap();
+        let repository =
+            CloudConnectionRepository::new(&directory.path().join("daemon.db")).unwrap();
+        let connection = repository
+            .create(
+                &CloudConnectionRequest {
+                    kind: "webdav".to_string(),
+                    name: "dav".to_string(),
+                    url: "https://localhost/dav".to_string(),
+                    token: None,
+                    username: None,
+                    password: None,
+                }
+                .normalize()
+                .unwrap(),
+            )
+            .unwrap();
+        let view = CloudConnectionView::from(&connection);
+        assert_eq!(view.kind, "webdav");
+        assert!(!view.has_token && !view.has_username && !view.has_password);
+    }
+
+    #[test]
     fn connection_creation_requires_credentials() {
         let directory = tempdir().unwrap();
         let repository =
             CloudConnectionRepository::new(&directory.path().join("daemon.db")).unwrap();
         let request = CloudConnectionRequest {
+            kind: default_connection_kind(),
             name: "primary".to_string(),
             url: "https://localhost".to_string(),
             token: None,

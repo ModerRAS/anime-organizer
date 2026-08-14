@@ -14,6 +14,8 @@ pub mod filter;
 #[cfg(feature = "clouddrive")]
 pub mod http_client;
 #[cfg(feature = "clouddrive")]
+pub mod local;
+#[cfg(feature = "clouddrive")]
 pub use http_client::{HttpClient, HttpClientTrait};
 #[cfg(feature = "clouddrive")]
 pub mod parser;
@@ -25,3 +27,5 @@ pub mod proxy;
 pub mod scheduler;
 #[cfg(feature = "clouddrive")]
 pub mod torrent;
+#[cfg(feature = "clouddrive")]
+pub mod webdav;

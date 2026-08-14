@@ -273,6 +273,7 @@ async fn capabilities() -> Json<CapabilitiesResponse> {
         "rss_poll_all",
         "remote_rss_organize",
         "cleanup_empty_dirs",
+        "storage_organize",
         "cloud_add_offline",
     ]);
     Json(CapabilitiesResponse {
@@ -502,6 +503,8 @@ struct RssSubscriptionRequest {
     auto_organize: Option<bool>,
     #[serde(default)]
     organize_target_folder: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    organize_target_connection_id: Option<Option<i64>>,
     #[serde(default)]
     organize_season_mode: Option<bool>,
     #[serde(default)]
@@ -515,10 +518,22 @@ struct RssSubscriptionRequest {
 }
 
 #[cfg(feature = "clouddrive")]
+fn deserialize_present_option<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+#[cfg(feature = "clouddrive")]
 #[derive(Debug, Clone)]
 struct RssOrganizationSettings {
     auto_organize: bool,
     organize_target_folder: Option<String>,
+    organize_target_connection_id: Option<i64>,
     organize_season_mode: bool,
     remove_empty_dirs: bool,
     remote_mlip: bool,
@@ -537,6 +552,9 @@ fn organization_settings(
             .unwrap_or_else(|| existing.is_some_and(|subscription| subscription.auto_organize)),
         organize_target_folder: request.organize_target_folder.clone().or_else(|| {
             existing.and_then(|subscription| subscription.organize_target_folder.clone())
+        }),
+        organize_target_connection_id: request.organize_target_connection_id.unwrap_or_else(|| {
+            existing.and_then(|subscription| subscription.organize_target_connection_id)
         }),
         organize_season_mode: request.organize_season_mode.unwrap_or_else(|| {
             existing.is_none_or(|subscription| subscription.organize_season_mode)
@@ -665,14 +683,18 @@ fn validate_rss_request(
                 "organize_target_folder is required when auto_organize is enabled",
             ));
         };
+        let same_connection = organization
+            .organize_target_connection_id
+            .is_none_or(|target_id| Some(target_id) == request.connection_id);
         if target.trim() != target
             || target.is_empty()
             || target.len() > 4096
-            || super::remote_organize::validate_remote_organize_paths(
-                &request.target_folder,
-                target,
-            )
-            .is_err()
+            || (same_connection
+                && super::remote_organize::validate_remote_organize_paths(
+                    &request.target_folder,
+                    target,
+                )
+                .is_err())
         {
             return Err(error(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -680,8 +702,22 @@ fn validate_rss_request(
                 "organize_target_folder must be a nonempty remote path separate from target_folder",
             ));
         }
+        validate_rss_connection(
+            state,
+            organization
+                .organize_target_connection_id
+                .or(request.connection_id),
+        )?;
     }
-    validate_rss_connection(state, request.connection_id)
+    let source = validate_rss_connection(state, request.connection_id)?;
+    if source.kind != "clouddrive" {
+        return Err(error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            "RSS download connection must be a CloudDrive connection",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "clouddrive")]
@@ -689,7 +725,7 @@ fn validate_rss_request(
 fn validate_rss_connection(
     state: &DaemonState,
     connection_id: Option<i64>,
-) -> Result<(), Response> {
+) -> Result<super::cloud::StoredCloudConnection, Response> {
     let Some(connection_id) = connection_id else {
         return Err(error(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -698,7 +734,7 @@ fn validate_rss_connection(
         ));
     };
     match state.cloud.repository.get(connection_id) {
-        Ok(_) => Ok(()),
+        Ok(connection) => Ok(connection),
         Err(CloudError::NotFound(_)) => Err(error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_request",
@@ -770,6 +806,16 @@ async fn create_rss_subscription(
                 organization.remove_empty_dirs,
                 organization.auto_organize && organization.remote_mlip,
                 &organization.organize_mode,
+            ) {
+                return error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    db_error.to_string(),
+                );
+            }
+            if let Err(db_error) = db.set_subscription_organize_target_connection(
+                id,
+                organization.organize_target_connection_id,
             ) {
                 return error(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -875,6 +921,11 @@ async fn update_rss_subscription(
         organization.auto_organize && organization.remote_mlip,
         &organization.organize_mode,
     ) {
+        return error(StatusCode::NOT_FOUND, "not_found", db_error.to_string());
+    }
+    if let Err(db_error) = db
+        .set_subscription_organize_target_connection(id, organization.organize_target_connection_id)
+    {
         return error(StatusCode::NOT_FOUND, "not_found", db_error.to_string());
     }
     if let Err(db_error) =
@@ -1251,9 +1302,10 @@ async fn delete_cloud_connection(
     };
     match db.list_all_subscriptions() {
         Ok(subscriptions)
-            if subscriptions
-                .iter()
-                .any(|subscription| subscription.connection_id == Some(id)) =>
+            if subscriptions.iter().any(|subscription| {
+                subscription.connection_id == Some(id)
+                    || subscription.organize_target_connection_id == Some(id)
+            }) =>
         {
             return error(
                 StatusCode::CONFLICT,
@@ -1508,6 +1560,7 @@ mod tests {
                 .repository
                 .create(
                     &CloudConnectionRequest {
+                        kind: "clouddrive".to_string(),
                         name: "rss".to_string(),
                         url: "http://localhost:19798".to_string(),
                         token: Some("token".to_string()),
@@ -1528,6 +1581,7 @@ mod tests {
             let response = create_cloud_connection(
                 State(state.clone()),
                 Ok(Json(CloudConnectionRequest {
+                    kind: "clouddrive".to_string(),
                     name: "primary".to_string(),
                     url: "http://localhost:19798".to_string(),
                     token: None,
@@ -1594,6 +1648,28 @@ mod tests {
             assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
 
+        #[test]
+        fn rss_target_connection_distinguishes_omitted_from_null() {
+            let omitted: RssSubscriptionRequest = serde_json::from_value(serde_json::json!({
+                "url": "https://example.test/rss.xml",
+                "target_folder": "/source",
+                "interval_secs": 300,
+                "connection_id": 1
+            }))
+            .unwrap();
+            assert_eq!(omitted.organize_target_connection_id, None);
+
+            let cleared: RssSubscriptionRequest = serde_json::from_value(serde_json::json!({
+                "url": "https://example.test/rss.xml",
+                "target_folder": "/source",
+                "interval_secs": 300,
+                "connection_id": 1,
+                "organize_target_connection_id": null
+            }))
+            .unwrap();
+            assert_eq!(cleared.organize_target_connection_id, Some(None));
+        }
+
         #[tokio::test]
         async fn rss_interval_matches_scheduler_granularity() {
             let directory = tempdir().unwrap();
@@ -1608,6 +1684,7 @@ mod tests {
                     connection_id: None,
                     auto_organize: Some(false),
                     organize_target_folder: None,
+                    organize_target_connection_id: None,
                     organize_season_mode: Some(true),
                     remove_empty_dirs: Some(false),
                     remote_mlip: Some(false),
@@ -1628,6 +1705,7 @@ mod tests {
                     connection_id: None,
                     auto_organize: Some(false),
                     organize_target_folder: None,
+                    organize_target_connection_id: None,
                     organize_season_mode: Some(true),
                     remove_empty_dirs: Some(false),
                     remote_mlip: Some(false),
@@ -1649,6 +1727,7 @@ mod tests {
                     connection_id: Some(connection_id),
                     auto_organize: Some(false),
                     organize_target_folder: None,
+                    organize_target_connection_id: None,
                     organize_season_mode: Some(true),
                     remove_empty_dirs: Some(false),
                     remote_mlip: Some(false),
@@ -1675,6 +1754,7 @@ mod tests {
                     connection_id: Some(connection_id),
                     auto_organize: Some(true),
                     organize_target_folder: Some("/anime/".to_string()),
+                    organize_target_connection_id: None,
                     organize_season_mode: Some(true),
                     remove_empty_dirs: Some(false),
                     remote_mlip: Some(false),
@@ -1723,6 +1803,7 @@ mod tests {
                     connection_id: Some(connection_id),
                     auto_organize: None,
                     organize_target_folder: None,
+                    organize_target_connection_id: None,
                     organize_season_mode: None,
                     remove_empty_dirs: None,
                     remote_mlip: None,
@@ -1758,6 +1839,7 @@ mod tests {
                 .repository
                 .create(
                     &CloudConnectionRequest {
+                        kind: "clouddrive".to_string(),
                         name: "rss".to_string(),
                         url: "http://localhost:19798".to_string(),
                         token: Some("token".to_string()),
@@ -1825,6 +1907,7 @@ mod tests {
                     connection_id: Some(connection_id),
                     auto_organize: Some(false),
                     organize_target_folder: None,
+                    organize_target_connection_id: None,
                     organize_season_mode: Some(true),
                     remove_empty_dirs: Some(false),
                     remote_mlip: Some(false),

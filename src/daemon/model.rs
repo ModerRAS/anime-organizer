@@ -87,6 +87,8 @@ pub(crate) enum JobSpec {
         dry_run: bool,
     },
     #[cfg(feature = "clouddrive")]
+    StorageOrganize(StorageOrganizeJobArgs),
+    #[cfg(feature = "clouddrive")]
     CloudAddOffline(CloudAddOfflineJobArgs),
     #[cfg(feature = "scraper")]
     Scrape(crate::cli::ScrapeArgs),
@@ -104,6 +106,91 @@ pub(crate) enum JobSpec {
     CreateAliasIssues(crate::cli::CreateAliasIssuesArgs),
     #[cfg(feature = "torrent-scraper")]
     TorrentScrape(crate::cli::TorrentScrapeArgs),
+}
+
+#[cfg(feature = "clouddrive")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum StorageEndpointArgs {
+    Local { path: std::path::PathBuf },
+    Connection { connection_id: i64, path: String },
+}
+
+#[cfg(feature = "clouddrive")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StorageOrganizeMode {
+    Move,
+    Copy,
+}
+
+#[cfg(feature = "clouddrive")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct StorageOrganizeJobArgs {
+    pub(crate) source: StorageEndpointArgs,
+    pub(crate) target: StorageEndpointArgs,
+    pub(crate) mode: StorageOrganizeMode,
+    #[serde(default = "default_true")]
+    pub(crate) season_mode: bool,
+    #[serde(default)]
+    pub(crate) mlip: bool,
+    #[serde(default = "default_true")]
+    pub(crate) remove_empty_dirs: bool,
+}
+
+#[cfg(feature = "clouddrive")]
+fn default_true() -> bool {
+    true
+}
+
+#[cfg(feature = "clouddrive")]
+impl StorageEndpointArgs {
+    fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Local { path } if !path.is_absolute() => {
+                Err("local storage endpoint path must be absolute".to_string())
+            }
+            Self::Local { .. } => Ok(()),
+            Self::Connection {
+                connection_id,
+                path,
+            } => {
+                if *connection_id <= 0 {
+                    return Err("storage connection_id must be positive".to_string());
+                }
+                if crate::daemon::remote_organize::canonical_remote_path(path).as_deref()
+                    != Some(path.as_str())
+                {
+                    return Err(
+                        "storage connection path must be a canonical absolute path".to_string()
+                    );
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn resource_key(&self) -> String {
+        match self {
+            Self::Local { path } => format!("local:{}", path.display()),
+            Self::Connection {
+                connection_id,
+                path,
+            } => format!("connection:{connection_id}:{path}"),
+        }
+    }
+}
+
+#[cfg(feature = "clouddrive")]
+impl StorageOrganizeJobArgs {
+    fn validate(&self) -> Result<(), String> {
+        self.source.validate()?;
+        self.target.validate()?;
+        if self.source.resource_key() == self.target.resource_key() {
+            return Err("storage source and target must differ".to_string());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(feature = "clouddrive")]
@@ -128,6 +215,8 @@ impl JobSpec {
             Self::RemoteRssOrganize { .. } => "remote_rss_organize",
             #[cfg(feature = "clouddrive")]
             Self::CleanupEmptyDirs { .. } => "cleanup_empty_dirs",
+            #[cfg(feature = "clouddrive")]
+            Self::StorageOrganize(_) => "storage_organize",
             #[cfg(feature = "clouddrive")]
             Self::CloudAddOffline(_) => "cloud_add_offline",
             #[cfg(feature = "scraper")]
@@ -158,6 +247,7 @@ impl JobSpec {
                 subscription_id, ..
             } => Some(format!("rss:{subscription_id}")),
             Self::RssPollAll => Some("rss:all".to_string()),
+            Self::StorageOrganize(args) => Some(format!("storage:{}", args.target.resource_key())),
             _ => None,
         }
         #[cfg(not(feature = "clouddrive"))]
@@ -174,6 +264,7 @@ impl JobSpec {
             | Self::RssPollAll
             | Self::RemoteRssOrganize { .. }
             | Self::CleanupEmptyDirs { .. }
+            | Self::StorageOrganize(_)
             | Self::CloudAddOffline(_) => true,
             #[cfg(feature = "scraper")]
             Self::Scrape(_) | Self::MatchAliases(_) => true,
@@ -300,6 +391,23 @@ impl JobSpec {
                 if origin == JobOrigin::Qbittorrent {
                     return Err(
                         "artwork compact jobs cannot originate from qBittorrent".to_string()
+                    );
+                }
+                Ok(())
+            }
+            #[cfg(feature = "clouddrive")]
+            Self::StorageOrganize(args) => {
+                args.validate()?;
+                if (args.mode == StorageOrganizeMode::Move || args.remove_empty_dirs) && !confirmed
+                {
+                    return Err(
+                        "storage move or empty-directory cleanup requires confirmed=true"
+                            .to_string(),
+                    );
+                }
+                if origin == JobOrigin::Qbittorrent {
+                    return Err(
+                        "storage organize jobs cannot originate from qBittorrent".to_string()
                     );
                 }
                 Ok(())
@@ -606,6 +714,46 @@ mod tests {
         assert!(response.contains("[redacted]"));
         assert!(response.contains("1970-01-01T00:00:00Z"));
         assert!(response.contains("\"cancelable\":true"));
+    }
+
+    #[cfg(feature = "clouddrive")]
+    #[test]
+    fn storage_move_requires_confirmation_and_rejects_qbittorrent() {
+        let spec = JobSpec::StorageOrganize(StorageOrganizeJobArgs {
+            source: StorageEndpointArgs::Local {
+                path: PathBuf::from(r"C:\source"),
+            },
+            target: StorageEndpointArgs::Connection {
+                connection_id: 1,
+                path: "/library".to_string(),
+            },
+            mode: StorageOrganizeMode::Move,
+            season_mode: true,
+            mlip: false,
+            remove_empty_dirs: true,
+        });
+        assert!(spec.validate(false, JobOrigin::Manual, None).is_err());
+        assert!(spec.validate(true, JobOrigin::Manual, None).is_ok());
+        let copy_with_cleanup = JobSpec::StorageOrganize(StorageOrganizeJobArgs {
+            source: StorageEndpointArgs::Local {
+                path: PathBuf::from(r"C:\source"),
+            },
+            target: StorageEndpointArgs::Connection {
+                connection_id: 1,
+                path: "/library".to_string(),
+            },
+            mode: StorageOrganizeMode::Copy,
+            season_mode: true,
+            mlip: false,
+            remove_empty_dirs: true,
+        });
+        assert!(copy_with_cleanup
+            .validate(false, JobOrigin::Manual, None)
+            .is_err());
+        assert!(spec
+            .validate(true, JobOrigin::Qbittorrent, Some("qbittorrent:hash"))
+            .is_err());
+        assert_eq!(spec.kind(), "storage_organize");
     }
 
     #[cfg(feature = "clouddrive")]

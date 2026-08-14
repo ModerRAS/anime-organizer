@@ -99,7 +99,7 @@ pub trait CloudDriveClientTrait: Send + Sync {
     }
 }
 
-fn unsupported_operation(operation: &str) -> AppError {
+pub(crate) fn unsupported_operation(operation: &str) -> AppError {
     AppError::MetadataFetchError(format!("CloudDrive client does not support {operation}"))
 }
 
