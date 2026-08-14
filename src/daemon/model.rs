@@ -719,9 +719,10 @@ mod tests {
     #[cfg(feature = "clouddrive")]
     #[test]
     fn storage_move_requires_confirmation_and_rejects_qbittorrent() {
+        let source_directory = tempfile::tempdir().unwrap();
         let spec = JobSpec::StorageOrganize(StorageOrganizeJobArgs {
             source: StorageEndpointArgs::Local {
-                path: PathBuf::from(r"C:\source"),
+                path: source_directory.path().to_path_buf(),
             },
             target: StorageEndpointArgs::Connection {
                 connection_id: 1,
@@ -736,7 +737,7 @@ mod tests {
         assert!(spec.validate(true, JobOrigin::Manual, None).is_ok());
         let copy_with_cleanup = JobSpec::StorageOrganize(StorageOrganizeJobArgs {
             source: StorageEndpointArgs::Local {
-                path: PathBuf::from(r"C:\source"),
+                path: source_directory.path().to_path_buf(),
             },
             target: StorageEndpointArgs::Connection {
                 connection_id: 1,
