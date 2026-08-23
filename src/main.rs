@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 //! anime-organizer 命令行入口
 //!
 //! 提供默认的文件整理模式，以及用于自动化工作流的 scraper 子命令。

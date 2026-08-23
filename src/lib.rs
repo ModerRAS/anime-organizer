@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 //! # anime-organizer
 //!
 //! 轻量级、跨平台命令行工具，专为动漫收藏者批量整理视频文件。
