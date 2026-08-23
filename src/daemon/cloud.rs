@@ -410,6 +410,61 @@ impl CloudConnectionRepository {
         self.get(id)
     }
 
+    pub(crate) fn patch_credentials(
+        &self,
+        id: i64,
+        token: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
+    ) -> CloudResult<StoredCloudConnection> {
+        let token = non_empty(token);
+        let username = non_empty(username);
+        let password = non_empty(password);
+        if username.is_some() != password.is_some() {
+            return Err(CloudError::Invalid(
+                "username and password must be provided together".to_string(),
+            ));
+        }
+        if token.is_some() && username.is_some() {
+            return Err(CloudError::Invalid(
+                "choose either token or username/password authentication".to_string(),
+            ));
+        }
+        if token.as_ref().is_some_and(|value| value.len() > 16 * 1024)
+            || username.as_ref().is_some_and(|value| value.len() > 1024)
+            || password
+                .as_ref()
+                .is_some_and(|value| value.len() > 16 * 1024)
+        {
+            return Err(CloudError::Invalid(
+                "cloud credentials are too long".to_string(),
+            ));
+        }
+        let existing = self.get(id)?;
+        if existing.kind == "webdav" && token.is_some() {
+            return Err(CloudError::Invalid(
+                "WebDAV connections use optional username/password, not token".to_string(),
+            ));
+        }
+        if token.is_none() && username.is_none() {
+            return Err(CloudError::Invalid(
+                "a token or username/password login is required".to_string(),
+            ));
+        }
+        let changed = self.with_connection(|connection| {
+            connection
+                .execute(
+                    "UPDATE cloud_connections SET token = CASE WHEN ?1 IS NOT NULL THEN ?1 WHEN ?2 IS NOT NULL THEN NULL ELSE token END, username = CASE WHEN ?1 IS NOT NULL THEN NULL WHEN ?2 IS NOT NULL THEN ?2 ELSE username END, password = CASE WHEN ?1 IS NOT NULL THEN NULL WHEN ?2 IS NOT NULL THEN ?3 ELSE password END, updated_at = ?4 WHERE id = ?5",
+                    params![token, username, password, now_string(), id],
+                )
+                .map_err(|error| CloudError::Database(error.to_string()))
+        })?;
+        if changed != 1 {
+            return Err(CloudError::NotFound(id));
+        }
+        self.get(id)
+    }
+
     pub(crate) fn set_token(&self, id: i64, token: &str) -> CloudResult<()> {
         let changed = self.with_connection(|connection| {
             connection

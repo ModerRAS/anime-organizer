@@ -100,6 +100,7 @@ export const api = {
   tasks: (id?: number) => request<{ tasks: DownloadTask[] }>(`/rss/download-tasks${id ? `?subscription_id=${id}` : ''}`),
   connections: () => request<{ connections: Connection[] }>('/cloud/connections'),
   saveConnection: (value: Record<string, unknown>, id?: number) => request<Connection>(id ? `/cloud/connections/${id}` : '/cloud/connections', { method: id ? 'PUT' : 'POST', body: JSON.stringify(value) }),
+  patchCredentials: (id: number, value: Record<string, unknown>) => request<Connection>(`/cloud/connections/${id}`, { method: 'PATCH', body: JSON.stringify(value) }),
   deleteConnection: (id: number) => request<void>(`/cloud/connections/${id}`, { method: 'DELETE' }),
   testConnection: (id: number) => request<{ ok: boolean }>(`/cloud/connections/${id}/test`, { method: 'POST' }),
   listFolder: (id: number, path: string) => request<{ entries: FolderEntry[] }>(`/cloud/connections/${id}/list-folder`, { method: 'POST', body: JSON.stringify({ path }) }),

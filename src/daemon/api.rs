@@ -16,8 +16,7 @@ use axum::http::{header, HeaderValue, Request, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 #[cfg(feature = "clouddrive")]
-use axum::routing::put;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{response::IntoResponse, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
@@ -49,7 +48,9 @@ pub(crate) fn router(state: Arc<DaemonState>) -> Router {
             )
             .route(
                 "/api/v1/cloud/connections/:id",
-                put(update_cloud_connection).delete(delete_cloud_connection),
+                put(update_cloud_connection)
+                    .patch(patch_cloud_connection)
+                    .delete(delete_cloud_connection),
             )
             .route(
                 "/api/v1/cloud/connections/:id/test",
@@ -1286,6 +1287,44 @@ async fn update_cloud_connection(
         Err(error) => return cloud_error(error),
     };
     match state.cloud.repository.update(id, &request) {
+        Ok(connection) => Json(CloudConnectionView::from(&connection)).into_response(),
+        Err(error) => cloud_error(error),
+    }
+}
+
+#[cfg(feature = "clouddrive")]
+#[derive(Debug, Deserialize)]
+struct CloudCredentialsPatchRequest {
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+}
+
+#[cfg(feature = "clouddrive")]
+async fn patch_cloud_connection(
+    State(state): State<Arc<DaemonState>>,
+    Path(id): Path<i64>,
+    request: Result<Json<CloudCredentialsPatchRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Json(request) = match request {
+        Ok(request) => request,
+        Err(rejection) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "malformed_json",
+                rejection.body_text(),
+            )
+        }
+    };
+    match state.cloud.repository.patch_credentials(
+        id,
+        request.token,
+        request.username,
+        request.password,
+    ) {
         Ok(connection) => Json(CloudConnectionView::from(&connection)).into_response(),
         Err(error) => cloud_error(error),
     }

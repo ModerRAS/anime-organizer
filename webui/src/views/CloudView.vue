@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { ChevronRight, Download, Folder, RefreshCw, TestTube, Trash2 } from 'lucide-vue-next'
+import { ChevronRight, Download, Folder, Pencil, RefreshCw, TestTube, Trash2 } from 'lucide-vue-next'
 import { api, errorMessage, type Connection, type FolderEntry } from '../api'
 import { breadcrumbEntries } from '../cloud'
 import { t } from '../i18n'
@@ -16,6 +16,7 @@ const loading = ref(false)
 const busy = ref(false)
 const saving = ref(false)
 const form = ref({ kind: 'clouddrive' as 'clouddrive' | 'webdav', name: '', url: '', token: '', username: '', password: '' })
+const editing = ref<Connection | null>(null)
 const offline = ref({ url: '', target: '/' })
 const queuedJobId = ref<number | null>(null)
 
@@ -35,8 +36,23 @@ async function load() {
   }
 }
 
+function startEdit(connection: Connection) {
+  editing.value = connection
+  form.value = { kind: connection.kind, name: connection.name, url: connection.url, token: '', username: '', password: '' }
+  error.value = ''
+  notice.value = ''
+}
+
+function cancelEdit() {
+  editing.value = null
+  form.value = { kind: 'clouddrive', name: '', url: '', token: '', username: '', password: '' }
+  error.value = ''
+}
+
 async function save() {
-  if (form.value.kind === 'clouddrive' && !form.value.token && (!form.value.username || !form.value.password)) {
+  const hasExistingCredentials = editing.value ? (editing.value.has_token || (editing.value.has_username && editing.value.has_password) || editing.value.kind === 'webdav') : false
+  const hasNewCredentials = !!form.value.token || (!!form.value.username && !!form.value.password)
+  if (form.value.kind === 'clouddrive' && !hasNewCredentials && !hasExistingCredentials) {
     error.value = t('A token or username/password login is required.')
     return
   }
@@ -54,9 +70,11 @@ async function save() {
       token: form.value.kind === 'clouddrive' ? form.value.token || null : null,
       username: form.value.username || null,
       password: form.value.password || null,
-    })
+    }, editing.value?.id)
+    const wasEditing = !!editing.value
     form.value = { kind: 'clouddrive', name: '', url: '', token: '', username: '', password: '' }
-    notice.value = 'Connection saved.'
+    editing.value = null
+    notice.value = wasEditing ? 'Connection updated.' : 'Connection saved.'
     await load()
   } catch (reason) {
     error.value = errorMessage(reason)
@@ -156,6 +174,7 @@ onMounted(load)
       <td>{{ connection.name }}</td><td>{{ t(connection.kind === 'webdav' ? 'WebDAV' : 'CloudDrive') }}</td><td class="error-cell">{{ connection.url }}</td>
       <td>{{ connection.has_token ? t('Token set') : connection.has_username && connection.has_password ? t('Login set') : t('No credentials') }}</td>
       <td class="actions">
+        <button class="icon-button" type="button" :title="t('Edit connection')" :aria-label="t('Edit connection')" :disabled="busy || loading" @click="startEdit(connection)"><Pencil :size="15" aria-hidden="true" /></button>
         <button class="icon-button" type="button" :title="t('Browse folder')" :aria-label="t('Browse folder')" :disabled="busy || loading || !hasCredentials(connection)" @click="select(connection)"><Folder :size="15" aria-hidden="true" /></button>
         <button class="icon-button" type="button" :title="t('Test connection')" :aria-label="t('Test connection')" :disabled="busy || loading || !hasCredentials(connection)" @click="test(connection)"><TestTube :size="15" aria-hidden="true" /></button>
         <button class="icon-button danger-action" type="button" :title="t('Delete connection')" :aria-label="t('Delete connection')" :disabled="busy || loading" @click="remove(connection)"><Trash2 :size="15" aria-hidden="true" /></button>
@@ -164,14 +183,14 @@ onMounted(load)
     <tr v-if="!loading && !connections.length"><td colspan="5" class="empty-cell">{{ t('No connections.') }}</td></tr>
   </tbody></table></div><p v-if="loading" class="loading-line">{{ t('Loading...') }}</p></section>
 
-  <section class="section-block"><h2>{{ t('Add connection') }}</h2><form class="organize-form" @submit.prevent="save"><div class="form-grid">
+  <section class="section-block"><h2>{{ t(editing ? 'Edit connection' : 'Add connection') }}</h2><p v-if="editing" class="page-subtitle">{{ t('Editing {name} — leave token/password blank to keep existing credentials.', { name: editing.name }) }}</p><form class="organize-form" @submit.prevent="save"><div class="form-grid">
     <label class="form-field"><span>{{ t('Type') }}</span><select v-model="form.kind"><option value="clouddrive">CloudDrive</option><option value="webdav">WebDAV</option></select></label>
     <label class="form-field"><span>{{ t('Name') }}</span><input v-model="form.name" required /></label>
     <label class="form-field"><span>{{ t('Endpoint') }}</span><input v-model="form.url" type="url" required /></label>
-    <label v-if="form.kind === 'clouddrive'" class="form-field"><span>{{ t('Token') }}</span><input v-model="form.token" type="password" autocomplete="off" /></label>
-    <label class="form-field"><span>{{ t('Username') }}</span><input v-model="form.username" autocomplete="username" /></label>
-    <label class="form-field"><span>{{ t('Password') }}</span><input v-model="form.password" type="password" autocomplete="current-password" /></label>
-  </div><div class="form-actions"><button class="button primary" type="submit" :disabled="busy || loading">{{ t(saving ? 'Saving...' : 'Save connection') }}</button></div></form></section>
+    <label v-if="form.kind === 'clouddrive'" class="form-field"><span>{{ t('Token') }}</span><input v-model="form.token" type="password" autocomplete="off" :placeholder="editing ? t('Leave blank to keep existing') : ''" /></label>
+    <label class="form-field"><span>{{ t('Username') }}</span><input v-model="form.username" autocomplete="username" :placeholder="editing ? t('Leave blank to keep') : ''" /></label>
+    <label class="form-field"><span>{{ t('Password') }}</span><input v-model="form.password" type="password" autocomplete="current-password" :placeholder="editing ? t('Leave blank to keep') : ''" /></label>
+  </div><div class="form-actions"><button class="button primary" type="submit" :disabled="busy || loading">{{ t(editing ? (saving ? 'Updating...' : 'Update connection') : (saving ? 'Saving...' : 'Save connection')) }}</button><button v-if="editing" class="button secondary" type="button" :disabled="busy || loading" @click="cancelEdit">{{ t('Cancel') }}</button></div></form></section>
 
   <section v-if="selected" class="section-block">
     <h2>{{ t('Folder browser / {name}', { name: selected.name }) }}</h2>
