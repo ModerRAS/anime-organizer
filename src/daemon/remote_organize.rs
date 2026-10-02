@@ -2317,6 +2317,7 @@ mod tests {
                 ..Default::default()
             })
         }
+        #[allow(deprecated)]
         async fn move_files(&self, paths: Vec<String>, destination: &str) -> Result<()> {
             if self
                 .fail_moves
@@ -2363,6 +2364,7 @@ mod tests {
                 .push((paths, destination.to_string()));
             Ok(())
         }
+        #[allow(deprecated)]
         async fn copy_files(&self, paths: Vec<String>, destination: &str) -> Result<()> {
             if self
                 .fail_copies
@@ -2438,6 +2440,7 @@ mod tests {
             std::fs::write(destination, bytes).unwrap();
             Ok(())
         }
+        #[allow(deprecated)]
         async fn upload_file(&self, parent: &str, name: &str, source: &Path) -> Result<()> {
             let upload_call = self.upload_calls.fetch_add(1, Ordering::SeqCst) + 1;
             if self.fail_upload_at.load(Ordering::SeqCst) == upload_call
@@ -2493,6 +2496,7 @@ mod tests {
             entry.full_path_name = new_path;
             Ok(())
         }
+        #[allow(deprecated)]
         async fn sha256_file(&self, path: &str) -> Result<String> {
             if self
                 .fail_hashes
