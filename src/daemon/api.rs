@@ -16,7 +16,8 @@ use axum::http::{header, HeaderValue, Request, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 #[cfg(feature = "clouddrive")]
-use axum::routing::{delete, get, post, put};
+use axum::routing::put;
+use axum::routing::{delete, get, post};
 use axum::{response::IntoResponse, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
