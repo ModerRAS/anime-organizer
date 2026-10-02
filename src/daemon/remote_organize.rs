@@ -394,7 +394,10 @@ pub(crate) async fn organize_subscription_between_with_progress(
             let series_title = anime.series_name();
             let season = i64::from(anime.season_number().unwrap_or(1));
             let components =
-                organize_directory_components(&anime, subscription.organize_season_mode);
+                organize_directory_components(&anime, subscription.organize_season_mode)
+                    .into_iter()
+                    .map(|component| sanitize_remote_component(&component))
+                    .collect::<Vec<_>>();
             if components
                 .iter()
                 .any(|component| !safe_component(component))
@@ -2136,6 +2139,14 @@ fn safe_component(component: &str) -> bool {
     !component.is_empty()
         && !matches!(component, "." | "..")
         && !component.contains(['/', '\\', '\0'])
+}
+
+/// CloudDrive-backed storages (115, Windows semantics) silently drop trailing
+/// dots and spaces from names, so a series folder derived from a release title
+/// like "... Me ni Mienai Koi wo Shita." would be created without the final dot
+/// and every later path lookup for the unnormalized name would fail.
+fn sanitize_remote_component(component: &str) -> String {
+    component.trim_end_matches([' ', '.']).to_string()
 }
 
 fn offline_status_name(status: i32) -> &'static str {
@@ -3931,5 +3942,18 @@ mod tests {
         assert!(canonical_remote_path("/source\\child").is_none());
         assert!(validate_remote_organize_paths("/source", "/source/library").is_err());
         assert!(validate_remote_organize_paths("/source/library", "/source").is_err());
+    }
+
+    #[test]
+    fn remote_destination_components_drop_trailing_dots_and_spaces() {
+        assert_eq!(
+            sanitize_remote_component(
+                "Toumei na Yoru ni Kakeru Kimi to, Me ni Mienai Koi wo Shita."
+            ),
+            "Toumei na Yoru ni Kakeru Kimi to, Me ni Mienai Koi wo Shita"
+        );
+        assert_eq!(sanitize_remote_component("Show  "), "Show");
+        assert_eq!(sanitize_remote_component("Season 1"), "Season 1");
+        assert!(!safe_component(&sanitize_remote_component("...")));
     }
 }
