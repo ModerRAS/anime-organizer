@@ -24,7 +24,7 @@ jobs:
       - id: meta
         shell: bash
         run: |
-          base_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          base_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1 | tr -d '\r')
           branch_name="${GITHUB_REF_NAME}"
           build_version="${base_version}+${GITHUB_RUN_NUMBER}"
           echo "branch_name=${branch_name}" >> "$GITHUB_OUTPUT"
