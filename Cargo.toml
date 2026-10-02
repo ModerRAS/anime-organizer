@@ -77,4 +77,5 @@ strip = true
 
 [lints.clippy]
 result_large_err = "allow"
+double_must_use = "allow"
 
