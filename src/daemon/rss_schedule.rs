@@ -241,6 +241,7 @@ pub(crate) async fn execute_storage_organize(
         args.season_mode,
         args.remove_empty_dirs,
         args.mlip,
+        false,
         "original",
     )
     .map_err(|error| error.to_string())?;
@@ -856,6 +857,7 @@ mod tests {
             organize_season_mode: true,
             remove_empty_dirs: false,
             remote_mlip: false,
+            remote_overwrite: false,
             organize_mode: "offline".to_string(),
             organize_interval_secs: 300,
             last_organize_checked_at: None,

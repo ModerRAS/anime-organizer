@@ -31,6 +31,9 @@ pub struct Subscription {
     pub remove_empty_dirs: bool,
     /// Whether automatic organization should publish a remote MLIP library.db.
     pub remote_mlip: bool,
+    /// Whether automatic organization overwrites conflicting destination files
+    /// instead of skipping the whole bundle.
+    pub remote_overwrite: bool,
     /// Source selection for organization: `offline` correlates CloudDrive tasks;
     /// `original` scans the configured remote source directory directly.
     pub organize_mode: String,
@@ -93,6 +96,7 @@ fn subscription_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Subscripti
         remote_mlip: row.get(14)?,
         organize_mode: row.get(15)?,
         organize_target_connection_id: row.get(16)?,
+        remote_overwrite: row.get(17)?,
     })
 }
 
@@ -147,6 +151,7 @@ impl RssDatabase {
                     organize_interval_secs INTEGER NOT NULL DEFAULT 300,
                     last_organize_checked_at TIMESTAMP,
                     remote_mlip BOOLEAN NOT NULL DEFAULT 0,
+                    remote_overwrite BOOLEAN NOT NULL DEFAULT 0,
                     organize_mode TEXT NOT NULL DEFAULT 'offline',
                     organize_target_connection_id INTEGER
                 );
@@ -234,6 +239,12 @@ impl RssDatabase {
             "remote_mlip",
             "BOOLEAN NOT NULL DEFAULT 0",
         )?;
+        self.add_column_if_missing(
+            "subscriptions",
+            &subscription_columns,
+            "remote_overwrite",
+            "BOOLEAN NOT NULL DEFAULT 0",
+        )?;
 
         self.add_column_if_missing(
             "subscriptions",
@@ -267,7 +278,7 @@ impl RssDatabase {
             )
             .map_err(|e| AppError::MetadataFetchError(format!("创建下载任务索引失败: {e}")))?;
         self.conn
-            .execute_batch("PRAGMA user_version = 7")
+            .execute_batch("PRAGMA user_version = 8")
             .map_err(|e| AppError::MetadataFetchError(format!("写入 RSS schema 版本失败: {e}")))?;
 
         Ok(())
@@ -370,11 +381,11 @@ impl RssDatabase {
     fn list_subscriptions_where(&self, enabled_only: bool) -> Result<Vec<Subscription>> {
         let mut stmt = if enabled_only {
             self.conn.prepare(
-                "SELECT id, url, filter_regex, target_folder, interval_secs, enabled, last_checked_at, connection_id, auto_organize, organize_target_folder, organize_season_mode, remove_empty_dirs, organize_interval_secs, last_organize_checked_at, remote_mlip, organize_mode, organize_target_connection_id FROM subscriptions WHERE enabled = 1 ORDER BY id",
+                "SELECT id, url, filter_regex, target_folder, interval_secs, enabled, last_checked_at, connection_id, auto_organize, organize_target_folder, organize_season_mode, remove_empty_dirs, organize_interval_secs, last_organize_checked_at, remote_mlip, organize_mode, organize_target_connection_id, remote_overwrite FROM subscriptions WHERE enabled = 1 ORDER BY id",
             )
         } else {
             self.conn.prepare(
-                "SELECT id, url, filter_regex, target_folder, interval_secs, enabled, last_checked_at, connection_id, auto_organize, organize_target_folder, organize_season_mode, remove_empty_dirs, organize_interval_secs, last_organize_checked_at, remote_mlip, organize_mode, organize_target_connection_id FROM subscriptions ORDER BY id",
+                "SELECT id, url, filter_regex, target_folder, interval_secs, enabled, last_checked_at, connection_id, auto_organize, organize_target_folder, organize_season_mode, remove_empty_dirs, organize_interval_secs, last_organize_checked_at, remote_mlip, organize_mode, organize_target_connection_id, remote_overwrite FROM subscriptions ORDER BY id",
             )
         }
         .map_err(|e| AppError::MetadataFetchError(format!("查询订阅失败: {e}")))?;
@@ -392,7 +403,7 @@ impl RssDatabase {
         let mut statement = self
             .conn
             .prepare(
-                "SELECT id, url, filter_regex, target_folder, interval_secs, enabled, last_checked_at, connection_id, auto_organize, organize_target_folder, organize_season_mode, remove_empty_dirs, organize_interval_secs, last_organize_checked_at, remote_mlip, organize_mode, organize_target_connection_id FROM subscriptions WHERE enabled = 1 AND (last_checked_at IS NULL OR datetime(last_checked_at, '+' || interval_secs || ' seconds') <= CURRENT_TIMESTAMP) ORDER BY id",
+                "SELECT id, url, filter_regex, target_folder, interval_secs, enabled, last_checked_at, connection_id, auto_organize, organize_target_folder, organize_season_mode, remove_empty_dirs, organize_interval_secs, last_organize_checked_at, remote_mlip, organize_mode, organize_target_connection_id, remote_overwrite FROM subscriptions WHERE enabled = 1 AND (last_checked_at IS NULL OR datetime(last_checked_at, '+' || interval_secs || ' seconds') <= CURRENT_TIMESTAMP) ORDER BY id",
             )
             .map_err(|e| AppError::MetadataFetchError(format!("查询到期订阅失败: {e}")))?;
         let rows = statement
@@ -410,7 +421,7 @@ impl RssDatabase {
         let mut statement = self
             .conn
             .prepare(
-                "SELECT id, url, filter_regex, target_folder, interval_secs, enabled, last_checked_at, connection_id, auto_organize, organize_target_folder, organize_season_mode, remove_empty_dirs, organize_interval_secs, last_organize_checked_at, remote_mlip, organize_mode, organize_target_connection_id FROM subscriptions WHERE enabled = 1 AND auto_organize = 1 AND connection_id IS NOT NULL AND organize_target_folder IS NOT NULL AND trim(organize_target_folder) != '' AND (last_organize_checked_at IS NULL OR datetime(last_organize_checked_at, '+' || organize_interval_secs || ' seconds') <= CURRENT_TIMESTAMP) AND (organize_mode = 'original' OR EXISTS (SELECT 1 FROM download_tasks WHERE download_tasks.subscription_id = subscriptions.id AND trim(COALESCE(info_hash, '')) != '' AND COALESCE(status, 'pending') != 'completed')) ORDER BY id",
+                "SELECT id, url, filter_regex, target_folder, interval_secs, enabled, last_checked_at, connection_id, auto_organize, organize_target_folder, organize_season_mode, remove_empty_dirs, organize_interval_secs, last_organize_checked_at, remote_mlip, organize_mode, organize_target_connection_id, remote_overwrite FROM subscriptions WHERE enabled = 1 AND auto_organize = 1 AND connection_id IS NOT NULL AND organize_target_folder IS NOT NULL AND trim(organize_target_folder) != '' AND (last_organize_checked_at IS NULL OR datetime(last_organize_checked_at, '+' || organize_interval_secs || ' seconds') <= CURRENT_TIMESTAMP) AND (organize_mode = 'original' OR EXISTS (SELECT 1 FROM download_tasks WHERE download_tasks.subscription_id = subscriptions.id AND trim(COALESCE(info_hash, '')) != '' AND COALESCE(status, 'pending') != 'completed')) ORDER BY id",
             )
             .map_err(|e| AppError::MetadataFetchError(format!("查询到期整理订阅失败: {e}")))?;
         let rows = statement
@@ -426,7 +437,7 @@ impl RssDatabase {
     pub fn get_subscription(&self, id: i64) -> Result<Option<Subscription>> {
         self.conn
             .query_row(
-                "SELECT id, url, filter_regex, target_folder, interval_secs, enabled, last_checked_at, connection_id, auto_organize, organize_target_folder, organize_season_mode, remove_empty_dirs, organize_interval_secs, last_organize_checked_at, remote_mlip, organize_mode, organize_target_connection_id FROM subscriptions WHERE id = ?1",
+                "SELECT id, url, filter_regex, target_folder, interval_secs, enabled, last_checked_at, connection_id, auto_organize, organize_target_folder, organize_season_mode, remove_empty_dirs, organize_interval_secs, last_organize_checked_at, remote_mlip, organize_mode, organize_target_connection_id, remote_overwrite FROM subscriptions WHERE id = ?1",
                 params![id],
                 subscription_from_row,
             )
@@ -499,6 +510,9 @@ impl RssDatabase {
         let remote_mlip = self
             .get_subscription(id)?
             .is_some_and(|subscription| subscription.remote_mlip);
+        let remote_overwrite = self
+            .get_subscription(id)?
+            .is_some_and(|subscription| subscription.remote_overwrite);
         let organize_mode = self.get_subscription(id)?.map_or_else(
             || "offline".to_string(),
             |subscription| subscription.organize_mode,
@@ -510,6 +524,7 @@ impl RssDatabase {
             organize_season_mode,
             remove_empty_dirs,
             remote_mlip,
+            remote_overwrite,
             &organize_mode,
         )
     }
@@ -523,6 +538,9 @@ impl RssDatabase {
         remove_empty_dirs: bool,
         remote_mlip: bool,
     ) -> Result<()> {
+        let remote_overwrite = self
+            .get_subscription(id)?
+            .is_some_and(|subscription| subscription.remote_overwrite);
         let organize_mode = self.get_subscription(id)?.map_or_else(
             || "offline".to_string(),
             |subscription| subscription.organize_mode,
@@ -534,6 +552,7 @@ impl RssDatabase {
             organize_season_mode,
             remove_empty_dirs,
             remote_mlip,
+            remote_overwrite,
             &organize_mode,
         )
     }
@@ -547,6 +566,7 @@ impl RssDatabase {
         organize_season_mode: bool,
         remove_empty_dirs: bool,
         remote_mlip: bool,
+        remote_overwrite: bool,
         organize_mode: &str,
     ) -> Result<()> {
         if !matches!(organize_mode, "offline" | "original") {
@@ -571,7 +591,7 @@ impl RssDatabase {
         let changed = self
             .conn
             .execute(
-                "UPDATE subscriptions SET auto_organize = ?1, organize_target_folder = ?2, organize_season_mode = ?3, remove_empty_dirs = ?4, remote_mlip = ?5, organize_mode = ?6 WHERE id = ?7",
+                "UPDATE subscriptions SET auto_organize = ?1, organize_target_folder = ?2, organize_season_mode = ?3, remove_empty_dirs = ?4, remote_mlip = ?5, organize_mode = ?6, remote_overwrite = ?7 WHERE id = ?8",
                 params![
                     auto_organize,
                     organize_target_folder,
@@ -579,6 +599,7 @@ impl RssDatabase {
                     remove_empty_dirs,
                     remote_mlip,
                     organize_mode,
+                    remote_overwrite,
                     id
                 ],
             )
@@ -1063,7 +1084,7 @@ mod tests {
         let user_version: i32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(user_version, 7);
+        assert_eq!(user_version, 8);
 
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(subscriptions)")
@@ -1255,7 +1276,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(user_version, 7);
+        assert_eq!(user_version, 8);
     }
 
     #[test]
@@ -1499,6 +1520,7 @@ mod tests {
             true,
             false,
             true,
+            false,
             "original",
         )
         .unwrap();
@@ -1602,6 +1624,7 @@ mod tests {
             true,
             Some("/library"),
             true,
+            false,
             false,
             false,
             "original",

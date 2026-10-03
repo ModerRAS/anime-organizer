@@ -8,7 +8,7 @@ import { formatDateTime, t, type MessageParams } from '../i18n'
 const subscriptions = ref<Subscription[]>([])
 const connections = ref<Connection[]>([])
 const editing = ref<number | null>(null)
-const form = ref({ url: '', filter_regex: '', target_folder: '/', interval_secs: 300, connection_id: null as number | null, auto_organize: false, organize_target_folder: '', organize_target_connection_id: null as number | null, organize_interval_secs: 300, organize_mode: 'offline' as 'offline' | 'original', organize_season_mode: true, remove_empty_dirs: true, remote_mlip: false })
+const form = ref({ url: '', filter_regex: '', target_folder: '/', interval_secs: 300, connection_id: null as number | null, auto_organize: false, organize_target_folder: '', organize_target_connection_id: null as number | null, organize_interval_secs: 300, organize_mode: 'offline' as 'offline' | 'original', organize_season_mode: true, remove_empty_dirs: true, remote_mlip: false, remote_overwrite: false })
 const sourceConnections = computed(() => connections.value.filter(connection => connection.kind === 'clouddrive'))
 const error = ref('')
 const notice = ref<{ key: string; params?: MessageParams } | null>(null)
@@ -32,7 +32,7 @@ async function load() {
 
 function reset() {
   editing.value = null
-  form.value = { url: '', filter_regex: '', target_folder: '/', interval_secs: 300, connection_id: null, auto_organize: false, organize_target_folder: '', organize_target_connection_id: null, organize_interval_secs: 300, organize_mode: 'offline', organize_season_mode: true, remove_empty_dirs: true, remote_mlip: false }
+  form.value = { url: '', filter_regex: '', target_folder: '/', interval_secs: 300, connection_id: null, auto_organize: false, organize_target_folder: '', organize_target_connection_id: null, organize_interval_secs: 300, organize_mode: 'offline', organize_season_mode: true, remove_empty_dirs: true, remote_mlip: false, remote_overwrite: false }
 }
 
 function edit(item: Subscription) {
@@ -51,6 +51,7 @@ function edit(item: Subscription) {
     organize_season_mode: item.organize_season_mode,
     remove_empty_dirs: item.remove_empty_dirs,
     remote_mlip: item.remote_mlip,
+    remote_overwrite: item.remote_overwrite,
   }
 }
 
@@ -219,6 +220,7 @@ onMounted(load)
         <label class="checkbox-field"><input v-model="form.organize_season_mode" type="checkbox" :disabled="!form.auto_organize" /><span>{{ t('Season mode') }}</span></label>
         <label class="checkbox-field"><input v-model="form.remove_empty_dirs" type="checkbox" :disabled="!form.auto_organize" /><span>{{ t('Remove empty source folders') }}</span></label>
         <label class="checkbox-field"><input v-model="form.remote_mlip" type="checkbox" :disabled="!form.auto_organize" /><span>{{ t('Publish remote MLIP library index') }}</span></label>
+        <label class="checkbox-field"><input v-model="form.remote_overwrite" type="checkbox" :disabled="!form.auto_organize" /><span>{{ t('Overwrite conflicting destination files') }}</span></label>
       </div>
       <div class="form-actions"><button class="button secondary" type="button" :disabled="busy || loading" @click="reset">{{ t('Clear') }}</button><button class="button primary" type="submit" :disabled="busy || loading || !connections.length">{{ t(saving ? 'Saving...' : 'Save subscription') }}</button></div>
     </form>

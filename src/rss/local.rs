@@ -172,7 +172,12 @@ impl CloudDriveClientTrait for LocalStorageClient {
         })
     }
 
-    async fn move_files(&self, paths: Vec<String>, destination: &str) -> Result<()> {
+    async fn move_files(
+        &self,
+        paths: Vec<String>,
+        destination: &str,
+        overwrite: bool,
+    ) -> Result<()> {
         for path in paths {
             let name = path
                 .rsplit('/')
@@ -183,10 +188,17 @@ impl CloudDriveClientTrait for LocalStorageClient {
             let source = self.existing_path(&path)?;
             let target = self.destination_path(destination, name)?;
             if target.exists() {
-                return Err(AppError::MetadataFetchError(format!(
-                    "Local destination already exists: {}",
-                    target.display()
-                )));
+                if !overwrite {
+                    return Err(AppError::MetadataFetchError(format!(
+                        "Local destination already exists: {}",
+                        target.display()
+                    )));
+                }
+                std::fs::remove_file(&target).map_err(|error| {
+                    AppError::MetadataFetchError(format!(
+                        "Remove local overwrite target failed: {error}"
+                    ))
+                })?;
             }
             std::fs::rename(source, target).map_err(|error| {
                 AppError::MetadataFetchError(format!("Move local storage file failed: {error}"))
@@ -195,7 +207,12 @@ impl CloudDriveClientTrait for LocalStorageClient {
         Ok(())
     }
 
-    async fn copy_files(&self, paths: Vec<String>, destination: &str) -> Result<()> {
+    async fn copy_files(
+        &self,
+        paths: Vec<String>,
+        destination: &str,
+        overwrite: bool,
+    ) -> Result<()> {
         for path in paths {
             let name = path
                 .rsplit('/')
@@ -210,7 +227,9 @@ impl CloudDriveClientTrait for LocalStorageClient {
             })?;
             let mut output = tokio::fs::OpenOptions::new()
                 .write(true)
-                .create_new(true)
+                .create(true)
+                .create_new(!overwrite)
+                .truncate(true)
                 .open(target)
                 .await
                 .map_err(|error| {

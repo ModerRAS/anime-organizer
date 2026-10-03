@@ -54,13 +54,23 @@ pub trait CloudDriveClientTrait: Send + Sync {
         Err(unsupported_operation("create folder"))
     }
 
-    /// 将远程文件移动到目标目录，目标冲突时跳过
-    async fn move_files(&self, _paths: Vec<String>, _destination: &str) -> Result<()> {
+    /// 将远程文件移动到目标目录，目标冲突时按 `overwrite` 覆盖或跳过
+    async fn move_files(
+        &self,
+        _paths: Vec<String>,
+        _destination: &str,
+        _overwrite: bool,
+    ) -> Result<()> {
         Err(unsupported_operation("move files"))
     }
 
-    /// 将远程文件复制到目标目录，目标冲突时跳过
-    async fn copy_files(&self, _paths: Vec<String>, _destination: &str) -> Result<()> {
+    /// 将远程文件复制到目标目录，目标冲突时按 `overwrite` 覆盖或跳过
+    async fn copy_files(
+        &self,
+        _paths: Vec<String>,
+        _destination: &str,
+        _overwrite: bool,
+    ) -> Result<()> {
         Err(unsupported_operation("copy files"))
     }
 
@@ -101,6 +111,18 @@ pub trait CloudDriveClientTrait: Send + Sync {
 
 pub(crate) fn unsupported_operation(operation: &str) -> AppError {
     AppError::MetadataFetchError(format!("CloudDrive client does not support {operation}"))
+}
+
+/// CloudDrive conflict policy as an i32 proto enum value.
+///
+/// `MoveFileRequest::ConflictPolicy` and `CopyFileRequest::ConflictPolicy`
+/// share the same numeric values, so one helper serves both.
+fn conflict_policy(overwrite: bool) -> i32 {
+    if overwrite {
+        proto::move_file_request::ConflictPolicy::Overwrite as i32
+    } else {
+        proto::move_file_request::ConflictPolicy::Skip as i32
+    }
 }
 
 fn rpc_error(operation: &str, error: impl std::fmt::Display) -> AppError {
@@ -414,13 +436,18 @@ impl CloudDriveClientTrait for CloudDriveClient {
         })
     }
 
-    async fn move_files(&self, paths: Vec<String>, destination: &str) -> Result<()> {
+    async fn move_files(
+        &self,
+        paths: Vec<String>,
+        destination: &str,
+        overwrite: bool,
+    ) -> Result<()> {
         let channel = self.build_channel().await?;
         let mut client = proto::cloud_drive_file_srv_client::CloudDriveFileSrvClient::new(channel);
         let request = self.authenticated_request(proto::MoveFileRequest {
             the_file_paths: paths,
             dest_path: destination.to_string(),
-            conflict_policy: Some(proto::move_file_request::ConflictPolicy::Skip as i32),
+            conflict_policy: Some(conflict_policy(overwrite)),
             move_across_clouds: None,
             handle_conflict_recursively: None,
         })?;
@@ -431,13 +458,18 @@ impl CloudDriveClientTrait for CloudDriveClient {
         operation_result("MoveFile", &response.into_inner())
     }
 
-    async fn copy_files(&self, paths: Vec<String>, destination: &str) -> Result<()> {
+    async fn copy_files(
+        &self,
+        paths: Vec<String>,
+        destination: &str,
+        overwrite: bool,
+    ) -> Result<()> {
         let channel = self.build_channel().await?;
         let mut client = proto::cloud_drive_file_srv_client::CloudDriveFileSrvClient::new(channel);
         let request = self.authenticated_request(proto::CopyFileRequest {
             the_file_paths: paths,
             dest_path: destination.to_string(),
-            conflict_policy: Some(proto::copy_file_request::ConflictPolicy::Skip as i32),
+            conflict_policy: Some(conflict_policy(overwrite)),
             handle_conflict_recursively: None,
         })?;
         let response = client

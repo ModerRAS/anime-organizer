@@ -106,6 +106,7 @@ pub(crate) async fn organize_subscription_between_with_progress(
     );
 
     let original_mode = subscription.organize_mode == "original";
+    let overwrite = subscription.remote_overwrite;
     let mut tasks = db
         .list_download_tasks(subscription.id, None)
         .map_err(|error| error.to_string())?;
@@ -522,7 +523,9 @@ pub(crate) async fn organize_subscription_between_with_progress(
                 .iter()
                 .filter(|name| existing.contains_key(*name))
                 .count();
-            let action = if conflict_count == 0 {
+            let action = if overwrite || conflict_count == 0 {
+                // 覆盖模式：同名目标由 ConflictPolicy::Overwrite 在服务端替换，
+                // 规划阶段不做 SHA-256 校验，避免为确认重复反复下载两侧文件。
                 if move_sources {
                     GroupAction::Move
                 } else {
@@ -639,10 +642,11 @@ pub(crate) async fn organize_subscription_between_with_progress(
             })
             .collect::<HashSet<_>>();
         let planned_name_count = planned.iter().map(|group| group.names.len()).sum::<usize>();
-        if root_destination_names.len() != planned_name_count
-            || root_destination_names
-                .iter()
-                .any(|name| planned_destination_names.contains(name))
+        if !overwrite
+            && (root_destination_names.len() != planned_name_count
+                || root_destination_names
+                    .iter()
+                    .any(|name| planned_destination_names.contains(name)))
         {
             summary.skipped_conflicts += 1;
             progress(
@@ -762,7 +766,8 @@ pub(crate) async fn organize_subscription_between_with_progress(
                 ),
             );
             let existing = inspect_destination(target_client, &group.destination).await?;
-            if group.names.iter().any(|name| existing.contains_key(name)) {
+            // 覆盖模式下目标同名文件会被服务端替换，不需要提前冲突检查。
+            if !overwrite && group.names.iter().any(|name| existing.contains_key(name)) {
                 return Err(format!(
                     "remote destination changed before API action: destination='{}', planned_names={:?}",
                     group.destination, group.names
@@ -772,9 +777,13 @@ pub(crate) async fn organize_subscription_between_with_progress(
                 let paths = group.files.iter().map(|file| file.path.clone()).collect();
                 let copy_before_publish = subscription.remote_mlip && !copying;
                 if copying || copy_before_publish {
-                    source_client.copy_files(paths, &group.destination).await
+                    source_client
+                        .copy_files(paths, &group.destination, overwrite)
+                        .await
                 } else {
-                    source_client.move_files(paths, &group.destination).await
+                    source_client
+                        .move_files(paths, &group.destination, overwrite)
+                        .await
                 }
                 .map_err(|error| error.to_string())?;
                 let verified = if copying || copy_before_publish {
@@ -1606,6 +1615,8 @@ async fn build_remote_index_records(
         let (sha256_full, hash_source) = if let Some(hash) =
             cached_hashes.get(&(relative_path.clone(), media_size))
         {
+            // ponytail: 覆盖模式下同名同尺寸但内容不同的重发会复用旧哈希；
+            // 等真的出现同名 v2 重发再考虑强制重算。
             (hash.clone(), "reused from existing MLIP")
         } else {
             progress(
@@ -2318,7 +2329,12 @@ mod tests {
             })
         }
         #[allow(deprecated)]
-        async fn move_files(&self, paths: Vec<String>, destination: &str) -> Result<()> {
+        async fn move_files(
+            &self,
+            paths: Vec<String>,
+            destination: &str,
+            overwrite: bool,
+        ) -> Result<()> {
             if self
                 .fail_moves
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
@@ -2339,6 +2355,14 @@ mod tests {
             for path in &paths {
                 let parent = remote_parent(path).expect("mock source has a parent");
                 let name = remote_file_name(path).expect("mock source has a name");
+                if !overwrite
+                    && folders
+                        .get(destination)
+                        .is_some_and(|entries| entries.iter().any(|entry| entry.name == name))
+                {
+                    // ConflictPolicy::Skip keeps the source untouched.
+                    continue;
+                }
                 let source = folders
                     .get_mut(parent)
                     .and_then(|entries| {
@@ -2356,6 +2380,12 @@ mod tests {
                     .expect("mock source has a name")
                     .to_string();
                 entry.full_path_name = join_remote_path(destination, &entry.name);
+                if let Some(index) = destination_entries
+                    .iter()
+                    .position(|existing| existing.name == entry.name)
+                {
+                    destination_entries.remove(index);
+                }
                 destination_entries.push(entry);
             }
             self.moves
@@ -2365,7 +2395,12 @@ mod tests {
             Ok(())
         }
         #[allow(deprecated)]
-        async fn copy_files(&self, paths: Vec<String>, destination: &str) -> Result<()> {
+        async fn copy_files(
+            &self,
+            paths: Vec<String>,
+            destination: &str,
+            overwrite: bool,
+        ) -> Result<()> {
             if self
                 .fail_copies
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
@@ -2380,6 +2415,16 @@ mod tests {
             let mut folders = self.folders.lock().unwrap();
             let copied = paths
                 .iter()
+                .filter(|path| {
+                    if overwrite {
+                        return true;
+                    }
+                    // ConflictPolicy::Skip leaves conflicting destinations alone.
+                    let name = remote_file_name(path).expect("mock source has a name");
+                    !folders
+                        .get(destination)
+                        .is_some_and(|entries| entries.iter().any(|entry| entry.name == name))
+                })
                 .map(|path| {
                     let parent = remote_parent(path).expect("mock source has a parent");
                     let name = remote_file_name(path).expect("mock source has a name");
@@ -2403,6 +2448,12 @@ mod tests {
                         .lock()
                         .unwrap()
                         .insert(entry.full_path_name.clone(), bytes);
+                }
+                if let Some(index) = destination_entries
+                    .iter()
+                    .position(|existing| existing.name == entry.name)
+                {
+                    destination_entries.remove(index);
                 }
                 destination_entries.push(entry);
             }
@@ -2602,6 +2653,7 @@ mod tests {
             false,
             false,
             remote_mlip,
+            false,
             "original",
         )
         .unwrap();
@@ -3431,6 +3483,113 @@ mod tests {
                 .status
                 .as_deref(),
             Some("completed")
+        );
+    }
+
+    #[tokio::test]
+    async fn overwrite_conflict_replaces_destination_without_hash_verification() {
+        let client = MockCloud::default();
+        let source = "/source/torrent/[ANi] Test Show - 01 [1080P].mkv";
+        let target = "/library/Test Show/[ANi] Test Show - 01 [1080P].mkv";
+        client.folders.lock().unwrap().extend([
+            ("/source".to_string(), vec![file("/source/torrent", true)]),
+            (
+                "/source/torrent".to_string(),
+                vec![file_with_size(source, false, 42)],
+            ),
+            (
+                "/library".to_string(),
+                vec![file("/library/Test Show", true)],
+            ),
+            (
+                "/library/Test Show".to_string(),
+                vec![file_with_size(target, false, 41)],
+            ),
+        ]);
+        let video_bytes = vec![7; 42];
+        let expected_hash = format!("{:x}", Sha256::digest(&video_bytes));
+        client
+            .remote_bytes
+            .lock()
+            .unwrap()
+            .insert(source.to_string(), video_bytes);
+        let directory = tempfile::tempdir().unwrap();
+        let db = RssDatabase::new(&directory.path().join("rss.db")).unwrap();
+        let id = configured_mlip_subscription(&db, false);
+        db.update_subscription_organization_settings_with_mlip_and_mode(
+            id,
+            true,
+            Some("/library"),
+            false,
+            false,
+            true,
+            true,
+            "offline",
+        )
+        .unwrap();
+
+        let summary =
+            organize_subscription(&db, &db.get_subscription(id).unwrap().unwrap(), &client)
+                .await
+                .unwrap();
+
+        assert_eq!(summary.skipped_conflicts, 0);
+        assert_eq!(summary.moved_media, 1);
+        // 覆盖模式不得为了验证重复而下载两侧媒体；仅允许 MLIP 发布时的临时文件校验。
+        let hash_calls = client.hash_calls.lock().unwrap().clone();
+        assert!(
+            !hash_calls
+                .iter()
+                .any(|path| path == source || path == target),
+            "media files must not be hashed in overwrite mode: {hash_calls:?}"
+        );
+        let destination_entries = client
+            .folders
+            .lock()
+            .unwrap()
+            .get("/library/Test Show")
+            .cloned()
+            .unwrap();
+        assert_eq!(destination_entries.len(), 1);
+        assert_eq!(
+            destination_entries[0].name,
+            "[ANi] Test Show - 01 [1080P].mkv"
+        );
+        assert_eq!(destination_entries[0].size, 42);
+        assert!(client
+            .deletes
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|path| path == source));
+        assert_eq!(
+            db.list_download_tasks(id, None).unwrap()[0]
+                .status
+                .as_deref(),
+            Some("completed")
+        );
+
+        let bytes = client
+            .remote_bytes
+            .lock()
+            .unwrap()
+            .get("/library/library.db")
+            .cloned()
+            .expect("published library.db");
+        let local_db = directory.path().join("published.db");
+        std::fs::write(&local_db, bytes).unwrap();
+        let conn = rusqlite::Connection::open(local_db).unwrap();
+        let media: (String, String) = conn
+            .query_row("SELECT path, sha256_full FROM media_file", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(
+            media,
+            (
+                "Test Show/[ANi] Test Show - 01 [1080P].mkv".to_string(),
+                expected_hash
+            )
         );
     }
 

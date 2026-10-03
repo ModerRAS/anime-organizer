@@ -514,6 +514,8 @@ struct RssSubscriptionRequest {
     #[serde(default)]
     remote_mlip: Option<bool>,
     #[serde(default)]
+    remote_overwrite: Option<bool>,
+    #[serde(default)]
     organize_mode: Option<String>,
     #[serde(default)]
     organize_interval_secs: Option<i64>,
@@ -539,6 +541,7 @@ struct RssOrganizationSettings {
     organize_season_mode: bool,
     remove_empty_dirs: bool,
     remote_mlip: bool,
+    remote_overwrite: bool,
     organize_mode: String,
     organize_interval_secs: i64,
 }
@@ -567,6 +570,9 @@ fn organization_settings(
         remote_mlip: request
             .remote_mlip
             .unwrap_or_else(|| existing.is_some_and(|subscription| subscription.remote_mlip)),
+        remote_overwrite: request
+            .remote_overwrite
+            .unwrap_or_else(|| existing.is_some_and(|subscription| subscription.remote_overwrite)),
         organize_mode: request
             .organize_mode
             .clone()
@@ -807,6 +813,7 @@ async fn create_rss_subscription(
                 organization.organize_season_mode,
                 organization.remove_empty_dirs,
                 organization.auto_organize && organization.remote_mlip,
+                organization.auto_organize && organization.remote_overwrite,
                 &organization.organize_mode,
             ) {
                 return error(
@@ -921,6 +928,7 @@ async fn update_rss_subscription(
         organization.organize_season_mode,
         organization.remove_empty_dirs,
         organization.auto_organize && organization.remote_mlip,
+        organization.auto_organize && organization.remote_overwrite,
         &organization.organize_mode,
     ) {
         return error(StatusCode::NOT_FOUND, "not_found", db_error.to_string());
@@ -1728,6 +1736,7 @@ mod tests {
                     organize_season_mode: Some(true),
                     remove_empty_dirs: Some(false),
                     remote_mlip: Some(false),
+                    remote_overwrite: None,
                     organize_mode: None,
                     organize_interval_secs: Some(300),
                 })),
@@ -1749,6 +1758,7 @@ mod tests {
                     organize_season_mode: Some(true),
                     remove_empty_dirs: Some(false),
                     remote_mlip: Some(false),
+                    remote_overwrite: None,
                     organize_mode: None,
                     organize_interval_secs: Some(300),
                 })),
@@ -1771,6 +1781,7 @@ mod tests {
                     organize_season_mode: Some(true),
                     remove_empty_dirs: Some(false),
                     remote_mlip: Some(false),
+                    remote_overwrite: None,
                     organize_mode: None,
                     organize_interval_secs: Some(300),
                 })),
@@ -1798,6 +1809,7 @@ mod tests {
                     organize_season_mode: Some(true),
                     remove_empty_dirs: Some(false),
                     remote_mlip: Some(false),
+                    remote_overwrite: None,
                     organize_mode: None,
                     organize_interval_secs: Some(300),
                 })),
@@ -1847,6 +1859,7 @@ mod tests {
                     organize_season_mode: None,
                     remove_empty_dirs: None,
                     remote_mlip: None,
+                    remote_overwrite: None,
                     organize_mode: None,
                     organize_interval_secs: None,
                 })),
@@ -1951,6 +1964,7 @@ mod tests {
                     organize_season_mode: Some(true),
                     remove_empty_dirs: Some(false),
                     remote_mlip: Some(false),
+                    remote_overwrite: None,
                     organize_mode: None,
                     organize_interval_secs: Some(300),
                 })),

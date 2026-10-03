@@ -135,6 +135,7 @@ impl WebDavClient {
         method: Method,
         paths: Vec<String>,
         destination: &str,
+        overwrite: bool,
     ) -> Result<()> {
         for path in paths {
             let name = path
@@ -148,7 +149,7 @@ impl WebDavClient {
             let response = self
                 .request(method.clone(), self.url(&path)?)
                 .header("Destination", destination_url.as_str())
-                .header("Overwrite", "F")
+                .header("Overwrite", if overwrite { "T" } else { "F" })
                 .send()
                 .await
                 .map_err(|error| {
@@ -326,20 +327,32 @@ impl CloudDriveClientTrait for WebDavClient {
         })
     }
 
-    async fn move_files(&self, paths: Vec<String>, destination: &str) -> Result<()> {
+    async fn move_files(
+        &self,
+        paths: Vec<String>,
+        destination: &str,
+        overwrite: bool,
+    ) -> Result<()> {
         self.copy_or_move(
             Method::from_bytes(b"MOVE").expect("valid WebDAV method"),
             paths,
             destination,
+            overwrite,
         )
         .await
     }
 
-    async fn copy_files(&self, paths: Vec<String>, destination: &str) -> Result<()> {
+    async fn copy_files(
+        &self,
+        paths: Vec<String>,
+        destination: &str,
+        overwrite: bool,
+    ) -> Result<()> {
         self.copy_or_move(
             Method::from_bytes(b"COPY").expect("valid WebDAV method"),
             paths,
             destination,
+            overwrite,
         )
         .await
     }
