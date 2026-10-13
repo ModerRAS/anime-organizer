@@ -2,9 +2,9 @@ use anime_organizer::error::AppError;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-#[cfg(feature = "metadata")]
-use std::time::Duration;
 use std::time::Instant;
+#[cfg(feature = "metadata")]
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) mod api;
 #[cfg(feature = "clouddrive")]
@@ -20,6 +20,9 @@ pub(crate) mod worker;
 
 #[cfg(feature = "metadata")]
 const ANIMEATLAS_REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+#[cfg(feature = "metadata")]
+const BANGUMI_DUMP_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 use queue::QueueRepository;
 use worker::WorkerSnapshot;
@@ -92,6 +95,8 @@ async fn run_http(state: Arc<DaemonState>) -> Result<(), AppError> {
 
     #[cfg(feature = "metadata")]
     start_animeatlas_refresh_scheduler();
+    #[cfg(feature = "metadata")]
+    start_bangumi_dump_refresh_scheduler(state.queue.clone(), state.wake.clone());
 
     #[cfg(feature = "clouddrive")]
     rss_schedule::start_scheduler(
@@ -125,6 +130,55 @@ fn start_animeatlas_refresh_scheduler() {
 
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(feature = "metadata")]
+fn start_bangumi_dump_refresh_scheduler(queue: QueueRepository, wake: mpsc::Sender<()>) {
+    use crate::daemon::model::{EnqueueRequest, JobOrigin, JobSpec};
+
+    drop(tokio::spawn(async move {
+        let mut interval = tokio::time::interval(ANIMEATLAS_REFRESH_CHECK_INTERVAL);
+        loop {
+            interval.tick().await;
+            let client = anime_organizer::metadata::BangumiClient::new(None);
+            if bangumi_dump_is_fresh(&client) {
+                continue;
+            }
+            let request = EnqueueRequest {
+                idempotency_key: Some(format!("bangumi-dump:{}", weekly_window())),
+                origin: JobOrigin::Scheduled,
+                confirmed: false,
+                job: JobSpec::RefreshBangumiDump,
+            };
+            if let Ok(outcome) = queue.enqueue(&request) {
+                if !outcome.duplicate {
+                    let _ = wake.send(());
+                }
+            }
+        }
+    }));
+}
+
+#[cfg(feature = "metadata")]
+fn bangumi_dump_is_fresh(client: &anime_organizer::metadata::BangumiClient) -> bool {
+    let Some(path) = client.resolve_existing_dump_path() else {
+        return false;
+    };
+    let Ok(modified) = std::fs::metadata(&path).and_then(|meta| meta.modified()) else {
+        return false;
+    };
+    SystemTime::now()
+        .duration_since(modified)
+        .is_ok_and(|age| age < BANGUMI_DUMP_TTL)
+}
+
+#[cfg(feature = "metadata")]
+fn weekly_window() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        / BANGUMI_DUMP_TTL.as_secs()
 }
 
 pub(crate) fn daemon_db_path() -> PathBuf {

@@ -249,6 +249,8 @@ async fn capabilities() -> Json<CapabilitiesResponse> {
     }
     #[allow(unused_mut)]
     let mut job_types = vec!["organize", "normalize_layout", "compact_artwork_packs"];
+    #[cfg(feature = "metadata")]
+    job_types.push("refresh_bangumi_dump");
     #[cfg(feature = "scraper")]
     {
         features.push("scraper");

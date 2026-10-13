@@ -90,6 +90,8 @@ pub(crate) enum JobSpec {
     StorageOrganize(StorageOrganizeJobArgs),
     #[cfg(feature = "clouddrive")]
     CloudAddOffline(CloudAddOfflineJobArgs),
+    #[cfg(feature = "metadata")]
+    RefreshBangumiDump,
     #[cfg(feature = "scraper")]
     Scrape(crate::cli::ScrapeArgs),
     #[cfg(feature = "scraper")]
@@ -219,6 +221,8 @@ impl JobSpec {
             Self::StorageOrganize(_) => "storage_organize",
             #[cfg(feature = "clouddrive")]
             Self::CloudAddOffline(_) => "cloud_add_offline",
+            #[cfg(feature = "metadata")]
+            Self::RefreshBangumiDump => "refresh_bangumi_dump",
             #[cfg(feature = "scraper")]
             Self::Scrape(_) => "scrape",
             #[cfg(feature = "scraper")]
@@ -259,6 +263,8 @@ impl JobSpec {
     pub(crate) fn is_registered(&self) -> bool {
         match self {
             Self::Organize(_) | Self::NormalizeLayout(_) | Self::CompactArtworkPacks(_) => true,
+            #[cfg(feature = "metadata")]
+            Self::RefreshBangumiDump => true,
             #[cfg(feature = "clouddrive")]
             Self::RssPoll { .. }
             | Self::RssPollAll
@@ -993,6 +999,14 @@ mod tests {
     #[test]
     fn every_compiled_job_variant_round_trips() {
         assert_round_trip(JobSpec::Organize(organize()));
+        #[cfg(feature = "metadata")]
+        {
+            let refresh = JobSpec::RefreshBangumiDump;
+            assert!(refresh.is_registered());
+            assert!(refresh.validate(false, JobOrigin::Manual, None).is_ok());
+            assert_eq!(refresh.kind(), "refresh_bangumi_dump");
+            assert_round_trip(refresh);
+        }
         assert_round_trip(JobSpec::NormalizeLayout(crate::cli::NormalizeLayoutArgs {
             target: PathBuf::from("target"),
             dry_run: true,
