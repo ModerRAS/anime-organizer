@@ -2,9 +2,9 @@ use anime_organizer::error::AppError;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-#[cfg(feature = "metadata")]
-use std::time::Duration;
 use std::time::Instant;
+#[cfg(feature = "metadata")]
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) mod api;
 #[cfg(feature = "clouddrive")]
@@ -131,24 +131,69 @@ async fn shutdown_signal() {
 
 #[cfg(feature = "metadata")]
 fn start_bangumi_dump_refresh_scheduler(queue: QueueRepository, wake: mpsc::Sender<()>) {
+    drop(tokio::spawn(async move {
+        // 启动先看一眼：补上停机期间错过的版本。
+        check_bangumi_release(&queue, &wake).await;
+        // Bangumi 固定每周二 21:03 UTC 发版：算好下一次的点睡到那，平时零轮询。
+        let mut target = next_bangumi_release(SystemTime::now());
+        loop {
+            // 蹲点之后新版还没出来（发版延迟/网络失败）：改成每小时看一眼。
+            let wait = target
+                .duration_since(SystemTime::now())
+                .unwrap_or(Duration::ZERO);
+            tokio::time::sleep(if wait.is_zero() {
+                BANGUMI_RELEASE_RETRY
+            } else {
+                wait
+            })
+            .await;
+            // 只有本地跟上了远端，才把目标推到下周二；否则保持每小时重试。
+            if check_bangumi_release(&queue, &wake).await.is_some() {
+                target = next_bangumi_release(SystemTime::now());
+            }
+        }
+    }));
+}
+
+/// Bangumi Archive 发版日：周二（周一=0）。
+#[cfg(feature = "metadata")]
+const BANGUMI_RELEASE_WDAY_MON0: u64 = 1;
+/// 发版时刻 21:03 UTC + 10 分钟余量（等 asset 就绪）。
+#[cfg(feature = "metadata")]
+const BANGUMI_RELEASE_TOD_SECS: u64 = 21 * 3600 + 14 * 60;
+/// 蹲点扑空后的重试间隔。
+#[cfg(feature = "metadata")]
+const BANGUMI_RELEASE_RETRY: Duration = Duration::from_secs(60 * 60);
+
+/// 返回 `now` 之后最近的一个发版时刻（严格大于 `now`）。
+#[cfg(feature = "metadata")]
+fn next_bangumi_release(now: SystemTime) -> SystemTime {
+    let secs = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let days = secs / 86400;
+    let tod = secs % 86400;
+    // 1970-01-01 是周四，换算成周一=0 的星期。
+    let weekday_mon0 = (days + 3) % 7;
+    let mut ahead = (BANGUMI_RELEASE_WDAY_MON0 + 7 - weekday_mon0) % 7;
+    if ahead == 0 && tod >= BANGUMI_RELEASE_TOD_SECS {
+        ahead = 7;
+    }
+    UNIX_EPOCH + Duration::from_secs((days + ahead) * 86400 + BANGUMI_RELEASE_TOD_SECS)
+}
+
+/// 拉一次 500 字节的 latest.json：有新版就入队（同版本幂等，失败自动重试）。
+/// 本地已跟上远端时返回 `Some(版本名)`，其他情况返回 `None`。
+#[cfg(feature = "metadata")]
+async fn check_bangumi_release(queue: &QueueRepository, wake: &mpsc::Sender<()>) -> Option<String> {
     use crate::daemon::model::{EnqueueRequest, JobOrigin, JobSpec};
 
-    drop(tokio::spawn(async move {
-        let mut interval = tokio::time::interval(ANIMEATLAS_REFRESH_CHECK_INTERVAL);
-        loop {
-            interval.tick().await;
-            // 500 字节的版本轮询：Bangumi 每周二 21:03 UTC 发新 dump，有新版才入队。
-            let client = anime_organizer::metadata::BangumiClient::new(None);
-            let Ok(latest) = client.fetch_latest().await else {
-                continue;
-            };
-            if latest.name.is_empty() || client.dump_version().as_deref() == Some(&latest.name) {
-                continue;
-            }
-            let idempotency_key = format!("bangumi-dump:{}", latest.name);
-            if refresh_job_for(&queue, &idempotency_key) {
-                continue;
-            }
+    let client = anime_organizer::metadata::BangumiClient::new(None);
+    let latest = client.fetch_latest().await.ok()?;
+    if latest.name.is_empty() {
+        return None;
+    }
+    if client.dump_version().as_deref() != Some(latest.name.as_str()) {
+        let idempotency_key = format!("bangumi-dump:{}", latest.name);
+        if !refresh_job_for(queue, &idempotency_key) {
             let request = EnqueueRequest {
                 idempotency_key: Some(idempotency_key),
                 origin: JobOrigin::Scheduled,
@@ -161,7 +206,9 @@ fn start_bangumi_dump_refresh_scheduler(queue: QueueRepository, wake: mpsc::Send
                 }
             }
         }
-    }));
+        return None;
+    }
+    Some(latest.name)
 }
 
 /// 同版本已有 queued/running/succeeded 任务则跳过；failed/canceled 则重试后跳过。
@@ -205,5 +252,41 @@ pub(crate) fn daemon_db_path() -> PathBuf {
             })
             .unwrap_or_else(|| PathBuf::from("."));
         root.join("anime-organizer").join("daemon.db")
+    }
+}
+
+#[cfg(all(test, feature = "metadata"))]
+mod tests {
+    use super::*;
+
+    const TUE_00_00: u64 = 1791849600; // 2026-10-13T00:00:00Z，周二
+    const TUE_21_14: u64 = TUE_00_00 + 21 * 3600 + 14 * 60;
+
+    fn at(secs: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    fn secs(t: SystemTime) -> u64 {
+        t.duration_since(UNIX_EPOCH).unwrap().as_secs()
+    }
+
+    #[test]
+    fn next_release_is_same_tuesday_before_cutoff() {
+        // 周一 00:00 -> 本周二 21:14；周二 21:13:59 -> 当天 21:14。
+        assert_eq!(secs(next_bangumi_release(at(TUE_00_00 - 86400))), TUE_21_14);
+        assert_eq!(secs(next_bangumi_release(at(TUE_21_14 - 1))), TUE_21_14);
+    }
+
+    #[test]
+    fn next_release_rolls_to_next_week_after_cutoff() {
+        // 21:14 整点已过 -> 下周二；周三 -> 下周二。
+        assert_eq!(
+            secs(next_bangumi_release(at(TUE_21_14))),
+            TUE_21_14 + 7 * 86400
+        );
+        assert_eq!(
+            secs(next_bangumi_release(at(TUE_00_00 + 86400))),
+            TUE_21_14 + 7 * 86400
+        );
     }
 }
