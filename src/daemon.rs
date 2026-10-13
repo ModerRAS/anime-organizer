@@ -2,9 +2,9 @@ use anime_organizer::error::AppError;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Instant;
 #[cfg(feature = "metadata")]
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+use std::time::Instant;
 
 pub(crate) mod api;
 #[cfg(feature = "clouddrive")]
@@ -20,9 +20,6 @@ pub(crate) mod worker;
 
 #[cfg(feature = "metadata")]
 const ANIMEATLAS_REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
-
-#[cfg(feature = "metadata")]
-const BANGUMI_DUMP_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 use queue::QueueRepository;
 use worker::WorkerSnapshot;
@@ -140,12 +137,20 @@ fn start_bangumi_dump_refresh_scheduler(queue: QueueRepository, wake: mpsc::Send
         let mut interval = tokio::time::interval(ANIMEATLAS_REFRESH_CHECK_INTERVAL);
         loop {
             interval.tick().await;
+            // 500 字节的版本轮询：Bangumi 每周二 21:03 UTC 发新 dump，有新版才入队。
             let client = anime_organizer::metadata::BangumiClient::new(None);
-            if bangumi_dump_is_fresh(&client) {
+            let Ok(latest) = client.fetch_latest().await else {
+                continue;
+            };
+            if latest.name.is_empty() || client.dump_version().as_deref() == Some(&latest.name) {
+                continue;
+            }
+            let idempotency_key = format!("bangumi-dump:{}", latest.name);
+            if refresh_job_for(&queue, &idempotency_key) {
                 continue;
             }
             let request = EnqueueRequest {
-                idempotency_key: Some(format!("bangumi-dump:{}", weekly_window())),
+                idempotency_key: Some(idempotency_key),
                 origin: JobOrigin::Scheduled,
                 confirmed: false,
                 job: JobSpec::RefreshBangumiDump,
@@ -159,26 +164,24 @@ fn start_bangumi_dump_refresh_scheduler(queue: QueueRepository, wake: mpsc::Send
     }));
 }
 
+/// 同版本已有 queued/running/succeeded 任务则跳过；failed/canceled 则重试后跳过。
+/// 返回 `true` 表示本轮无需入队。
 #[cfg(feature = "metadata")]
-fn bangumi_dump_is_fresh(client: &anime_organizer::metadata::BangumiClient) -> bool {
-    let Some(path) = client.resolve_existing_dump_path() else {
+fn refresh_job_for(queue: &QueueRepository, idempotency_key: &str) -> bool {
+    let Ok(jobs) = queue.list(None, Some("refresh_bangumi_dump"), 10, None) else {
         return false;
     };
-    let Ok(modified) = std::fs::metadata(&path).and_then(|meta| meta.modified()) else {
+    let Some(job) = jobs
+        .iter()
+        .find(|job| job.idempotency_key.as_deref() == Some(idempotency_key))
+    else {
         return false;
     };
-    SystemTime::now()
-        .duration_since(modified)
-        .is_ok_and(|age| age < BANGUMI_DUMP_TTL)
-}
-
-#[cfg(feature = "metadata")]
-fn weekly_window() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        / BANGUMI_DUMP_TTL.as_secs()
+    use crate::daemon::model::JobState;
+    match job.state {
+        JobState::Failed | JobState::Canceled => queue.retry(job.id).is_ok(),
+        _ => true,
+    }
 }
 
 pub(crate) fn daemon_db_path() -> PathBuf {

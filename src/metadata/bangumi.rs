@@ -30,6 +30,9 @@ const BANGUMI_ARCHIVE_LATEST_JSON: &str =
 /// 默认本地 dump 文件名
 const SUBJECT_DUMP_FILENAME: &str = "subject.jsonlines";
 
+/// 本地 dump 版本 sidecar 文件名（内容为 release asset 名，如 `dump-2026-10-06.210359Z.zip`）。
+const DUMP_VERSION_FILENAME: &str = "subject.jsonlines.version";
+
 /// Bangumi Archive dump can be hundreds of MB.
 const BANGUMI_ARCHIVE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -151,9 +154,14 @@ struct BangumiEpisodeResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct BangumiArchiveLatest {
+pub struct BangumiArchiveLatest {
     #[serde(rename = "browser_download_url", alias = "download_url")]
-    download_url: String,
+    pub download_url: String,
+    /// release asset 名（如 `dump-2026-10-06.210359Z.zip`），作为 dump 版本标识。
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub digest: String,
 }
 
 /// Bangumi 分集信息。
@@ -713,12 +721,9 @@ impl BangumiClient {
         None
     }
 
-    /// 下载最新的 Bangumi Archive dump
+    /// 获取 Bangumi Archive 最新 dump 的版本信息（约 500 字节，可高频轮询）。
     #[cfg(feature = "metadata")]
-    pub async fn download_dump(&self) -> Result<PathBuf> {
-        std::fs::create_dir_all(&self.cache_dir)
-            .map_err(|e| AppError::MetadataFetchError(format!("创建缓存目录失败: {e}")))?;
-
+    pub async fn fetch_latest(&self) -> Result<BangumiArchiveLatest> {
         let latest_resp = self
             .http
             .get(BANGUMI_ARCHIVE_LATEST_JSON)
@@ -732,10 +737,27 @@ impl BangumiClient {
             )));
         }
 
-        let latest: BangumiArchiveLatest = latest_resp
+        latest_resp
             .json()
             .await
-            .map_err(|e| AppError::MetadataFetchError(format!("解析 dump 版本信息失败: {e}")))?;
+            .map_err(|e| AppError::MetadataFetchError(format!("解析 dump 版本信息失败: {e}")))
+    }
+
+    /// 本地 dump 的版本标识（下载成功时写入的 sidecar 文件内容），缺失返回 `None`。
+    pub fn dump_version(&self) -> Option<String> {
+        std::fs::read_to_string(self.cache_dir.join(DUMP_VERSION_FILENAME))
+            .ok()
+            .map(|version| version.trim().to_string())
+            .filter(|version| !version.is_empty())
+    }
+
+    /// 下载最新的 Bangumi Archive dump
+    #[cfg(feature = "metadata")]
+    pub async fn download_dump(&self) -> Result<PathBuf> {
+        std::fs::create_dir_all(&self.cache_dir)
+            .map_err(|e| AppError::MetadataFetchError(format!("创建缓存目录失败: {e}")))?;
+
+        let latest = self.fetch_latest().await?;
 
         let dump_path = self.cache_dir.join(SUBJECT_DUMP_FILENAME);
         let zip_path = self.cache_dir.join("bangumi-archive.zip.tmp");
@@ -779,6 +801,7 @@ impl BangumiClient {
         std::io::copy(&mut subject_file, &mut output)
             .map_err(|e| AppError::MetadataFetchError(format!("解压 dump 失败: {e}")))?;
         let _ = std::fs::remove_file(&zip_path);
+        let _ = std::fs::write(self.cache_dir.join(DUMP_VERSION_FILENAME), &latest.name);
 
         Ok(dump_path)
     }
@@ -940,13 +963,31 @@ mod tests {
     #[test]
     fn archive_latest_deserializes_download_url() {
         let latest: BangumiArchiveLatest = serde_json::from_str(
-            r#"{"browser_download_url":"https://github.com/bangumi/Archive/releases/download/archive/dump.zip"}"#,
+            r#"{"browser_download_url":"https://github.com/bangumi/Archive/releases/download/archive/dump.zip","name":"dump-2026-10-06.210359Z.zip","digest":"sha256:abc"}"#,
         )
         .unwrap();
 
         assert_eq!(
             latest.download_url,
             "https://github.com/bangumi/Archive/releases/download/archive/dump.zip"
+        );
+        assert_eq!(latest.name, "dump-2026-10-06.210359Z.zip");
+        assert_eq!(latest.digest, "sha256:abc");
+    }
+
+    #[test]
+    fn dump_version_round_trips_through_sidecar() {
+        let directory = tempfile::tempdir().unwrap();
+        let client = BangumiClient::new(Some(directory.path().to_path_buf()));
+        assert_eq!(client.dump_version(), None);
+        std::fs::write(
+            directory.path().join("subject.jsonlines.version"),
+            "dump-2026-10-06.210359Z.zip\n",
+        )
+        .unwrap();
+        assert_eq!(
+            client.dump_version().as_deref(),
+            Some("dump-2026-10-06.210359Z.zip")
         );
     }
 

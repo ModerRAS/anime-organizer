@@ -424,30 +424,25 @@ fn execute_refresh_bangumi_dump(queue: &QueueRepository, job_id: i64) -> Result<
     let _ = queue.append_log(job_id, "info", "Downloading latest Bangumi Archive dump");
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|error| format!("failed to create bangumi runtime: {error}"))?;
+    let client = anime_organizer::metadata::BangumiClient::new(None);
     let dump_path = runtime
-        .block_on(async {
-            anime_organizer::metadata::BangumiClient::new(None)
-                .download_dump()
-                .await
-        })
+        .block_on(async { client.download_dump().await })
         .map_err(|error| error.to_string())?;
     let size = std::fs::metadata(&dump_path)
         .map(|meta| meta.len())
         .unwrap_or(0);
+    let version = client.dump_version().unwrap_or_default();
     let _ = queue.append_log(
         job_id,
         "info",
-        &format!(
-            "Bangumi dump refreshed: {} ({} bytes)",
-            dump_path.display(),
-            size
-        ),
+        &format!("Bangumi dump refreshed: {version} ({} bytes)", size),
     );
     Ok(JobResult {
-        summary: format!("refresh_bangumi_dump completed: {size} bytes"),
+        summary: format!("refresh_bangumi_dump completed: {version} ({size} bytes)"),
         data: json!({
             "path": dump_path.display().to_string(),
             "size": size,
+            "version": version,
         }),
         artifacts: Vec::new(),
     })
