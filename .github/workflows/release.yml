@@ -19,7 +19,7 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
-            features: --features scraper,clouddrive,torrent-scraper
+            features: --features scraper,clouddrive,torrent-scraper,anifilebert
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             archive: tar.gz
@@ -27,7 +27,7 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
-            features: --features scraper,clouddrive,torrent-scraper
+            features: --features scraper,clouddrive,torrent-scraper,anifilebert
 
           # Windows
           - target: x86_64-pc-windows-msvc

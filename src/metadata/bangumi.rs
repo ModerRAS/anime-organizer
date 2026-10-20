@@ -842,15 +842,27 @@ impl BangumiClient {
     }
 
     /// 将 BangumiSubject 转为 AnimeMetadata
+    ///
+    /// `title_cn` 只收真正的中文（含汉字且不含假名）：英文 `name_cn`
+    /// （如 `Girls Band Cry`）会被丢弃，改为尝试 infobox `中文名`；
+    /// 两者都无中文时为 `None`，调用方经 `preferred_title` 回退日文原名。
     fn subject_to_metadata(&self, subject: &BangumiSubject) -> AnimeMetadata {
         let mut metadata = AnimeMetadata::new(subject.id, subject.name.clone());
 
-        metadata.title_cn = subject
-            .name_cn
+        let infobox = subject
+            .infobox
             .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(str::to_string);
+            .and_then(|infobox| WikiParser::new().parse_anime_infobox(infobox).ok());
+        metadata.title_cn = [
+            subject.name_cn.as_deref(),
+            infobox.as_ref().and_then(|info| info.name_cn.as_deref()),
+        ]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .find(|name| super::is_chinese_title(name))
+        .map(str::to_string);
         metadata.original_title = subject.name.clone();
         metadata.summary = subject.summary.clone().unwrap_or_default();
         metadata.air_date = subject.date.clone();
@@ -863,16 +875,13 @@ impl BangumiClient {
             subject.tags.iter().take(8).cloned().collect()
         };
 
-        // 解析 Wiki Infobox 提取额外信息
-        if let Some(ref infobox) = subject.infobox {
-            let parser = WikiParser::new();
-            if let Ok(info) = parser.parse_anime_infobox(infobox) {
-                if info.studio.is_some() {
-                    metadata.studio = info.studio;
-                }
-                if info.director.is_some() {
-                    metadata.director = info.director;
-                }
+        // 复用已解析的 Infobox 提取额外信息
+        if let Some(info) = infobox {
+            if info.studio.is_some() {
+                metadata.studio = info.studio;
+            }
+            if info.director.is_some() {
+                metadata.director = info.director;
             }
         }
 
@@ -1031,6 +1040,31 @@ mod tests {
         let metadata = client.subject_to_metadata(&subject);
 
         assert_eq!(metadata.title_cn, None);
+    }
+
+    #[test]
+    fn subject_to_metadata_rejects_english_name_cn() {
+        // Girls Band Cry 的 name_cn 本身就是英文，不能冒充中文。
+        let client = BangumiClient::new(None);
+        let subject = sample_subject(None);
+
+        let metadata = client.subject_to_metadata(&subject);
+
+        assert_eq!(metadata.title_cn, None);
+        assert_eq!(metadata.preferred_title(), "ガールズバンドクライ");
+    }
+
+    #[test]
+    fn subject_to_metadata_falls_back_to_infobox_chinese_name() {
+        let client = BangumiClient::new(None);
+        let mut subject = sample_subject(None);
+        subject.infobox =
+            Some("{{Infobox animanga/TVAnime\n|中文名= 少女乐队的呐喊\n}}".to_string());
+
+        let metadata = client.subject_to_metadata(&subject);
+
+        assert_eq!(metadata.title_cn.as_deref(), Some("少女乐队的呐喊"));
+        assert_eq!(metadata.preferred_title(), "少女乐队的呐喊");
     }
 
     #[test]

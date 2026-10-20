@@ -611,13 +611,8 @@ impl LibraryIndexRecord {
 
     #[cfg(feature = "metadata")]
     pub fn apply_metadata(&mut self, meta: &crate::metadata::AnimeMetadata) {
-        self.series_title = meta
-            .title_cn
-            .as_deref()
-            .map(str::trim)
-            .filter(|title| !title.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| meta.title.clone());
+        // 有中文必用中文（`preferred_title` 已保证英文 name_cn 不会冒充中文）。
+        self.series_title = meta.preferred_title();
         self.original_title = Some(meta.original_title.clone());
         if !meta.summary.is_empty() {
             self.summary = Some(meta.summary.clone());
@@ -1825,12 +1820,17 @@ fn insert_record(
     artwork_catalog: Option<(&ArtworkPacking, &HashMap<String, i64>)>,
 ) -> Result<()> {
     let series_uuid = resolve_series_uuid(conn, record)?;
+    // 无元数据的裸记录（无 external_id，如纯目录名解析结果）不得覆盖已有富标题：
+    // 否则一次不带元数据的增量更新就会把中文标题洗成罗马音目录名。
+    // ponytail: 用 CASE 参数而非第二条 SQL，语义相同但改动最小。
+    let preserve_title =
+        record.external_ids.is_empty() && series_has_external_ids(conn, &series_uuid)?;
     conn.execute(
         "INSERT INTO series \
          (uuid, title, original_title, sort_title, summary, year, series_type) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
          ON CONFLICT(uuid) DO UPDATE SET \
-         title = excluded.title, \
+         title = CASE WHEN ?8 THEN series.title ELSE excluded.title END, \
          original_title = COALESCE(excluded.original_title, series.original_title), \
          sort_title = COALESCE(excluded.sort_title, series.sort_title), \
          summary = COALESCE(excluded.summary, series.summary), \
@@ -1844,6 +1844,7 @@ fn insert_record(
             record.summary,
             record.year,
             record.series_type,
+            preserve_title,
         ],
     )
     .map_err(|e| AppError::LibraryIndexError(format!("写入 series 失败: {e}")))?;
@@ -2028,6 +2029,18 @@ fn resolve_series_uuid(conn: &Connection, record: &LibraryIndexRecord) -> Result
         return Ok(uuid);
     }
     Ok(stable_uuid("series", &normalize_key(&record.series_title)))
+}
+
+fn series_has_external_ids(conn: &Connection, uuid: &Uuid) -> Result<bool> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM series_external_id \
+             WHERE series_id = (SELECT id FROM series WHERE uuid = ?1)",
+            params![uuid.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(|e| AppError::LibraryIndexError(format!("读取 series 外部 ID 失败: {e}")))?;
+    Ok(count > 0)
 }
 
 fn root_series_uuid(conn: &Connection, relative_path: &str) -> Result<Option<Uuid>> {
@@ -2411,6 +2424,57 @@ mod staged_install_tests {
         assert_eq!(std::fs::read(&db_path).unwrap(), b"new database");
         assert!(!paths.upload.exists());
         assert!(!paths.backup.exists());
+    }
+
+    #[test]
+    fn bare_record_preserves_enriched_chinese_title() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MLIP_SCHEMA_SQL).unwrap();
+
+        let mut enriched = LibraryIndexRecord::new(
+            "进击的巨人".to_string(),
+            1,
+            1.0,
+            "进击的巨人/Season 1/01.mkv".to_string(),
+            std::path::Path::new("01.mkv"),
+        );
+        enriched.original_title = Some("進撃の巨人".to_string());
+        enriched
+            .external_ids
+            .push(ExternalId::new(ExternalProvider::Bangumi, 253395));
+        insert_record(&conn, &enriched, None).unwrap();
+
+        // 同 series 的裸记录（罗马音目录名、无 external_id）不得覆盖中文标题。
+        let bare = LibraryIndexRecord::new(
+            "Shingeki no Kyojin".to_string(),
+            1,
+            2.0,
+            "进击的巨人/Season 1/02.mkv".to_string(),
+            std::path::Path::new("02.mkv"),
+        );
+        insert_record(&conn, &bare, None).unwrap();
+
+        let title: String = conn
+            .query_row("SELECT title FROM series", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(title, "进击的巨人");
+
+        // 富记录仍可正常更新标题。
+        let mut enriched_update = LibraryIndexRecord::new(
+            "进击的巨人 最终季".to_string(),
+            1,
+            1.0,
+            "进击的巨人/Season 1/01.mkv".to_string(),
+            std::path::Path::new("01.mkv"),
+        );
+        enriched_update
+            .external_ids
+            .push(ExternalId::new(ExternalProvider::Bangumi, 253395));
+        insert_record(&conn, &enriched_update, None).unwrap();
+        let title: String = conn
+            .query_row("SELECT title FROM series", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(title, "进击的巨人 最终季");
     }
 
     #[test]

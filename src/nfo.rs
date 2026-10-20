@@ -473,7 +473,7 @@ impl From<&crate::metadata::AnimeMetadata> for TvShowNfo {
         };
 
         Self {
-            title: meta.title_cn.clone().unwrap_or_else(|| meta.title.clone()),
+            title: meta.preferred_title(),
             originaltitle: meta.original_title.clone(),
             sorttitle: None,
             plot: meta.summary.clone(),
@@ -552,6 +552,20 @@ mod tests {
         assert!(xml.contains(r#"<uniqueid type="bangumi" default="true">253395</uniqueid>"#));
         assert!(xml.contains(r#"<uniqueid type="tmdb" default="false">1429</uniqueid>"#));
         assert!(xml.contains("<value>8.5</value>"));
+    }
+
+    #[test]
+    fn tvshow_nfo_prefers_chinese_over_english_name_cn() {
+        let mut meta = sample_metadata();
+        meta.title = "ガールズバンドクライ".to_string();
+        meta.title_cn = Some("Girls Band Cry".to_string());
+        let nfo = TvShowNfo::from(&meta);
+        // 英文 name_cn 不能冒充中文，回退日文原名而非英文。
+        assert_eq!(nfo.title, "ガールズバンドクライ");
+
+        meta.title_cn = Some("少女乐队的呐喊".to_string());
+        let nfo = TvShowNfo::from(&meta);
+        assert_eq!(nfo.title, "少女乐队的呐喊");
     }
 
     #[test]
